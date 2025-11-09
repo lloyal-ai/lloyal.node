@@ -1,0 +1,6 @@
+[submodule "liblloyal"]
+	path = liblloyal
+	url = https://github.com/lloyal-ai/liblloyal.git
+[submodule "llama.cpp"]
+	path = llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git

@@ -1,0 +1,46 @@
+{
+  "name": "liblloyal-node",
+  "version": "0.1.0",
+  "description": "Thin N-API wrapper over liblloyal for Node.js - raw llama.cpp inference primitives",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "gypfile": true,
+  "scripts": {
+    "install": "node scripts/setup-headers.js",
+    "build": "npm run setup-headers && node-gyp rebuild",
+    "build:debug": "npm run setup-headers && node-gyp rebuild --debug",
+    "setup-headers": "node scripts/setup-headers.js",
+    "clean": "node-gyp clean && rm -rf include/",
+    "test": "node --test test/**/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lloyal-ai/liblloyal-node.git"
+  },
+  "keywords": [
+    "llama",
+    "llama.cpp",
+    "liblloyal",
+    "napi",
+    "native",
+    "inference",
+    "llm"
+  ],
+  "author": "lloyal.ai",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/lloyal-ai/liblloyal-node/issues"
+  },
+  "homepage": "https://github.com/lloyal-ai/liblloyal-node#readme",
+  "dependencies": {
+    "node-addon-api": "^8.5.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
