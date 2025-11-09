@@ -2,8 +2,7 @@
 build/
 prebuilds/
 *.node
-include/  # Generated symlink structure
-
+include/
 # Dependencies
 node_modules/
 
