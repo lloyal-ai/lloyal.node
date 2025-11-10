@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useFocus } from 'ink';
 import TextInput from 'ink-text-input';
 import { SessionContext, createContext, FormattedChatResult } from 'liblloyal-node';
 import { Message } from './Message.js';
@@ -24,6 +24,97 @@ interface ChatProps {
 const CONTEXT_SIZE = 2048;
 const THREADS = 4;
 
+// Text input wrapper with focus management
+const TextInputWrapper: React.FC<{
+  input: string;
+  setInput: (value: string) => void;
+  handleSubmit: (value: string) => void;
+  generating: boolean;
+  promptHistory: string[];
+  historyIndex: number;
+  setHistoryIndex: (index: number) => void;
+  tempInput: string;
+  setTempInput: (value: string) => void;
+}> = ({ input, setInput, handleSubmit, generating, promptHistory, historyIndex, setHistoryIndex, tempInput, setTempInput }) => {
+  const { isFocused } = useFocus({ autoFocus: true });
+
+  useInput((_input, key) => {
+    if (!isFocused) return;
+
+    // Cmd/Ctrl+Backspace to clear input line
+    if ((key.ctrl || key.meta) && key.backspace) {
+      setInput('');
+      return;
+    }
+
+    // Up arrow - navigate to previous prompt in history
+    if (key.upArrow && promptHistory.length > 0) {
+      if (historyIndex === -1) {
+        // Save current input before navigating
+        setTempInput(input);
+        setHistoryIndex(promptHistory.length - 1);
+        setInput(promptHistory[promptHistory.length - 1]);
+      } else if (historyIndex > 0) {
+        setHistoryIndex(historyIndex - 1);
+        setInput(promptHistory[historyIndex - 1]);
+      }
+      return;
+    }
+
+    // Down arrow - navigate to next prompt in history
+    if (key.downArrow && historyIndex !== -1) {
+      if (historyIndex < promptHistory.length - 1) {
+        setHistoryIndex(historyIndex + 1);
+        setInput(promptHistory[historyIndex + 1]);
+      } else {
+        // Back to current input
+        setHistoryIndex(-1);
+        setInput(tempInput);
+      }
+      return;
+    }
+  }, { isActive: isFocused });
+
+  return (
+    <Box>
+      <Text color="green" bold>
+        {'> '}
+      </Text>
+      <TextInput
+        value={input}
+        onChange={setInput}
+        onSubmit={handleSubmit}
+        placeholder="Type your message..."
+        focus={isFocused && !generating}
+      />
+    </Box>
+  );
+};
+
+// Clear button component
+const ClearButton: React.FC<{ onClear: () => void }> = ({ onClear }) => {
+  const { isFocused } = useFocus({ autoFocus: false });
+
+  useInput((_input, key) => {
+    if (isFocused && key.return) {
+      onClear();
+    }
+  }, { isActive: isFocused });
+
+  return (
+    <Box>
+      <Text dimColor>
+        {' • '}
+        {isFocused ? (
+          <Text backgroundColor="cyan" color="black" bold> Clear </Text>
+        ) : (
+          <Text color="gray">[Clear]</Text>
+        )}
+      </Text>
+    </Box>
+  );
+};
+
 export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
   const { exit } = useApp();
   const [ctx, setCtx] = useState<SessionContext | null>(null);
@@ -37,6 +128,11 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
   const [lastFormattedPrompt, setLastFormattedPrompt] = useState('');
   const [generator, setGenerator] = useState<AsyncGenerator<string, void, void> | null>(null);
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+
+  // Prompt history
+  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [tempInput, setTempInput] = useState('');
 
   // Extract model name from path
   const modelName = modelPath.split('/').pop()?.replace('.gguf', '') || 'Unknown';
@@ -87,11 +183,6 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
     // Space to pause/play
     if (input === ' ' && generating) {
       setPaused(!paused);
-    }
-
-    // Alt+Shift+C to clear chat (meta includes Option/Alt key in ink)
-    if (key.meta && key.shift && input.toLowerCase() === 'c' && !generating) {
-      handleClearChat();
     }
   });
 
@@ -257,6 +348,12 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
     if (!ctx || !value.trim() || generating) return;
 
     const trimmed = value.trim();
+
+    // Add to prompt history
+    setPromptHistory(prev => [...prev, trimmed]);
+    setHistoryIndex(-1);
+    setTempInput('');
+
     setInput('');
     setGenerating(true);
     setPaused(false); // Default to playing
@@ -283,6 +380,9 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       setKvCursor(0);
       setLastFormattedPrompt('');
       setTelemetry(null);
+      // Reset history navigation state
+      setHistoryIndex(-1);
+      setTempInput('');
     } catch (error) {
       console.error('[Chat] Error clearing:', error);
     }
@@ -333,18 +433,17 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       </Box>
 
       {/* Input */}
-      <Box>
-        <Text color="green" bold>
-          {'> '}
-        </Text>
-        <TextInput
-          value={input}
-          onChange={setInput}
-          onSubmit={handleSubmit}
-          placeholder="Type your message..."
-          focus={!generating}
-        />
-      </Box>
+      <TextInputWrapper
+        input={input}
+        setInput={setInput}
+        handleSubmit={handleSubmit}
+        generating={generating}
+        promptHistory={promptHistory}
+        historyIndex={historyIndex}
+        setHistoryIndex={setHistoryIndex}
+        tempInput={tempInput}
+        setTempInput={setTempInput}
+      />
 
       {/* Status Bar - below input, persists with scrolling */}
       <Box marginTop={1} justifyContent="space-between">
@@ -353,17 +452,20 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
           {generating && paused ? (
             <Text color="yellow">⏸  Paused (press Space to resume)</Text>
           ) : (
-            <Text dimColor>Ctrl+C to exit • Space to pause/play • Alt+Shift+C to clear</Text>
+            <Text dimColor>Ctrl+C to exit • Space to pause/play • Tab to navigate</Text>
           )}
         </Box>
 
-        {/* Right side: Telemetry */}
+        {/* Right side: Telemetry + Clear button */}
         {telemetry && (
           <Box>
             <Text dimColor>
               {telemetry.modelName} • context: {telemetry.kvCursor}/{telemetry.contextLimit} ({((telemetry.kvCursor / telemetry.contextLimit) * 100).toFixed(1)}%)
               {telemetry.tokensThisTurn > 0 && ` • generating: ${telemetry.tokensThisTurn} tokens`}
             </Text>
+            {(!generating || paused) && messages.length > 0 && (
+              <ClearButton onClear={handleClearChat} />
+            )}
           </Box>
         )}
       </Box>
