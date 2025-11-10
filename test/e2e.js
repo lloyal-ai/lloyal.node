@@ -10,7 +10,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const MODEL_PATH = path.join(__dirname, 'models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
+const MODEL_PATH = path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
 
 // Check if model exists
 if (!fs.existsSync(MODEL_PATH)) {

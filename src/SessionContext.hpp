@@ -85,6 +85,12 @@ private:
    */
   Napi::Value formatChat(const Napi::CallbackInfo& info);
 
+  /**
+   * Get current KV cache position (number of tokens in cache)
+   * Returns: number
+   */
+  Napi::Value kvCacheSize(const Napi::CallbackInfo& info);
+
   // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
 
   /**
@@ -116,6 +122,31 @@ private:
   // ===== PROPERTIES =====
 
   Napi::Value getVocabSize(const Napi::CallbackInfo& info);
+  Napi::Value getMemorySize(const Napi::CallbackInfo& info);
+
+  // ===== GRAMMAR-CONSTRAINED GENERATION =====
+  // (To be implemented in Phase 4)
+
+  Napi::Value getTokenScores(const Napi::CallbackInfo& info);
+  Napi::Value initGrammar(const Napi::CallbackInfo& info);
+  Napi::Value applyGrammar(const Napi::CallbackInfo& info);
+  Napi::Value acceptToken(const Napi::CallbackInfo& info);
+  Napi::Value resetGrammar(const Napi::CallbackInfo& info);
+  Napi::Value freeGrammar(const Napi::CallbackInfo& info);
+
+  // ===== KV CACHE MANAGEMENT =====
+  // (To be implemented in Phase 3)
+
+  Napi::Value kvCacheRemove(const Napi::CallbackInfo& info);
+  Napi::Value kvCacheSave(const Napi::CallbackInfo& info);
+  Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
+  Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
+
+  // ===== HELPERS =====
+  // (To be implemented in Phase 6)
+
+  Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
+  Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====
@@ -124,7 +155,14 @@ private:
   llama_context* _context = nullptr;
   bool _disposed = false;
 
-  // Helpers
+  // Grammar sampler state (persistent across tokens within a generation)
+  // Pattern matches HybridSessionContext.hpp:197-200
+  llama_sampler* _grammarSampler = nullptr;
+  std::string _currentGrammar;  // Track current grammar string to avoid re-initialization
+
+  // ===== INLINE HELPERS =====
+  // Pattern matches HybridSessionContext.hpp:170-176
+
   inline void ensureNotDisposed() {
     if (_disposed) {
       throw Napi::Error::New(Env(), "Context has been disposed");
@@ -137,6 +175,14 @@ private:
       throw Napi::Error::New(Env(), "Failed to get vocabulary");
     }
     return vocab;
+  }
+
+  inline llama_seq_id toSeqId(double id) {
+    return static_cast<llama_seq_id>(id);
+  }
+
+  inline llama_pos toPos(double pos) {
+    return static_cast<llama_pos>(pos);
   }
 };
 

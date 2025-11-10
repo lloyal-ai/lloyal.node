@@ -7,7 +7,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const MODEL_PATH = path.join(__dirname, 'models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
+const MODEL_PATH = path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
 
 // Check if model exists
 if (!fs.existsSync(MODEL_PATH)) {
@@ -139,13 +139,41 @@ async function runTests() {
     const isGreedyStop = ctx.isStopToken(greedyToken);
     console.log(`✓ Token ${greedyToken} is stop token: ${isGreedyStop}\n`);
 
-    // ===== TEST 9: Multi-turn generation =====
-    console.log('🔄 Test 9: Multi-turn generation');
+    // ===== TEST 9: KV cache operations =====
+    console.log('💾 Test 9: KV cache operations');
+
+    // Test kvCacheSize (after decode in TEST 4)
+    const initialSize = ctx.kvCacheSize();
+    console.log(`✓ kvCacheSize(): ${initialSize} (after initial decode)`);
+
+    // Test kvCacheClear
+    await ctx.kvCacheClear();
+    const afterClear = ctx.kvCacheSize();
+    console.log(`✓ kvCacheClear(): size now ${afterClear} (should be -1 for empty)`);
+
+    if (afterClear !== -1) {
+      console.warn(`⚠️  Warning: Expected -1 for empty cache, got ${afterClear}`);
+    }
+
+    // Restore state by re-decoding
+    await ctx.decode(tokens, 0);
+    const afterRestore = ctx.kvCacheSize();
+    console.log(`✓ Re-decoded tokens, size now: ${afterRestore}\n`);
+
+    // ===== TEST 10: Multi-turn generation with position tracking =====
+    console.log('🔄 Test 10: Multi-turn generation (position tracking)');
+
+    // Clear cache first
+    await ctx.kvCacheClear();
+
+    // Track position manually (Nitro pattern - don't use kvCacheSize during generation!)
+    await ctx.decode(tokens, 0);
+    let position = tokens.length;
+
     let generatedTokens = [...tokens];
     const maxTokens = 10;
 
     for (let i = 0; i < maxTokens; i++) {
-      await ctx.decode([generatedTokens[generatedTokens.length - 1]], generatedTokens.length);
       const nextToken = ctx.sample({ temperature: 0.8, seed: 42 + i });
       generatedTokens.push(nextToken);
 
@@ -153,19 +181,18 @@ async function runTests() {
         console.log(`✓ Generated ${i + 1} tokens (stopped at EOS)`);
         break;
       }
-    }
 
-    if (generatedTokens.length === tokens.length) {
-      console.log('✓ No tokens generated (model behavior)');
-    } else if (generatedTokens.length > tokens.length + maxTokens) {
-      console.log(`✓ Generated ${generatedTokens.length - tokens.length} tokens (max reached)`);
+      // Decode and manually increment position (Nitro pattern)
+      await ctx.decode([nextToken], position);
+      position += 1;
     }
 
     const generatedText = await ctx.detokenize(generatedTokens);
-    console.log(`✓ Full text: "${generatedText}"\n`);
+    console.log(`✓ Full text: "${generatedText}"`);
+    console.log(`✓ Final position: ${position}\n`);
 
-    // ===== TEST 10: Benchmarking native vs TS preparation =====
-    console.log('⏱️  Test 10: Performance check');
+    // ===== TEST 11: Benchmarking native vs TS preparation =====
+    console.log('⏱️  Test 11: Performance check');
     const iterations = 100;
 
     // Warm up

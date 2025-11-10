@@ -21,7 +21,3 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
-
-# Test outputs (ignore downloaded models, but not test/models/ which uses LFS)
-test-models/
-test/*.gguf

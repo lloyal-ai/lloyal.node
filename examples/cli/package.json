@@ -1,0 +1,27 @@
+{
+  "name": "liblloyal-cli-example",
+  "version": "0.1.0",
+  "description": "Interactive chat CLI example using liblloyal-node",
+  "type": "module",
+  "bin": {
+    "chat": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.tsx",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ink": "^5.0.1",
+    "ink-text-input": "^6.0.0",
+    "liblloyal-node": "file:../..",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
