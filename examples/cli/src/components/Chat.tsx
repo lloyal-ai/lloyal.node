@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useApp, useInput, useFocus } from 'ink';
-import TextInput from 'ink-text-input';
-import { SessionContext, createContext, FormattedChatResult } from 'liblloyal-node';
+import { SessionContext } from 'liblloyal-node';
 import { Message } from './Message.js';
+import { QuickTextInput } from './QuickTextInput.js';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -17,12 +17,10 @@ interface Telemetry {
 }
 
 interface ChatProps {
-  modelPath: string;
+  context: SessionContext;
+  contextSize: number;
+  modelName?: string;
 }
-
-// Context configuration
-const CONTEXT_SIZE = 2048;
-const THREADS = 4;
 
 // Text input wrapper with focus management
 const TextInputWrapper: React.FC<{
@@ -37,13 +35,24 @@ const TextInputWrapper: React.FC<{
   setTempInput: (value: string) => void;
 }> = ({ input, setInput, handleSubmit, generating, promptHistory, historyIndex, setHistoryIndex, tempInput, setTempInput }) => {
   const { isFocused } = useFocus({ autoFocus: true });
+  const clearingRef = useRef(false);
 
-  useInput((_input, key) => {
+  useInput((inputChar, key) => {
     if (!isFocused) return;
 
-    // Cmd/Ctrl+Backspace to clear input line
-    if ((key.ctrl || key.meta) && key.backspace) {
+    // Cmd/Ctrl+Backspace or Cmd/Ctrl+Delete - clear input
+    if ((key.ctrl || key.meta) && (key.backspace || key.delete)) {
+      clearingRef.current = true;
       setInput('');
+      setTimeout(() => { clearingRef.current = false; }, 0);
+      return;
+    }
+
+    // Prevent 'u' from Ctrl+U on Unix terminals
+    if (key.ctrl && inputChar === 'u') {
+      clearingRef.current = true;
+      setInput('');
+      setTimeout(() => { clearingRef.current = false; }, 0);
       return;
     }
 
@@ -80,9 +89,9 @@ const TextInputWrapper: React.FC<{
       <Text color="green" bold>
         {'> '}
       </Text>
-      <TextInput
+      <QuickTextInput
         value={input}
-        onChange={setInput}
+        onChange={(val) => !clearingRef.current && setInput(val)}
         onSubmit={handleSubmit}
         placeholder="Type your message..."
         focus={isFocused && !generating}
@@ -115,11 +124,12 @@ const ClearButton: React.FC<{ onClear: () => void }> = ({ onClear }) => {
   );
 };
 
-export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
+export const Chat: React.FC<ChatProps> = ({
+  context: ctx,
+  contextSize,
+  modelName = 'Model'
+}) => {
   const { exit } = useApp();
-  const [ctx, setCtx] = useState<SessionContext | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [generating, setGenerating] = useState(false);
@@ -134,42 +144,12 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [tempInput, setTempInput] = useState('');
 
-  // Extract model name from path
-  const modelName = modelPath.split('/').pop()?.replace('.gguf', '') || 'Unknown';
-
   const pausedRef = useRef(paused);
 
   // Keep ref in sync with state for auto-advance loop
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
-
-  // Initialize model
-  useEffect(() => {
-    let disposed = false;
-
-    createContext({
-      modelPath,
-      nCtx: CONTEXT_SIZE,
-      nThreads: THREADS
-    })
-      .then((context) => {
-        if (!disposed) {
-          setCtx(context);
-          setLoading(false);
-        }
-      })
-      .catch((err) => {
-        if (!disposed) {
-          setError(err.message);
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      disposed = true;
-    };
-  }, [modelPath]);
 
   // Handle keyboard shortcuts
   useInput((input, key) => {
@@ -271,7 +251,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       setTelemetry({
         kvCursor: currentPosition,
         tokensThisTurn: 0,
-        contextLimit: CONTEXT_SIZE,
+        contextLimit: contextSize,
         modelName
       });
 
@@ -387,24 +367,6 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       console.error('[Chat] Error clearing:', error);
     }
   };
-
-  if (loading) {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Text color="cyan">Loading model...</Text>
-        <Text dimColor>Model: {modelPath}</Text>
-      </Box>
-    );
-  }
-
-  if (error) {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Text color="red">Error loading model:</Text>
-        <Text>{error}</Text>
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column" padding={1}>
