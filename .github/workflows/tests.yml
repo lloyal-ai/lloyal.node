@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    name: N-API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive  # Get liblloyal and llama.cpp submodules
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake
+
+    - name: Install and build
+      run: |
+        npm ci
+        npm run build
+
+    - name: Run API tests
+      run: |
+        echo "================================"
+        echo "API Tests: Functionality + Perf"
+        echo "================================"
+        timeout 180 node test/api.js
+
+    - name: Run E2E tests
+      run: |
+        echo "=================================="
+        echo "E2E Tests: Correctness + Determinism"
+        echo "=================================="
+        timeout 240 node test/e2e.js
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-linux
+        path: |
+          build/
+          test/*.log
+

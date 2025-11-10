@@ -10,6 +10,7 @@
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
         "liblloyal/include",
+        "liblloyal/include/lloyal",
         "include"
       ],
       "dependencies": [
@@ -17,7 +18,6 @@
       ],
       "cflags!": ["-fno-exceptions", "-fno-rtti"],
       "cflags_cc!": ["-fno-exceptions", "-fno-rtti"],
-      "defines": [],
       "conditions": [
         [
           "OS=='mac'",
@@ -30,13 +30,15 @@
               "OTHER_CPLUSPLUSFLAGS": [
                 "-std=c++20",
                 "-stdlib=libc++"
+              ],
+              "LD_RUNPATH_SEARCH_PATHS": [
+                "@loader_path/../../llama.cpp/build-apple/llama.xcframework/macos-arm64_x86_64",
+                "@executable_path/../lib"
               ]
             },
             "libraries": [
-              "<(module_root_dir)/llama.cpp/build-macos/src/libllama.a",
-              "<(module_root_dir)/llama.cpp/build-macos/ggml/src/libggml-base.a",
-              "<(module_root_dir)/llama.cpp/build-macos/ggml/src/libggml-cpu.a",
-              "<(module_root_dir)/llama.cpp/build-macos/ggml/src/ggml-metal/libggml-metal.a",
+              "-F<(module_root_dir)/llama.cpp/build-apple/llama.xcframework/macos-arm64_x86_64",
+              "-framework llama",
               "-framework Accelerate",
               "-framework Foundation",
               "-framework Metal",
@@ -53,9 +55,10 @@
               "-frtti"
             ],
             "libraries": [
-              "<(module_root_dir)/llama.cpp/build/src/libllama.a",
-              "<(module_root_dir)/llama.cpp/build/ggml/src/libggml-base.a",
-              "<(module_root_dir)/llama.cpp/build/ggml/src/libggml-cpu.a"
+              "<(module_root_dir)/llama.cpp/build-linux/libllama.so"
+            ],
+            "ldflags": [
+              "-Wl,-rpath,<(module_root_dir)/llama.cpp/build-linux"
             ]
           }
         ]

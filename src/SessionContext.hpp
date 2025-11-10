@@ -23,6 +23,16 @@ public:
   SessionContext(const Napi::CallbackInfo& info);
   ~SessionContext();
 
+  /**
+   * Initialize context with model and llama_context
+   * Called by CreateContext factory function after model loading completes
+   * Pattern matches HybridSessionContext::initializeContext()
+   */
+  void initializeContext(
+    std::shared_ptr<llama_model> model,
+    llama_context* context
+  );
+
 private:
   // ===== CORE PRIMITIVES =====
 
@@ -54,6 +64,27 @@ private:
    */
   Napi::Value detokenize(const Napi::CallbackInfo& info);
 
+  /**
+   * Convert single token to text (sync, fast)
+   * Args: token (number)
+   * Returns: string
+   */
+  Napi::Value tokenToText(const Napi::CallbackInfo& info);
+
+  /**
+   * Check if token is a stop token (EOS)
+   * Args: token (number)
+   * Returns: boolean
+   */
+  Napi::Value isStopToken(const Napi::CallbackInfo& info);
+
+  /**
+   * Format messages using model's chat template
+   * Args: messagesJson (string), templateOverride (optional string)
+   * Returns: Promise<{ prompt: string, stopTokens: string[] }>
+   */
+  Napi::Value formatChat(const Napi::CallbackInfo& info);
+
   // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
 
   /**
@@ -68,6 +99,13 @@ private:
    */
   Napi::Value greedySample(const Napi::CallbackInfo& info);
 
+  /**
+   * Native sampling with full parameters (for benchmarking)
+   * Args: params (optional object with temperature, topK, topP, etc.)
+   * Returns: number (token ID)
+   */
+  Napi::Value sample(const Napi::CallbackInfo& info);
+
   // ===== LIFECYCLE =====
 
   /**
@@ -78,9 +116,6 @@ private:
   // ===== PROPERTIES =====
 
   Napi::Value getVocabSize(const Napi::CallbackInfo& info);
-
-  // Allow CreateContext to initialize members
-  friend Napi::Value CreateContext(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====

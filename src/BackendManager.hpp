@@ -33,10 +33,13 @@ private:
    * Called exactly once by ensureInitialized()
    */
   BackendManager() {
+    std::cout << "[BackendManager] Initializing llama.cpp backend..." << std::endl;
+
+    // Initialize llama backend (matches Nitro's LlamaBackendManager exactly)
     llama_backend_init();
     std::cout << "[BackendManager] llama_backend_init() called" << std::endl;
 
-    // Set up global llama.cpp logger
+    // Match Nitro: Enable logging callback
     llama_log_set([](ggml_log_level level, const char* text, void* user_data) {
       const char* level_str = "";
       switch (level) {
@@ -47,10 +50,10 @@ private:
         case GGML_LOG_LEVEL_NONE: level_str = "NONE"; break;
         case GGML_LOG_LEVEL_CONT: level_str = "CONT"; break;
       }
-      std::cout << "[llama.cpp " << level_str << "] " << text;
+      std::cerr << "[llama.cpp " << level_str << "] " << text << std::flush;
     }, nullptr);
 
-    std::cout << "[BackendManager] Global llama.cpp logger configured" << std::endl;
+    std::cout << "[BackendManager] llama.cpp logging configured" << std::endl;
   }
 
   /**

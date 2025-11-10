@@ -6,12 +6,14 @@
   "types": "lib/index.d.ts",
   "gypfile": true,
   "scripts": {
-    "install": "node scripts/setup-headers.js",
-    "build": "npm run setup-headers && node-gyp rebuild",
-    "build:debug": "npm run setup-headers && node-gyp rebuild --debug",
-    "setup-headers": "node scripts/setup-headers.js",
-    "clean": "node-gyp clean && rm -rf include/",
-    "test": "node --test test/**/*.test.js"
+    "prepare": "bash scripts/build-llama.sh",
+    "install": "node scripts/setup-headers.js && node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple",
+    "test": "npm run test:api && npm run test:e2e",
+    "test:api": "node test/api.js",
+    "test:e2e": "node test/e2e.js"
   },
   "repository": {
     "type": "git",

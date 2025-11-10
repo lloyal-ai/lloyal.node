@@ -9,9 +9,13 @@ Thin N-API wrapper over [liblloyal](https://github.com/lloyal-ai/liblloyal) for 
 - **Native Reference**: Includes native entropy/greedy implementations for testing
 - **TypeScript**: Full type definitions included
 
-## Primary Use Case
+## Use Cases
 
-Integration testing for [tsampler](../tsampler) - validates TypeScript sampler implementations against native references.
+A minimal Node.js binding for llama.cpp inference, suitable for:
+- **Testing & Validation**: Compare TypeScript implementations against native references
+- **Serverless Deployments**: Lightweight footprint for edge compute and Lambda-style functions
+- **Automation & CI**: Build deterministic test suites for LLM-powered workflows
+- **Research & Prototyping**: Direct access to llama.cpp primitives without framework overhead
 
 ## Installation
 
@@ -28,26 +32,20 @@ npm install liblloyal-node
 ## Building from Source
 
 ```bash
-# 1. Clone with submodules
+# Clone with submodules
 git clone --recursive https://github.com/lloyal-ai/liblloyal-node.git
 cd liblloyal-node
 
-# 2. Build llama.cpp (one-time setup)
-cd llama.cpp
-cmake -B build-macos -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build-macos -j
-cd ..
-
-# This builds multiple static libraries:
-# - libllama.a (3.4M) - main llama.cpp library
-# - libggml-base.a (806K) - base GGML operations
-# - libggml-cpu.a (831K) - CPU-specific implementations
-# - libggml-metal.a (728K) - Metal GPU support (macOS)
-
-# 3. Build N-API addon
-npm install  # Automatically runs setup-headers.js to create symlinks
+# Build (automatically builds llama.cpp for your platform)
+npm install
 npm run build
 ```
+
+The `npm install` step automatically:
+- **Linux**: Builds llama.cpp as a single shared library (`.so`)
+- **macOS**: Builds llama.cpp XCFramework (uses upstream script)
+
+**Why single combined library?** N-API requires llama.cpp to be built as a single shared library rather than separate static libraries. This ensures proper symbol resolution and prevents initialization issues with static globals.
 
 ### How Include Paths Work
 
@@ -67,6 +65,28 @@ These symlinks are **gitignored** and regenerated on each `npm install`. This ap
 
 ```bash
 git submodule update --init --recursive
+```
+
+### Test Models (Git LFS)
+
+The test suite uses [Git LFS](https://git-lfs.com/) to track the SmolLM2 model (~1GB). Install Git LFS before cloning:
+
+```bash
+# Install Git LFS (one-time setup)
+brew install git-lfs  # macOS
+# or: sudo apt-get install git-lfs  # Linux
+
+# Initialize Git LFS
+git lfs install
+
+# Clone with LFS files
+git clone --recursive https://github.com/lloyal-ai/liblloyal-node.git
+```
+
+If you already cloned without LFS, pull the model:
+
+```bash
+git lfs pull
 ```
 
 ## Usage
@@ -202,9 +222,18 @@ npm run clean
 # Debug build (with symbols)
 npm run build:debug
 
-# Run tests (once implemented)
-npm test
+# Run tests
+npm test              # Run all tests (API + E2E)
+npm run test:api      # API functionality and benchmarks
+npm run test:e2e      # Correctness and determinism validation
 ```
+
+### Tests
+
+- **`test/api.js`**: API functionality tests and performance benchmarks
+- **`test/e2e.js`**: End-to-end validation with deterministic output checks
+
+Tests use SmolLM2-1.7B-Instruct with chat templates to simulate real-world usage patterns.
 
 ## License
 
