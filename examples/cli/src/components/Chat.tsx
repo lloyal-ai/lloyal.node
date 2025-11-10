@@ -9,9 +9,20 @@ interface ChatMessage {
   content: string;
 }
 
+interface Telemetry {
+  kvCursor: number;
+  tokensThisTurn: number;
+  contextLimit: number;
+  modelName: string;
+}
+
 interface ChatProps {
   modelPath: string;
 }
+
+// Context configuration
+const CONTEXT_SIZE = 2048;
+const THREADS = 4;
 
 export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
   const { exit } = useApp();
@@ -25,6 +36,10 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
   const [kvCursor, setKvCursor] = useState(0);
   const [lastFormattedPrompt, setLastFormattedPrompt] = useState('');
   const [generator, setGenerator] = useState<AsyncGenerator<string, void, void> | null>(null);
+  const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+
+  // Extract model name from path
+  const modelName = modelPath.split('/').pop()?.replace('.gguf', '') || 'Unknown';
 
   const pausedRef = useRef(paused);
 
@@ -39,8 +54,8 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
 
     createContext({
       modelPath,
-      nCtx: 2048,
-      nThreads: 4
+      nCtx: CONTEXT_SIZE,
+      nThreads: THREADS
     })
       .then((context) => {
         if (!disposed) {
@@ -74,8 +89,8 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       setPaused(!paused);
     }
 
-    // 'c' to clear chat
-    if (input === 'c' && !generating) {
+    // Alt+Shift+C to clear chat (meta includes Option/Alt key in ink)
+    if (key.meta && key.shift && input.toLowerCase() === 'c' && !generating) {
       handleClearChat();
     }
   });
@@ -95,6 +110,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
             setGenerating(false);
             setGenerator(null);
             setPaused(false);
+            setTelemetry(prev => prev ? { ...prev, tokensThisTurn: 0 } : null);
             break;
           }
 
@@ -105,6 +121,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
           setGenerating(false);
           setGenerator(null);
           setPaused(false);
+          setTelemetry(prev => prev ? { ...prev, tokensThisTurn: 0 } : null);
           setMessages(prev => {
             const updated = [...prev];
             if (updated.length > 0) {
@@ -159,7 +176,16 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       // Update state with new formatted prompt
       setLastFormattedPrompt(fullPrompt);
 
+      // Initialize telemetry for this turn
+      setTelemetry({
+        kvCursor: currentPosition,
+        tokensThisTurn: 0,
+        contextLimit: CONTEXT_SIZE,
+        modelName
+      });
+
       // Generate tokens until model stop token
+      let tokensThisTurn = 0;
       while (true) {
         // Sample next token
         const tokenId = ctx.sample({
@@ -177,6 +203,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
         // Convert token to text
         const text = ctx.tokenToText(tokenId);
         responseText += text;
+        tokensThisTurn += 1;
 
         // Update the assistant message in real-time
         setMessages(prev => {
@@ -190,6 +217,13 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
         // Decode the new token
         await ctx.decode([tokenId], currentPosition);
         currentPosition += 1;
+
+        // Update telemetry
+        setTelemetry(prev => prev ? {
+          ...prev,
+          kvCursor: currentPosition,
+          tokensThisTurn
+        } : null);
 
         // YIELD control back - wait for next() call from auto-advance
         yield text;
@@ -248,6 +282,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
       setMessages([]);
       setKvCursor(0);
       setLastFormattedPrompt('');
+      setTelemetry(null);
     } catch (error) {
       console.error('[Chat] Error clearing:', error);
     }
@@ -278,17 +313,7 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
         <Text bold color="cyan">
           liblloyal-node Chat
         </Text>
-        <Text dimColor> • Ctrl+C to exit • Space to pause/play • 'c' to clear</Text>
       </Box>
-
-      {/* Status */}
-      {generating && (
-        <Box marginBottom={1}>
-          <Text color={paused ? "yellow" : "green"}>
-            {paused ? "⏸  Paused (press Space to resume)" : "▶  Generating..."}
-          </Text>
-        </Box>
-      )}
 
       {/* Messages */}
       <Box flexDirection="column" marginBottom={1}>
@@ -298,7 +323,12 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
           </Box>
         )}
         {messages.map((msg, i) => (
-          <Message key={i} role={msg.role} content={msg.content} />
+          <Message
+            key={i}
+            role={msg.role}
+            content={msg.content}
+            isGenerating={generating && i === messages.length - 1 && msg.role === 'assistant'}
+          />
         ))}
       </Box>
 
@@ -314,6 +344,28 @@ export const Chat: React.FC<ChatProps> = ({ modelPath }) => {
           placeholder="Type your message..."
           focus={!generating}
         />
+      </Box>
+
+      {/* Status Bar - below input, persists with scrolling */}
+      <Box marginTop={1} justifyContent="space-between">
+        {/* Left side: Instructions or pause status */}
+        <Box>
+          {generating && paused ? (
+            <Text color="yellow">⏸  Paused (press Space to resume)</Text>
+          ) : (
+            <Text dimColor>Ctrl+C to exit • Space to pause/play • Alt+Shift+C to clear</Text>
+          )}
+        </Box>
+
+        {/* Right side: Telemetry */}
+        {telemetry && (
+          <Box>
+            <Text dimColor>
+              {telemetry.modelName} • context: {telemetry.kvCursor}/{telemetry.contextLimit} ({((telemetry.kvCursor / telemetry.contextLimit) * 100).toFixed(1)}%)
+              {telemetry.tokensThisTurn > 0 && ` • generating: ${telemetry.tokensThisTurn} tokens`}
+            </Text>
+          </Box>
+        )}
       </Box>
     </Box>
   );
