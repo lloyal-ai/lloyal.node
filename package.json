@@ -6,6 +6,7 @@
   "types": "lib/index.d.ts",
   "gypfile": true,
   "scripts": {
+    "preinstall": "node scripts/init-submodules.js",
     "prepare": "bash scripts/build-llama.sh",
     "install": "node scripts/setup-headers.js && node-gyp rebuild",
     "build": "node-gyp rebuild",

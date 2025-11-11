@@ -23,25 +23,34 @@ A minimal Node.js binding for llama.cpp inference, suitable for:
 npm install liblloyal-node
 ```
 
+Or install from GitHub:
+
+```bash
+npm install github:lloyal-ai/liblloyal-node
+```
+
+**Note:** Git submodules (`liblloyal` and `llama.cpp`) are automatically initialized during installation via the `preinstall` script.
+
 ### Prerequisites
 
 - Node.js ≥18
 - C++20 compiler
-- Pre-built llama.cpp library (see below)
+- Git (for submodule initialization)
 
 ## Building from Source
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/lloyal-ai/liblloyal-node.git
+# Clone (submodules will be initialized automatically during npm install)
+git clone https://github.com/lloyal-ai/liblloyal-node.git
 cd liblloyal-node
 
-# Build (automatically builds llama.cpp for your platform)
+# Build (automatically initializes submodules and builds llama.cpp)
 npm install
 npm run build
 ```
 
 The `npm install` step automatically:
+- **Initializes git submodules** (`liblloyal` and `llama.cpp`) via `preinstall` script
 - **Linux**: Builds llama.cpp as a single shared library (`.so`)
 - **macOS**: Builds llama.cpp XCFramework (uses upstream script)
 
