@@ -35,6 +35,17 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
         cd "$LLAMA_DIR"
         BUILD_DIR="build-apple"
 
+        # Detect CI environment and disable Metal (virtualized macOS has no real GPU)
+        if [ -n "$CI" ]; then
+            echo "CI detected - building without Metal (CPU only)"
+            METAL_ENABLED=OFF
+            METAL_LIBS=""
+        else
+            echo "Local build - enabling Metal for GPU acceleration"
+            METAL_ENABLED=ON
+            METAL_LIBS="$BUILD_DIR/ggml/src/ggml-metal/libggml-metal.a"
+        fi
+
         echo "Building static libraries with CMake..."
         cmake -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
@@ -45,7 +56,7 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
             -DLLAMA_BUILD_SERVER=OFF \
             -DLLAMA_BUILD_COMMON=OFF \
             -DLLAMA_CURL=OFF \
-            -DGGML_METAL=ON \
+            -DGGML_METAL=$METAL_ENABLED \
             -DGGML_BLAS=ON \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -S .
@@ -54,21 +65,39 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
 
         echo "Combining static libraries into single shared library..."
         # Combine all static libs like build-xcframework.sh does
-        libtool -static -o "$BUILD_DIR/libllama-combined.a" \
-            "$BUILD_DIR/src/libllama.a" \
-            "$BUILD_DIR/ggml/src/libggml.a" \
-            "$BUILD_DIR/ggml/src/libggml-base.a" \
-            "$BUILD_DIR/ggml/src/libggml-cpu.a" \
-            "$BUILD_DIR/ggml/src/ggml-metal/libggml-metal.a" \
-            "$BUILD_DIR/ggml/src/ggml-blas/libggml-blas.a"
+        if [ "$METAL_ENABLED" = "ON" ]; then
+            libtool -static -o "$BUILD_DIR/libllama-combined.a" \
+                "$BUILD_DIR/src/libllama.a" \
+                "$BUILD_DIR/ggml/src/libggml.a" \
+                "$BUILD_DIR/ggml/src/libggml-base.a" \
+                "$BUILD_DIR/ggml/src/libggml-cpu.a" \
+                "$BUILD_DIR/ggml/src/ggml-metal/libggml-metal.a" \
+                "$BUILD_DIR/ggml/src/ggml-blas/libggml-blas.a"
+        else
+            libtool -static -o "$BUILD_DIR/libllama-combined.a" \
+                "$BUILD_DIR/src/libllama.a" \
+                "$BUILD_DIR/ggml/src/libggml.a" \
+                "$BUILD_DIR/ggml/src/libggml-base.a" \
+                "$BUILD_DIR/ggml/src/libggml-cpu.a" \
+                "$BUILD_DIR/ggml/src/ggml-blas/libggml-blas.a"
+        fi
 
         # Create single shared library with proper install_name
-        clang++ -dynamiclib \
-            -arch arm64 -arch x86_64 \
-            -Wl,-force_load,"$BUILD_DIR/libllama-combined.a" \
-            -framework Foundation -framework Metal -framework Accelerate \
-            -install_name "@rpath/libllama.dylib" \
-            -o "$BUILD_DIR/libllama.dylib"
+        if [ "$METAL_ENABLED" = "ON" ]; then
+            clang++ -dynamiclib \
+                -arch arm64 -arch x86_64 \
+                -Wl,-force_load,"$BUILD_DIR/libllama-combined.a" \
+                -framework Foundation -framework Metal -framework Accelerate \
+                -install_name "@rpath/libllama.dylib" \
+                -o "$BUILD_DIR/libllama.dylib"
+        else
+            clang++ -dynamiclib \
+                -arch arm64 -arch x86_64 \
+                -Wl,-force_load,"$BUILD_DIR/libllama-combined.a" \
+                -framework Foundation -framework Accelerate \
+                -install_name "@rpath/libllama.dylib" \
+                -o "$BUILD_DIR/libllama.dylib"
+        fi
 
         echo "✓ Combined shared library created: $BUILD_DIR/libllama.dylib"
         cd -
@@ -79,6 +108,35 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
     mkdir -p "$RELEASE_DIR"
     cp "$LLAMA_DIR/build-apple/libllama.dylib" "$RELEASE_DIR/libllama.dylib"
     echo "✓ Copied libllama.dylib to $RELEASE_DIR/"
+elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" == "win32"* ]]; then
+    echo "Building llama.cpp for Windows..."
+    if [ ! -f "$LLAMA_DIR/build-windows/llama.dll" ]; then
+        cd "$LLAMA_DIR"
+        BUILD_DIR="build-windows"
+
+        echo "Building with CMake for Windows..."
+        cmake -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_COMMON=OFF \
+            -DLLAMA_CURL=OFF \
+            -S .
+
+        cmake --build "$BUILD_DIR" --config Release
+
+        echo "✓ Shared library created: $BUILD_DIR/bin/Release/llama.dll"
+        cd -
+    fi
+
+    # Copy DLL to build/Release/ for node-gyp (needed for dynamic linking)
+    RELEASE_DIR="build/Release"
+    mkdir -p "$RELEASE_DIR"
+    cp "$LLAMA_DIR/build-windows/bin/Release/llama.dll" "$RELEASE_DIR/llama.dll"
+    echo "✓ Copied llama.dll to $RELEASE_DIR/"
 else
     echo "Unsupported platform: $OSTYPE"
     exit 1

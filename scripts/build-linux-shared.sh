@@ -3,11 +3,20 @@
 # Build llama.cpp as a single shared library (.so) for Linux
 # This mirrors the XCFramework approach to avoid ODR violations in N-API
 #
-# Run from liblloyal-node root: ./scripts/build-linux-shared.sh
+# Usage: ./scripts/build-linux-shared.sh [llama_dir]
+# Args:
+#   llama_dir: Path to llama.cpp source (default: llama.cpp)
 
 set -e
 
-cd llama.cpp
+LLAMA_DIR="${1:-llama.cpp}"
+
+if [ ! -d "$LLAMA_DIR" ]; then
+    echo "Error: llama.cpp directory not found: $LLAMA_DIR"
+    exit 1
+fi
+
+cd "$LLAMA_DIR"
 
 BUILD_DIR="build-linux"
 COMMON_C_FLAGS="-O3 -DNDEBUG"
