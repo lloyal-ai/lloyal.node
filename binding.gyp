@@ -58,6 +58,23 @@
               "-Wl,-rpath,$$ORIGIN"
             ]
           }
+        ],
+        [
+          "OS=='win'",
+          {
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "ExceptionHandling": 1,
+                "RuntimeTypeInfo": "true",
+                "AdditionalOptions": [
+                  "/std:c++20"
+                ]
+              }
+            },
+            "libraries": [
+              "<(module_root_dir)/build/Release/llama.dll"
+            ]
+          }
         ]
       ]
     }

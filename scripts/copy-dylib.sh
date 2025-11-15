@@ -41,6 +41,15 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
         echo "Run: bash scripts/build-llama.sh"
         exit 1
     fi
+elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" == "win32"* ]]; then
+    if [ -f "$LLAMA_DIR/build-windows/bin/Release/llama.dll" ]; then
+        cp "$LLAMA_DIR/build-windows/bin/Release/llama.dll" build/Release/
+        echo "✓ Copied llama.dll to build/Release/"
+    else
+        echo "Error: llama.dll not found at $LLAMA_DIR/build-windows/bin/Release/"
+        echo "Run: bash scripts/build-llama.sh"
+        exit 1
+    fi
 else
     echo "Error: Unsupported platform: $OSTYPE"
     exit 1
