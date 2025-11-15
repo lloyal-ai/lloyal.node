@@ -73,7 +73,7 @@
               }
             },
             "libraries": [
-              "<(module_root_dir)/build/Release/llama.dll"
+              "<(module_root_dir)/build/Release/llama.lib"
             ]
           }
         ]
