@@ -32,11 +32,11 @@
                 "-stdlib=libc++"
               ],
               "OTHER_LDFLAGS": [
-                "-Wl,-rpath,<!@(node -p \"require('fs').existsSync('vendor/llama.cpp') ? '<(module_root_dir)/vendor/llama.cpp/build-apple' : '<(module_root_dir)/llama.cpp/build-apple'\")"
+                "-Wl,-rpath,@loader_path"
               ]
             },
             "libraries": [
-              "<!@(node -p \"require('fs').existsSync('vendor/llama.cpp') ? '<(module_root_dir)/vendor/llama.cpp/build-apple/libllama.dylib' : '<(module_root_dir)/llama.cpp/build-apple/libllama.dylib'\")",
+              "<(module_root_dir)/build/Release/libllama.dylib",
               "-framework Accelerate",
               "-framework Foundation",
               "-framework Metal"
@@ -52,10 +52,10 @@
               "-frtti"
             ],
             "libraries": [
-              "<!@(node -p \"require('fs').existsSync('vendor/llama.cpp') ? '<(module_root_dir)/vendor/llama.cpp/build-linux/libllama.so' : '<(module_root_dir)/llama.cpp/build-linux/libllama.so'\")"
+              "<(module_root_dir)/build/Release/libllama.so"
             ],
             "ldflags": [
-              "-Wl,-rpath,<!@(node -p \"require('fs').existsSync('vendor/llama.cpp') ? '<(module_root_dir)/vendor/llama.cpp/build-linux' : '<(module_root_dir)/llama.cpp/build-linux'\")"
+              "-Wl,-rpath,$$ORIGIN"
             ]
           }
         ]
