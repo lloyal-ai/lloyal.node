@@ -22,9 +22,13 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     echo "Building llama.cpp for Linux..."
     if [ ! -f "$LLAMA_DIR/build-linux/libllama.so" ]; then
         ./scripts/build-linux-shared.sh "$LLAMA_DIR"
-    else
-        echo "✓ llama.cpp already built ($LLAMA_DIR/build-linux/libllama.so exists)"
     fi
+
+    # Copy .so to build/Release/ for node-gyp (needed for dynamic linking)
+    RELEASE_DIR="build/Release"
+    mkdir -p "$RELEASE_DIR"
+    cp "$LLAMA_DIR/build-linux/libllama.so" "$RELEASE_DIR/libllama.so"
+    echo "✓ Copied libllama.so to $RELEASE_DIR/"
 elif [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Building llama.cpp for macOS..."
     if [ ! -f "$LLAMA_DIR/build-apple/libllama.dylib" ]; then
@@ -68,9 +72,13 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
 
         echo "✓ Combined shared library created: $BUILD_DIR/libllama.dylib"
         cd -
-    else
-        echo "✓ llama.cpp already built ($LLAMA_DIR/build-apple/libllama.dylib exists)"
     fi
+
+    # Copy .dylib to build/Release/ for node-gyp (needed for dynamic linking)
+    RELEASE_DIR="build/Release"
+    mkdir -p "$RELEASE_DIR"
+    cp "$LLAMA_DIR/build-apple/libllama.dylib" "$RELEASE_DIR/libllama.dylib"
+    echo "✓ Copied libllama.dylib to $RELEASE_DIR/"
 else
     echo "Unsupported platform: $OSTYPE"
     exit 1
