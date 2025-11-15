@@ -1,7 +1,7 @@
 {
   "name": "liblloyal-cli-example",
   "version": "0.1.0",
-  "description": "Interactive chat CLI example using liblloyal-node",
+  "description": "Interactive chat CLI example using lloyal.node",
   "type": "module",
   "bin": {
     "chat": "./dist/index.js"
@@ -16,7 +16,7 @@
     "ink": "^5.0.1",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
-    "liblloyal-node": "file:../..",
+    "lloyal.node": "file:../..",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "react": "^18.3.1"

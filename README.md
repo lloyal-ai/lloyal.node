@@ -1,4 +1,4 @@
-# liblloyal-node
+# lloyal.node
 
 Thin N-API wrapper over [liblloyal](https://github.com/lloyal-ai/liblloyal) for Node.js - raw llama.cpp inference primitives.
 
@@ -20,7 +20,7 @@ A minimal Node.js binding for llama.cpp inference, suitable for:
 ## Installation
 
 ```bash
-npm install liblloyal-node
+npm install lloyal.node
 ```
 
 **Note:** This package includes vendored sources for `liblloyal` and `llama.cpp` dependencies. First install will compile C++ code and take 5-15 minutes.
@@ -104,7 +104,7 @@ git lfs pull
 ## Usage
 
 ```typescript
-import { createContext } from 'liblloyal-node';
+import { createContext } from 'lloyal.node';
 
 const ctx = await createContext({
   modelPath: './model.gguf',
@@ -171,7 +171,7 @@ Creates a new inference context.
 ## Example: Testing TS Sampler
 
 ```typescript
-import { createContext } from 'liblloyal-node';
+import { createContext } from 'lloyal.node';
 import { computeModelEntropy } from '../tsampler';
 
 const ctx = await createContext({ modelPath: './model.gguf' });

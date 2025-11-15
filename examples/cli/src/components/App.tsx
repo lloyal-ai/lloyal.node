@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { SessionContext } from 'liblloyal-node';
+import { SessionContext } from 'lloyal.node';
 import { BootScreen, type BootConfig } from './BootScreen.js';
 import { DownloadProgress } from './DownloadProgress.js';
 import { ModelLoader } from './ModelLoader.js';

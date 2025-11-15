@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useApp, useInput, useFocus } from 'ink';
-import { SessionContext } from 'liblloyal-node';
+import { SessionContext } from 'lloyal.node';
 import { Message } from './Message.js';
 import { QuickTextInput } from './QuickTextInput.js';
 

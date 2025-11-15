@@ -1,5 +1,5 @@
 {
-  "name": "liblloyal-node",
+  "name": "lloyal.node",
   "version": "0.1.0",
   "description": "Thin N-API wrapper over liblloyal for Node.js - raw llama.cpp inference primitives",
   "main": "lib/index.js",
