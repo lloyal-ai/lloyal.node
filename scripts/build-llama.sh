@@ -139,14 +139,18 @@ elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" 
     echo "✓ Copied llama.dll to $RELEASE_DIR/"
 
     # Copy import library (.lib) - needed for linking
-    if [ -f "$LLAMA_DIR/build-windows/lib/Release/llama.lib" ]; then
+    # CMake may place it in lib/, bin/, or src/ depending on configuration
+    if [ -f "$LLAMA_DIR/build-windows/src/Release/llama.lib" ]; then
+        cp "$LLAMA_DIR/build-windows/src/Release/llama.lib" "$RELEASE_DIR/llama.lib"
+        echo "✓ Copied llama.lib (from src/) to $RELEASE_DIR/"
+    elif [ -f "$LLAMA_DIR/build-windows/lib/Release/llama.lib" ]; then
         cp "$LLAMA_DIR/build-windows/lib/Release/llama.lib" "$RELEASE_DIR/llama.lib"
         echo "✓ Copied llama.lib (from lib/) to $RELEASE_DIR/"
     elif [ -f "$LLAMA_DIR/build-windows/bin/Release/llama.lib" ]; then
         cp "$LLAMA_DIR/build-windows/bin/Release/llama.lib" "$RELEASE_DIR/llama.lib"
         echo "✓ Copied llama.lib (from bin/) to $RELEASE_DIR/"
     else
-        echo "Error: llama.lib not found in $LLAMA_DIR/build-windows/{lib,bin}/Release/"
+        echo "Error: llama.lib not found in $LLAMA_DIR/build-windows/{src,lib,bin}/Release/"
         exit 1
     fi
 else

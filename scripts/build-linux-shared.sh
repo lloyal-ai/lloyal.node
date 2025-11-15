@@ -82,7 +82,7 @@ SHARED_LIB="$BUILD_DIR/libllama.so"
 
 # Use --whole-archive to include ALL symbols (equivalent to macOS -force_load)
 # This ensures liblloyal's inline static members are properly merged
-g++ -shared -fPIC \
+g++ -shared -fPIC -fopenmp \
     -Wl,--whole-archive "$COMBINED_LIB" -Wl,--no-whole-archive \
     -o "$SHARED_LIB" \
     -lpthread -ldl -lm -lstdc++
