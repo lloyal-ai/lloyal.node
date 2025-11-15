@@ -2,7 +2,12 @@
 build/
 prebuilds/
 *.node
-include/
+/include/
+
+# Vendor build artifacts (generated during npm install)
+vendor/llama.cpp/build-*/
+vendor/liblloyal/tests/lib/
+
 # Dependencies
 node_modules/
 

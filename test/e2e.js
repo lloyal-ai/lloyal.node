@@ -24,7 +24,7 @@ console.log('=== Model Validation Test ===\n');
 console.log(`Model: ${path.basename(MODEL_PATH)}\n`);
 
 // Load addon
-const addon = require('../build/Release/lloyal_node.node');
+const addon = require('../build/Release/lloyal.node');
 
 /**
  * Test case definition
