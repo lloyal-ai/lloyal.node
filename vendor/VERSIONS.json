@@ -1,0 +1,17 @@
+{
+  "vendoredAt": "2025-11-12T13:18:02.452Z",
+  "vendors": {
+    "liblloyal": {
+      "commit": "8d92ba44d1728c0a969639ab3117dec0f1959898",
+      "commitShort": "8d92ba4",
+      "fileCount": 173,
+      "vendoredAt": "2025-11-12T13:18:03.153Z"
+    },
+    "llama.cpp": {
+      "commit": "cb1adf885105da7ce23db746b4202f4e987aa3e8",
+      "commitShort": "cb1adf8",
+      "fileCount": 267,
+      "vendoredAt": "2025-11-12T13:18:03.308Z"
+    }
+  }
+}

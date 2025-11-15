@@ -23,38 +23,41 @@ A minimal Node.js binding for llama.cpp inference, suitable for:
 npm install liblloyal-node
 ```
 
-Or install from GitHub:
-
-```bash
-npm install github:lloyal-ai/liblloyal-node
-```
-
-**Note:** Git submodules (`liblloyal` and `llama.cpp`) are automatically initialized during installation via the `preinstall` script.
+**Note:** This package includes vendored sources for `liblloyal` and `llama.cpp` dependencies. First install will compile C++ code and take 5-15 minutes.
 
 ### Prerequisites
 
 - Node.js ≥18
-- C++20 compiler
-- Git (for submodule initialization)
+- C++20 compiler (GCC, Clang, or MSVC)
+- CMake (for building llama.cpp)
+- node-gyp build tools
 
 ## Building from Source
 
 ```bash
-# Clone (submodules will be initialized automatically during npm install)
-git clone https://github.com/lloyal-ai/liblloyal-node.git
-cd liblloyal-node
+# Clone with submodules
+git clone --recursive https://github.com/lloyal-ai/lloyal.node.git
+cd lloyal.node
 
-# Build (automatically initializes submodules and builds llama.cpp)
+# Build
 npm install
 npm run build
 ```
 
 The `npm install` step automatically:
-- **Initializes git submodules** (`liblloyal` and `llama.cpp`) via `preinstall` script
 - **Linux**: Builds llama.cpp as a single shared library (`.so`)
 - **macOS**: Builds llama.cpp XCFramework (uses upstream script)
+- **Windows**: Builds static libraries and links into N-API module
 
 **Why single combined library?** N-API requires llama.cpp to be built as a single shared library rather than separate static libraries. This ensures proper symbol resolution and prevents initialization issues with static globals.
+
+**For Development:**
+If you're actively developing and updating submodules:
+```bash
+git submodule update --remote    # Update to latest
+npm run clean                    # Clean build artifacts
+npm install                      # Rebuild
+```
 
 ### How Include Paths Work
 
@@ -70,7 +73,7 @@ These symlinks are **gitignored** and regenerated on each `npm install`. This ap
 - Works across platforms (Node.js handles symlinks portably)
 - Zero disk overhead (symlinks, not copies)
 
-**Note:** The package uses git submodules for `liblloyal` and `llama.cpp`. If you already cloned without `--recursive`, run:
+**Note for Contributors:** The package uses git submodules for `liblloyal` and `llama.cpp` during development. npm users get vendored sources automatically. If you cloned the repo without `--recursive`:
 
 ```bash
 git submodule update --init --recursive
@@ -89,7 +92,7 @@ brew install git-lfs  # macOS
 git lfs install
 
 # Clone with LFS files
-git clone --recursive https://github.com/lloyal-ai/liblloyal-node.git
+git clone --recursive https://github.com/lloyal-ai/lloyal.node.git
 ```
 
 If you already cloned without LFS, pull the model:

@@ -89,28 +89,32 @@ Even on the same OS/arch, builds vary:
 
 ---
 
-## Phase 1: Build from Source
+## Phase 1: Build from Source (Vendored)
 
 ### Overview
 
 **Audience:** Early adopters, developers, contributors
 **Timeline:** v0.1.0 - v0.4.x
-**Distribution:** npm registry, source-only package
+**Distribution:** npm registry with vendored submodule sources
 
-### How It Works
+### The Git Submodules Problem
 
-```bash
-npm install liblloyal-node
+liblloyal-node uses git submodules for dependencies (liblloyal, llama.cpp). **npm does not and will not support git submodules:**
 
-# Triggers lifecycle scripts:
-1. preinstall  → Initialize git submodules (if .git exists)
-2. prepare     → Build llama.cpp for platform
-3. install     → Setup headers + node-gyp rebuild
-```
+- Installing from npm: Package is a tarball, no `.git` directory
+- Installing from GitHub: npm clones repo but ignores `.gitmodules`
+- Result: Submodule directories are empty, build fails
 
-### Implementation
+**Attempted Solution (Doesn't Work):**
+Adding a `preinstall` script to run `git submodule update --init --recursive` fails because:
+1. npm cache copies files to temp directory before install scripts
+2. Submodules aren't copied, so directories are empty
+3. Script runs but has no effect
 
-**package.json:**
+### Solution: Vendor Submodule Sources
+
+**Include submodule source code directly in npm package:**
+
 ```json
 {
   "name": "liblloyal-node",
@@ -118,96 +122,75 @@ npm install liblloyal-node
   "main": "lib/index.js",
   "gypfile": true,
   "scripts": {
-    "preinstall": "node scripts/init-submodules.js",
     "prepare": "bash scripts/build-llama.sh",
-    "install": "node scripts/setup-headers.js && node-gyp rebuild"
+    "install": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp rebuild"
   },
   "files": [
     "lib/",
     "src/",
     "scripts/",
     "binding.gyp",
-    ".gitmodules",
-    "liblloyal/",
-    "llama.cpp/"
+    "vendor/"
   ]
 }
 ```
 
-**scripts/init-submodules.js:**
-```javascript
-#!/usr/bin/env node
-const { execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+### How It Works
 
-const ROOT = path.join(__dirname, '..');
-const isGitRepo = fs.existsSync(path.join(ROOT, '.git'));
+**When end users install from npm:**
 
-if (!isGitRepo) {
-  console.log('[init-submodules] Not a git repository, skipping');
-  process.exit(0);
-}
+```bash
+npm install liblloyal-node
 
-const llamaExists = fs.existsSync(path.join(ROOT, 'llama.cpp/.git'));
-const libloyalExists = fs.existsSync(path.join(ROOT, 'liblloyal/.git'));
-
-if (llamaExists && libloyalExists) {
-  console.log('[init-submodules] ✓ Submodules already initialized');
-  process.exit(0);
-}
-
-console.log('[init-submodules] Initializing git submodules...');
-try {
-  execSync('git submodule update --init --recursive', {
-    cwd: ROOT,
-    stdio: 'inherit'
-  });
-  console.log('[init-submodules] ✓ Submodules initialized');
-} catch (error) {
-  console.error('[init-submodules] Failed:', error.message);
-  console.error('Please run manually: git submodule update --init --recursive');
-  process.exit(1);
-}
+# Only the 'install' script runs:
+install → Build llama.cpp + Setup headers + node-gyp rebuild
 ```
 
-### Limitations
+**When developers work locally or before publishing:**
 
-**npm Registry Distribution:**
+```bash
+npm install  # In the package directory itself
 
-When published to npm, the package is distributed as a tarball without `.git`:
-- `preinstall` script detects no `.git` directory
-- Submodule initialization is skipped
-- Build fails: "llama.cpp/include not found"
-
-**Solution for npm registry:** Must vendor submodule sources in the package.
-
-**Vendoring Submodules:**
-
-Include submodule contents in npm package:
-
-```json
-{
-  "files": [
-    "lib/",
-    "src/",
-    "scripts/",
-    "binding.gyp",
-    "liblloyal/include/**/*.hpp",
-    "liblloyal/tests/**/*",
-    "llama.cpp/include/**/*.h",
-    "llama.cpp/src/**/*.{cpp,h,hpp}",
-    "llama.cpp/ggml/include/**/*.h",
-    "llama.cpp/ggml/src/**/*.{c,h,cpp}"
-  ]
-}
+# Both scripts run:
+1. prepare → Build llama.cpp for platform (bash scripts/build-llama.sh)
+2. install → Build llama.cpp + Setup headers + node-gyp rebuild
 ```
 
-**Trade-offs:**
-- ✅ Works on npm registry (no git required)
-- ✅ Users can install without git
-- ❌ Large package size (~50MB tarball)
-- ❌ Must sync submodules manually before publish
+**Note:** The `prepare` script is kept for Phase 2 (prebuilt binaries). In CI/CD, it will build llama.cpp before packaging prebuilt binaries. For Phase 1, only the `install` script matters for end users.
+
+**User workflow:**
+1. npm downloads tarball (~50MB with vendored sources)
+2. npm extracts to node_modules/liblloyal-node
+3. `install` script builds llama.cpp static libraries/frameworks
+4. `install` script creates header symlinks and compiles N-API binding
+5. Total time: 5-15 minutes
+
+### Publishing Workflow
+
+**Before publishing, sync submodules:**
+
+```bash
+# Update submodules to latest
+git submodule update --remote
+
+# Or update to specific commits
+cd liblloyal && git checkout <commit> && cd ..
+cd llama.cpp && git checkout <commit> && cd ..
+
+# Commit submodule updates
+git add liblloyal llama.cpp
+git commit -m "chore: update submodules"
+
+# Pack to verify contents
+npm pack
+tar -tzf liblloyal-node-*.tgz | grep -E "(liblloyal|llama.cpp)"
+# Should show vendored source files
+
+# Publish
+npm publish
+```
+
+**Important:** Vendored sources are a **snapshot** of submodules at publish time. Users get the exact versions you tested.
 
 ### Pros & Cons
 
@@ -418,7 +401,7 @@ const packageJson = {
   cpu: [platform.split('-')[1]],
   repository: {
     type: 'git',
-    url: 'https://github.com/lloyal-ai/liblloyal-node.git'
+    url: 'https://github.com/lloyal-ai/lloyal.node.git'
   },
   license: 'MIT',
   files: ['index.node', '*.dylib', '*.so', '*.dll']
@@ -831,7 +814,7 @@ try {
   console.log('');
   console.log('Building from source (5-15 minutes)...');
   console.log('Requirements: C++20 compiler, CMake, node-gyp');
-  console.log('Troubleshooting: https://github.com/lloyal-ai/liblloyal-node#building');
+  console.log('Troubleshooting: https://github.com/lloyal-ai/lloyal.node#building');
   console.log('');
 }
 ```

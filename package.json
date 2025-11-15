@@ -6,19 +6,19 @@
   "types": "lib/index.d.ts",
   "gypfile": true,
   "scripts": {
-    "preinstall": "node scripts/init-submodules.js",
+    "update-vendors": "node scripts/update-vendors.js",
     "prepare": "bash scripts/build-llama.sh",
-    "install": "node scripts/setup-headers.js && node-gyp rebuild",
+    "install": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp rebuild",
     "build": "node-gyp rebuild",
     "build:debug": "node-gyp rebuild --debug",
-    "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple",
+    "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple vendor/llama.cpp/build-linux vendor/llama.cpp/build-apple",
     "test": "npm run test:api && npm run test:e2e",
     "test:api": "node test/api.js",
     "test:e2e": "node test/e2e.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lloyal-ai/liblloyal-node.git"
+    "url": "git+https://github.com/lloyal-ai/lloyal.node.git"
   },
   "keywords": [
     "llama",
@@ -33,17 +33,25 @@
   "license": "MIT",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/lloyal-ai/liblloyal-node/issues"
+    "url": "https://github.com/lloyal-ai/lloyal.node/issues"
   },
-  "homepage": "https://github.com/lloyal-ai/liblloyal-node#readme",
+  "homepage": "https://github.com/lloyal-ai/lloyal.node#readme",
   "dependencies": {
     "node-addon-api": "^8.5.0",
     "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
+    "glob": "^11.0.0",
     "node-gyp": "^10.2.0"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "files": [
+    "lib/",
+    "src/",
+    "scripts/",
+    "binding.gyp",
+    "vendor/"
+  ]
 }

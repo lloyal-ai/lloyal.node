@@ -22,7 +22,7 @@ console.log(`Model: ${MODEL_PATH}`);
 console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(2)} MB\n`);
 
 // Load addon
-const addon = require('../build/Release/lloyal_node.node');
+const addon = require('../build/Release/lloyal.node');
 
 async function runTests() {
   let ctx = null;
