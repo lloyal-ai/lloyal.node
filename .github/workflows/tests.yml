@@ -20,7 +20,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          lfs: true
         # NO submodules - we're testing vendor/ sources (Phase 1 requirement)
+
+      - name: Pull Git LFS files
+        run: git lfs pull
 
       - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
@@ -121,7 +126,7 @@ jobs:
 
       - name: Extract and verify tarball
         run: |
-          tar -tzf liblloyal-node-*.tgz > package-contents.txt
+          tar -tzf lloyal.node-*.tgz > package-contents.txt
           echo "📦 Package contents:"
           cat package-contents.txt
 
@@ -160,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: npm-package
-          path: liblloyal-node-*.tgz
+          path: lloyal.node-*.tgz
           retention-days: 7
 
   test-summary:

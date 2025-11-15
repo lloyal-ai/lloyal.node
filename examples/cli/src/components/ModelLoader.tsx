@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
-import { SessionContext, createContext } from 'liblloyal-node';
+import { SessionContext, createContext } from 'lloyal.node';
 
 interface ModelLoaderProps {
   modelPath: string;
