@@ -8,7 +8,7 @@
   "scripts": {
     "update-vendors": "node scripts/update-vendors.js",
     "prepare": "bash scripts/build-llama.sh",
-    "install": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp rebuild",
+    "install": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
     "build": "node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
     "build:debug": "node-gyp rebuild --debug",
     "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple vendor/llama.cpp/build-linux vendor/llama.cpp/build-apple",
