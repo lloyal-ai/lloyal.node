@@ -67,7 +67,8 @@
                 "ExceptionHandling": 1,
                 "RuntimeTypeInfo": "true",
                 "AdditionalOptions": [
-                  "/std:c++20"
+                  "/std:c++20",
+                  "/GR"
                 ]
               }
             },

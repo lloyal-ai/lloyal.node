@@ -36,6 +36,7 @@ echo "Building static libraries with CMake..."
 cmake -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_BUILD_COMMON=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_TOOLS=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
