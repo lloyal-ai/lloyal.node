@@ -132,11 +132,23 @@ elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" 
         cd -
     fi
 
-    # Copy DLL to build/Release/ for node-gyp (needed for dynamic linking)
+    # Copy DLL and import library to build/Release/ for node-gyp
     RELEASE_DIR="build/Release"
     mkdir -p "$RELEASE_DIR"
     cp "$LLAMA_DIR/build-windows/bin/Release/llama.dll" "$RELEASE_DIR/llama.dll"
     echo "✓ Copied llama.dll to $RELEASE_DIR/"
+
+    # Copy import library (.lib) - needed for linking
+    if [ -f "$LLAMA_DIR/build-windows/lib/Release/llama.lib" ]; then
+        cp "$LLAMA_DIR/build-windows/lib/Release/llama.lib" "$RELEASE_DIR/llama.lib"
+        echo "✓ Copied llama.lib (from lib/) to $RELEASE_DIR/"
+    elif [ -f "$LLAMA_DIR/build-windows/bin/Release/llama.lib" ]; then
+        cp "$LLAMA_DIR/build-windows/bin/Release/llama.lib" "$RELEASE_DIR/llama.lib"
+        echo "✓ Copied llama.lib (from bin/) to $RELEASE_DIR/"
+    else
+        echo "Error: llama.lib not found in $LLAMA_DIR/build-windows/{lib,bin}/Release/"
+        exit 1
+    fi
 else
     echo "Unsupported platform: $OSTYPE"
     exit 1

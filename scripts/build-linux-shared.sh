@@ -63,6 +63,7 @@ COMBINED_LIB="$BUILD_DIR/libllama-combined.a"
 cat > "$BUILD_DIR/merge.mri" << EOF
 CREATE $COMBINED_LIB
 ADDLIB $BUILD_DIR/src/libllama.a
+ADDLIB $BUILD_DIR/ggml/src/libggml.a
 ADDLIB $BUILD_DIR/ggml/src/libggml-base.a
 ADDLIB $BUILD_DIR/ggml/src/libggml-cpu.a
 SAVE
