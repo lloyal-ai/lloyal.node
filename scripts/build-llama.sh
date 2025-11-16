@@ -132,11 +132,14 @@ elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" 
         cd -
     fi
 
-    # Copy DLL and import library to build/Release/ for node-gyp
+    # Copy DLLs and import library to build/Release/ for node-gyp
     RELEASE_DIR="build/Release"
     mkdir -p "$RELEASE_DIR"
-    cp "$LLAMA_DIR/build-windows/bin/Release/llama.dll" "$RELEASE_DIR/llama.dll"
-    echo "✓ Copied llama.dll to $RELEASE_DIR/"
+
+    # Copy all DLLs (llama.dll depends on ggml*.dll)
+    cp "$LLAMA_DIR/build-windows/bin/Release/"*.dll "$RELEASE_DIR/"
+    echo "✓ Copied DLLs to $RELEASE_DIR/:"
+    ls -1 "$RELEASE_DIR/"*.dll | sed 's/.*\//  - /'
 
     # Copy import library (.lib) - needed for linking
     # CMake may place it in lib/, bin/, or src/ depending on configuration
