@@ -69,11 +69,27 @@ jobs:
         run: |
           node -e "const fs = require('fs'); const files = fs.readdirSync('build/Release'); console.log('Build outputs:', files); if (!files.some(f => f.endsWith('.node'))) throw new Error('No .node file built!');"
 
-      - name: Run API tests
+      - name: Run API tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
+          npm run test:api
+        timeout-minutes: 5
+
+      - name: Run API tests (Unix)
+        if: runner.os != 'Windows'
         run: npm run test:api
         timeout-minutes: 5
 
-      - name: Run E2E tests
+      - name: Run E2E tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
+          npm run test:e2e
+        timeout-minutes: 5
+
+      - name: Run E2E tests (Unix)
+        if: runner.os != 'Windows'
         run: npm run test:e2e
         timeout-minutes: 5
 
