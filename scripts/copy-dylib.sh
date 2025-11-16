@@ -43,8 +43,10 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     fi
 elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]] || [[ "$OSTYPE" == "win32"* ]]; then
     if [ -f "$LLAMA_DIR/build-windows/bin/Release/llama.dll" ]; then
-        cp "$LLAMA_DIR/build-windows/bin/Release/llama.dll" build/Release/
-        echo "✓ Copied llama.dll to build/Release/"
+        # Copy all DLLs (llama.dll depends on ggml*.dll)
+        cp "$LLAMA_DIR/build-windows/bin/Release/"*.dll build/Release/
+        echo "✓ Copied DLLs to build/Release/:"
+        ls -1 build/Release/*.dll | sed 's/.*\//  - /'
 
         # Copy import library (.lib) - needed for linking
         # CMake may place it in lib/, bin/, or src/ depending on configuration
