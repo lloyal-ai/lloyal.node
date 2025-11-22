@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-natives:
+    name: Build ${{ matrix.package }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS
+          - os: macos-14
+            arch: arm64
+            gpu: metal
+            package: darwin-arm64
+          - os: macos-13
+            arch: x64
+            gpu: cpu
+            package: darwin-x64
+
+          # Linux
+          - os: ubuntu-22.04
+            arch: x64
+            gpu: cpu
+            package: linux-x64
+          - os: ubuntu-22.04
+            arch: x64
+            gpu: cuda
+            package: linux-x64-cuda
+          - os: ubuntu-22.04
+            arch: x64
+            gpu: vulkan
+            package: linux-x64-vulkan
+
+          # Windows
+          - os: windows-2022
+            arch: x64
+            gpu: cpu
+            package: win32-x64
+          - os: windows-2022
+            arch: x64
+            gpu: cuda
+            cuda_version: 12.2.0
+            package: win32-x64-cuda
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      # Platform-specific dependencies
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux' && matrix.gpu == 'cpu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install CUDA toolkit (Linux)
+        if: matrix.gpu == 'cuda' && runner.os == 'Linux'
+        run: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-2 build-essential cmake
+
+      - name: Install Vulkan SDK (Linux)
+        if: matrix.gpu == 'vulkan' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libvulkan-dev vulkan-tools
+
+      - name: Install CUDA toolkit (Windows)
+        if: matrix.gpu == 'cuda' && runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@v0.2.11
+        with:
+          cuda: '12.2.0'
+
+      # Build
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Build native module
+        run: npm run build
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
+
+      # Package
+      - name: Create platform package
+        shell: bash
+        run: |
+          PKG_NAME="${{ matrix.package }}"
+          node scripts/create-platform-package.js "$PKG_NAME" "${{ matrix.os }}" "${{ matrix.arch }}"
+
+      # Publish
+      - name: Publish platform package
+        working-directory: packages/${{ matrix.package }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-main:
+    name: Publish main package
+    needs: build-natives
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Sync package versions
+        run: node scripts/sync-versions.js
+
+      - name: Publish main package
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,22 @@
+{
+  "name": "@lloyal/lloyal.node-PLATFORM",
+  "version": "0.0.0",
+  "description": "Lloyal native binary for PLATFORM",
+  "main": "index.js",
+  "os": [
+    "OS_NAME"
+  ],
+  "cpu": [
+    "ARCH"
+  ],
+  "files": [
+    "bin/",
+    "index.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lloyal-ai/lloyal.node.git"
+  },
+  "author": "lloyal.ai",
+  "license": "MIT"
+}
