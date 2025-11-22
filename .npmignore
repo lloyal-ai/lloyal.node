@@ -1,0 +1,51 @@
+# Build artifacts (generated during install)
+build/
+include/
+*.node
+*.dylib
+*.so
+*.dll
+
+# llama.cpp build directories
+llama.cpp/build-*
+vendor/llama.cpp/build-*
+liblloyal/build/
+
+# Git metadata (vendored sources used instead of submodules)
+.git
+.gitmodules
+.gitignore
+
+# Development dependencies and configs
+package-lock.json
+node_modules/
+.vscode/
+.idea/
+*.log
+.DS_Store
+
+# Development files
+test/
+tests/
+*.test.js
+examples/
+docs/
+
+# CI/CD (runs from git checkout, not needed in published package)
+.github/
+
+# Markdown files (except README and CHANGELOG which npm includes by default)
+*.md
+!README.md
+!CHANGELOG.md
+
+# Platform packages (generated during CI, not distributed with source)
+packages/darwin-*
+packages/linux-*
+packages/win32-*
+packages/template/
+
+# Temporary files
+*.tgz
+*.tar.gz
+*.tmp

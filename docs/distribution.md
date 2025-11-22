@@ -1,6 +1,6 @@
-# Distribution Strategy for liblloyal-node
+# Distribution Strategy for lloyal.node
 
-> **Purpose:** This document outlines how to package, publish, and distribute liblloyal-node as a native Node.js module with complex dependencies.
+> **Purpose:** This document outlines how to package, publish, and distribute lloyal.node as a native Node.js module with complex dependencies.
 
 ---
 
@@ -21,16 +21,18 @@
 
 ### Dependency Structure
 
-liblloyal-node is an N-API binding with a complex dependency chain:
+lloyal.node is an N-API binding with a complex dependency chain:
 
 ```
-liblloyal-node (N-API binding)
+lloyal.node (N-API binding)
     ↓ C++ includes
-liblloyal (header-only library, git submodule)
+liblloyal (header-only library, vendored from git submodule)
     ↓ links against
-llama.cpp (C++ inference engine, git submodule)
-    ↓ compiles to
-libllama.a + libggml.a (static libraries)
+llama.cpp (C++ inference engine, vendored from git submodule)
+    ↓ compiles to (platform-specific)
+macOS:   libllama.dylib (shared library with Metal support)
+Linux:   libllama.so (shared library with OpenMP)
+Windows: llama.dll + ggml*.dll (multiple DLLs)
 ```
 
 ### Key Problems
@@ -76,9 +78,9 @@ Even on the same OS/arch, builds vary:
 
 | Phase | Status | Distribution | User Install Time | GPU Support |
 |-------|--------|--------------|-------------------|-------------|
-| **1: Source** | v0.1.x | Source-only on npm | 5-15 minutes | Auto-detect |
-| **2: Core Prebuilts** | v0.5.x+ | 3 common platforms | <1 minute | CPU + Metal |
-| **3: Full Matrix** | v1.x+ | 10+ platform/GPU packages | <1 minute | All variants |
+| **1: Source** | ✅ **COMPLETE** (v0.1.x) | Vendored sources on npm | 5-15 minutes | Auto-detect (Metal/CPU) |
+| **2: Core Prebuilts** | 📋 Planned (v0.5.x+) | 3 common platforms | <1 minute | CPU + Metal |
+| **3: Full Matrix** | 📋 Future (v1.x+) | 10+ platform/GPU packages | <1 minute | All variants |
 
 ### Design Principles
 
@@ -89,17 +91,25 @@ Even on the same OS/arch, builds vary:
 
 ---
 
-## Phase 1: Build from Source (Vendored)
+## Phase 1: Build from Source (Vendored) ✅ COMPLETE
 
 ### Overview
 
+**Status:** ✅ Implemented and tested (v0.1.0)
 **Audience:** Early adopters, developers, contributors
 **Timeline:** v0.1.0 - v0.4.x
 **Distribution:** npm registry with vendored submodule sources
 
+**Verified Platforms:**
+- ✅ Linux (ubuntu-latest) - Node 18, 20, 22
+- ✅ macOS (macos-14) - Node 18, 20, 22
+- ✅ Windows (windows-latest) - Node 18, 20, 22
+
+**Test Coverage:** 15 tests per platform (11 API + 4 E2E validation tests)
+
 ### The Git Submodules Problem
 
-liblloyal-node uses git submodules for dependencies (liblloyal, llama.cpp). **npm does not and will not support git submodules:**
+lloyal.node uses git submodules for dependencies (liblloyal, llama.cpp). **npm does not and will not support git submodules:**
 
 - Installing from npm: Package is a tarball, no `.git` directory
 - Installing from GitHub: npm clones repo but ignores `.gitmodules`
@@ -117,7 +127,7 @@ Adding a `preinstall` script to run `git submodule update --init --recursive` fa
 
 ```json
 {
-  "name": "liblloyal-node",
+  "name": "lloyal.node",
   "version": "0.1.0",
   "main": "lib/index.js",
   "gypfile": true,
@@ -140,7 +150,7 @@ Adding a `preinstall` script to run `git submodule update --init --recursive` fa
 **When end users install from npm:**
 
 ```bash
-npm install liblloyal-node
+npm install lloyal.node
 
 # Only the 'install' script runs:
 install → Build llama.cpp + Setup headers + node-gyp rebuild
@@ -160,7 +170,7 @@ npm install  # In the package directory itself
 
 **User workflow:**
 1. npm downloads tarball (~50MB with vendored sources)
-2. npm extracts to node_modules/liblloyal-node
+2. npm extracts to node_modules/lloyal.node
 3. `install` script builds llama.cpp static libraries/frameworks
 4. `install` script creates header symlinks and compiles N-API binding
 5. Total time: 5-15 minutes
@@ -183,7 +193,7 @@ git commit -m "chore: update submodules"
 
 # Pack to verify contents
 npm pack
-tar -tzf liblloyal-node-*.tgz | grep -E "(liblloyal|llama.cpp)"
+tar -tzf lloyal.node-*.tgz | grep -E "(liblloyal|llama.cpp)"
 # Should show vendored source files
 
 # Publish
@@ -229,9 +239,9 @@ Target the **top 3 most common developer platforms**:
 
 | Package | Platform | Arch | GPU | Coverage |
 |---------|----------|------|-----|----------|
-| `@lloyal/liblloyal-node-darwin-arm64` | macOS | arm64 | Metal | ~40% |
-| `@lloyal/liblloyal-node-linux-x64` | Linux | x64 | CPU | ~20% |
-| `@lloyal/liblloyal-node-win32-x64` | Windows | x64 | CPU | ~10% |
+| `@lloyal/lloyal.node-darwin-arm64` | macOS | arm64 | Metal | ~40% |
+| `@lloyal/lloyal.node-linux-x64` | Linux | x64 | CPU | ~20% |
+| `@lloyal/lloyal.node-win32-x64` | Windows | x64 | CPU | ~10% |
 
 **Total coverage:** ~70% of developers with instant install
 
@@ -239,15 +249,15 @@ Target the **top 3 most common developer platforms**:
 
 ### Architecture
 
-**Main Package (`liblloyal-node`):**
+**Main Package (`lloyal.node`):**
 ```json
 {
-  "name": "liblloyal-node",
+  "name": "lloyal.node",
   "version": "0.5.0",
   "optionalDependencies": {
-    "@lloyal/liblloyal-node-darwin-arm64": "0.5.0",
-    "@lloyal/liblloyal-node-linux-x64": "0.5.0",
-    "@lloyal/liblloyal-node-win32-x64": "0.5.0"
+    "@lloyal/lloyal.node-darwin-arm64": "0.5.0",
+    "@lloyal/lloyal.node-linux-x64": "0.5.0",
+    "@lloyal/lloyal.node-win32-x64": "0.5.0"
   },
   "scripts": {
     "install": "node scripts/install.js"
@@ -255,10 +265,10 @@ Target the **top 3 most common developer platforms**:
 }
 ```
 
-**Platform Package (`@lloyal/liblloyal-node-darwin-arm64`):**
+**Platform Package (`@lloyal/lloyal.node-darwin-arm64`):**
 ```json
 {
-  "name": "@lloyal/liblloyal-node-darwin-arm64",
+  "name": "@lloyal/lloyal.node-darwin-arm64",
   "version": "0.5.0",
   "os": ["darwin"],
   "cpu": ["arm64"],
@@ -275,7 +285,7 @@ Target the **top 3 most common developer platforms**:
 ```javascript
 // scripts/install.js
 const platform = `${process.platform}-${process.arch}`;
-const prebuiltPackage = `@lloyal/liblloyal-node-${platform}`;
+const prebuiltPackage = `@lloyal/lloyal.node-${platform}`;
 
 try {
   // Check if platform-specific package is installed
@@ -359,7 +369,7 @@ jobs:
             ${{ github.ref_name }}
 
       - name: Publish platform package
-        working-directory: packages/liblloyal-node-${{ matrix.platform }}
+        working-directory: packages/lloyal.node-${{ matrix.platform }}
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -393,9 +403,9 @@ const path = require('path');
 const [platform, version] = process.argv.slice(2);
 
 const packageJson = {
-  name: `@lloyal/liblloyal-node-${platform}`,
+  name: `@lloyal/lloyal.node-${platform}`,
   version: version.replace('v', ''),
-  description: `Native module for liblloyal-node (${platform})`,
+  description: `Native module for lloyal.node (${platform})`,
   main: 'index.node',
   os: [platform.split('-')[0]],
   cpu: [platform.split('-')[1]],
@@ -407,7 +417,7 @@ const packageJson = {
   files: ['index.node', '*.dylib', '*.so', '*.dll']
 };
 
-const pkgDir = path.join('packages', `liblloyal-node-${platform}`);
+const pkgDir = path.join('packages', `lloyal.node-${platform}`);
 fs.mkdirSync(pkgDir, { recursive: true });
 fs.writeFileSync(
   path.join(pkgDir, 'package.json'),
@@ -483,22 +493,22 @@ if (mainPkg.optionalDependencies) {
 
 **CPU-only (6 packages):**
 ```
-@lloyal/liblloyal-node-darwin-arm64   (macOS Apple Silicon, Metal built-in)
-@lloyal/liblloyal-node-darwin-x64     (macOS Intel, CPU only)
-@lloyal/liblloyal-node-linux-x64      (Linux x64, CPU only)
-@lloyal/liblloyal-node-linux-arm64    (Linux ARM64, CPU only)
-@lloyal/liblloyal-node-win32-x64      (Windows x64, CPU only)
-@lloyal/liblloyal-node-win32-arm64    (Windows ARM64, CPU only)
+@lloyal/lloyal.node-darwin-arm64   (macOS Apple Silicon, Metal built-in)
+@lloyal/lloyal.node-darwin-x64     (macOS Intel, CPU only)
+@lloyal/lloyal.node-linux-x64      (Linux x64, CPU only)
+@lloyal/lloyal.node-linux-arm64    (Linux ARM64, CPU only)
+@lloyal/lloyal.node-win32-x64      (Windows x64, CPU only)
+@lloyal/lloyal.node-win32-arm64    (Windows ARM64, CPU only)
 ```
 
 **GPU variants (6+ packages):**
 ```
-@lloyal/liblloyal-node-linux-x64-cuda     (Linux x64 + CUDA)
-@lloyal/liblloyal-node-linux-x64-vulkan   (Linux x64 + Vulkan)
-@lloyal/liblloyal-node-linux-arm64-cuda   (Linux ARM64 + CUDA)
-@lloyal/liblloyal-node-linux-arm64-vulkan (Linux ARM64 + Vulkan)
-@lloyal/liblloyal-node-win32-x64-cuda     (Windows x64 + CUDA)
-@lloyal/liblloyal-node-win32-x64-vulkan   (Windows x64 + Vulkan)
+@lloyal/lloyal.node-linux-x64-cuda     (Linux x64 + CUDA)
+@lloyal/lloyal.node-linux-x64-vulkan   (Linux x64 + Vulkan)
+@lloyal/lloyal.node-linux-arm64-cuda   (Linux ARM64 + CUDA)
+@lloyal/lloyal.node-linux-arm64-vulkan (Linux ARM64 + Vulkan)
+@lloyal/lloyal.node-win32-x64-cuda     (Windows x64 + CUDA)
+@lloyal/lloyal.node-win32-x64-vulkan   (Windows x64 + Vulkan)
 ```
 
 ### GPU Variant Installation
@@ -509,23 +519,23 @@ Users explicitly install GPU variant:
 
 ```bash
 # Default (CPU or auto-GPU)
-npm install liblloyal-node
+npm install lloyal.node
 
 # Force CUDA
-npm install liblloyal-node
-npm install @lloyal/liblloyal-node-linux-x64-cuda --save-optional
+npm install lloyal.node
+npm install @lloyal/lloyal.node-linux-x64-cuda --save-optional
 
 # Force Vulkan
-npm install liblloyal-node
-npm install @lloyal/liblloyal-node-linux-x64-vulkan --save-optional
+npm install lloyal.node
+npm install @lloyal/lloyal.node-linux-x64-vulkan --save-optional
 ```
 
 **Option 2: Environment Variable**
 
 ```bash
 # User sets preference
-export LIBLLOYAL_GPU=cuda
-npm install liblloyal-node
+export LLOYAL_GPU=cuda
+npm install lloyal.node
 
 # scripts/install.js reads env var and selects variant
 ```
@@ -612,12 +622,12 @@ scripts/
 
 ```json
 {
-  "name": "liblloyal-node",
+  "name": "lloyal.node",
   "version": "0.5.0",
   "optionalDependencies": {
-    "@lloyal/liblloyal-node-darwin-arm64": "0.5.0",
-    "@lloyal/liblloyal-node-linux-x64": "0.5.0",
-    "@lloyal/liblloyal-node-win32-x64": "0.5.0"
+    "@lloyal/lloyal.node-darwin-arm64": "0.5.0",
+    "@lloyal/lloyal.node-linux-x64": "0.5.0",
+    "@lloyal/lloyal.node-win32-x64": "0.5.0"
   },
   "scripts": {
     "preinstall": "node scripts/init-submodules.js",
@@ -639,7 +649,7 @@ Copy the Phase 2 CI/CD pipeline to `.github/workflows/release.yml`
 # Simulate prebuilt install
 npm pack
 mkdir test-install && cd test-install
-npm install ../liblloyal-node-*.tgz
+npm install ../lloyal.node-*.tgz
 
 # Should either:
 # - Use prebuilt (if on supported platform)
@@ -710,15 +720,15 @@ git push origin main --tags
 
 ```bash
 # Check npm registry
-npm view liblloyal-node
+npm view lloyal.node
 
 # Test installation on different platforms
-docker run -it node:20 sh -c "npm install liblloyal-node"
+docker run -it node:20 sh -c "npm install lloyal.node"
 
 # Verify platform packages published
-npm view @lloyal/liblloyal-node-darwin-arm64
-npm view @lloyal/liblloyal-node-linux-x64
-npm view @lloyal/liblloyal-node-win32-x64
+npm view @lloyal/lloyal.node-darwin-arm64
+npm view @lloyal/lloyal.node-linux-x64
+npm view @lloyal/lloyal.node-win32-x64
 ```
 
 ---
@@ -825,15 +835,15 @@ Allow users to force source build:
 
 ```bash
 # Skip prebuilt, always build from source
-npm install liblloyal-node --build-from-source
+npm install lloyal.node --build-from-source
 
 # Or via environment variable
-LIBLLOYAL_BUILD_FROM_SOURCE=1 npm install liblloyal-node
+LLOYAL_BUILD_FROM_SOURCE=1 npm install lloyal.node
 ```
 
 ```javascript
 // scripts/install.js
-if (process.env.LIBLLOYAL_BUILD_FROM_SOURCE === '1' ||
+if (process.env.LLOYAL_BUILD_FROM_SOURCE === '1' ||
     process.argv.includes('--build-from-source')) {
   console.log('Forcing build from source...');
   buildFromSource();
@@ -881,7 +891,7 @@ Don't rely on CI alone:
 **Solution:**
 ```bash
 # Rebuild for your Node.js version
-npm rebuild liblloyal-node
+npm rebuild lloyal.node
 ```
 
 **Issue:** `Error: llama.cpp/include not found`
@@ -901,7 +911,7 @@ npm install
 **Solution:**
 ```bash
 # Force source build
-npm install liblloyal-node --build-from-source
+npm install lloyal.node --build-from-source
 ```
 
 ---
@@ -926,6 +936,6 @@ Native Node.js modules with prebuilt strategies:
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2025-01-11
-**Maintainer:** liblloyal-node team
+**Document Version:** 1.1
+**Last Updated:** 2025-01-16
+**Maintainer:** lloyal.node team

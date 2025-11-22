@@ -8,10 +8,11 @@
   "scripts": {
     "update-vendors": "node scripts/update-vendors.js",
     "prepare": "bash scripts/build-llama.sh",
-    "install": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
-    "build": "node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
+    "install": "node scripts/install.js",
+    "build": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
     "build:debug": "node-gyp rebuild --debug",
     "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple vendor/llama.cpp/build-linux vendor/llama.cpp/build-apple",
+    "version": "node scripts/sync-versions.js && git add -A",
     "test": "npm run test:api && npm run test:e2e",
     "test:api": "node test/api.js",
     "test:e2e": "node test/e2e.js"
@@ -43,6 +44,15 @@
   "devDependencies": {
     "glob": "^11.0.0",
     "node-gyp": "^10.2.0"
+  },
+  "optionalDependencies": {
+    "@lloyal/lloyal.node-darwin-arm64": "0.1.0",
+    "@lloyal/lloyal.node-darwin-x64": "0.1.0",
+    "@lloyal/lloyal.node-linux-x64": "0.1.0",
+    "@lloyal/lloyal.node-linux-x64-cuda": "0.1.0",
+    "@lloyal/lloyal.node-linux-x64-vulkan": "0.1.0",
+    "@lloyal/lloyal.node-win32-x64": "0.1.0",
+    "@lloyal/lloyal.node-win32-x64-cuda": "0.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
