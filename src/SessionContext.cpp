@@ -230,7 +230,8 @@ public:
     : AsyncWorker(env), _deferred(env), _ctx(ctx) {}
 
   void Execute() override {
-    llama_memory_clear(llama_get_memory(_ctx), true);
+    // Use convenience overload
+    lloyal::kv::clear_all(_ctx);
   }
 
   void OnOK() override {
@@ -249,6 +250,91 @@ private:
 };
 
 /**
+ * AsyncWorker for kvCacheWriteFile operation
+ * Writes KV cache state + tokens to a file for disk persistence
+ */
+class KVCacheWriteFileWorker : public Napi::AsyncWorker {
+public:
+  KVCacheWriteFileWorker(Napi::Env env, llama_context* ctx, llama_seq_id seq,
+                         const std::string& filepath, std::vector<llama_token> tokens)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _seq(seq),
+      _filepath(filepath), _tokens(std::move(tokens)) {}
+
+  void Execute() override {
+    _bytesWritten = lloyal::kv::write_file(_ctx, _seq, _filepath, _tokens);
+    if (_bytesWritten == 0) {
+      SetError("Failed to write KV cache to file");
+    }
+  }
+
+  void OnOK() override {
+    _deferred.Resolve(Napi::Number::New(Env(), static_cast<double>(_bytesWritten)));
+  }
+
+  void OnError(const Napi::Error& err) override {
+    _deferred.Reject(err.Value());
+  }
+
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  llama_seq_id _seq;
+  std::string _filepath;
+  std::vector<llama_token> _tokens;
+  size_t _bytesWritten = 0;
+};
+
+/**
+ * AsyncWorker for kvCacheReadFile operation
+ * Reads KV cache state + tokens from a file
+ */
+class KVCacheReadFileWorker : public Napi::AsyncWorker {
+public:
+  KVCacheReadFileWorker(Napi::Env env, llama_context* ctx, llama_seq_id seq,
+                        const std::string& filepath)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _seq(seq), _filepath(filepath) {}
+
+  void Execute() override {
+    try {
+      _result = lloyal::kv::read_file(_ctx, _seq, _filepath);
+    } catch (const std::exception& e) {
+      SetError(e.what());
+    }
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::Object result = Napi::Object::New(env);
+
+    // Convert tokens to JS array
+    Napi::Array jsTokens = Napi::Array::New(env, _result.tokens.size());
+    for (size_t i = 0; i < _result.tokens.size(); i++) {
+      jsTokens[i] = Napi::Number::New(env, static_cast<double>(_result.tokens[i]));
+    }
+
+    result.Set("tokens", jsTokens);
+    result.Set("bytesRead", Napi::Number::New(env, static_cast<double>(_result.bytes_read)));
+
+    _deferred.Resolve(result);
+  }
+
+  void OnError(const Napi::Error& err) override {
+    _deferred.Reject(err.Value());
+  }
+
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  llama_seq_id _seq;
+  std::string _filepath;
+  lloyal::kv::FileData _result;
+};
+
+/**
  * AsyncWorker for tokenize operation
  */
 class TokenizeWorker : public Napi::AsyncWorker {
@@ -257,21 +343,11 @@ public:
     : AsyncWorker(env), _deferred(env), _model(model), _text(text) {}
 
   void Execute() override {
-    const llama_vocab* vocab = lloyal::tokenizer::get_vocab(_model.get());
-    if (!vocab) {
-      SetError("Failed to get vocabulary");
-      return;
-    }
-
-    bool add_bos = llama_vocab_get_add_bos(vocab);
-    std::vector<llama_token> tokens = lloyal::tokenizer::tokenize(vocab, _text, add_bos, true);
-
-    if (tokens.empty()) {
+    // Use convenience overload that auto-extracts vocab and handles add_bos
+    _result = lloyal::tokenizer::tokenize(_model.get(), _text);
+    if (_result.empty()) {
       SetError("Tokenization failed");
-      return;
     }
-
-    _result = std::move(tokens);
   }
 
   void OnOK() override {
@@ -338,19 +414,8 @@ public:
     : AsyncWorker(env), _deferred(env), _model(model), _tokens(tokens) {}
 
   void Execute() override {
-    const llama_vocab* vocab = lloyal::tokenizer::get_vocab(_model.get());
-    if (!vocab) {
-      SetError("Failed to get vocabulary");
-      return;
-    }
-
-    _result = lloyal::tokenizer::detokenize_batch(
-      vocab,
-      _tokens.data(),
-      static_cast<int32_t>(_tokens.size()),
-      false,  // remove_special
-      false   // unparse_special
-    );
+    // Use convenience overload that auto-extracts vocab
+    _result = lloyal::tokenizer::detokenize_batch(_model.get(), _tokens);
   }
 
   void OnOK() override {
@@ -455,6 +520,8 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvCacheSave", &SessionContext::kvCacheSave),
     InstanceMethod("kvCacheLoad", &SessionContext::kvCacheLoad),
     InstanceMethod("kvCacheClear", &SessionContext::kvCacheClear),
+    InstanceMethod("kvCacheWriteFile", &SessionContext::kvCacheWriteFile),
+    InstanceMethod("kvCacheReadFile", &SessionContext::kvCacheReadFile),
 
     // ===== GRAMMAR-CONSTRAINED GENERATION =====
     InstanceMethod("getTokenScores", &SessionContext::getTokenScores),
@@ -535,8 +602,8 @@ Napi::Value SessionContext::getLogits(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Failed to get logits");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-  const int n_vocab = llama_vocab_n_tokens(vocab);
+  // Use model overload for vocab_size
+  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
   // Create Float32Array wrapping the logits (zero-copy!)
   // WARNING: This is only valid until next decode() call
@@ -632,8 +699,8 @@ Napi::Value SessionContext::computeEntropy(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Failed to get logits");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-  const int n_vocab = llama_vocab_n_tokens(vocab);
+  // Use model overload for vocab_size
+  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
   // Compute entropy using log-sum-exp (numerically stable)
   // This is the native reference implementation for testing
@@ -682,10 +749,8 @@ Napi::Value SessionContext::greedySample(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-
-  // Use liblloyal greedy sampler
-  llama_token token = lloyal::sampler::greedy(_context, vocab);
+  // Use liblloyal greedy sampler with model overload
+  llama_token token = lloyal::sampler::greedy(_context, _model.get());
 
   return Napi::Number::New(env, static_cast<double>(token));
 }
@@ -699,10 +764,9 @@ Napi::Value SessionContext::tokenToText(const Napi::CallbackInfo& info) {
   }
 
   llama_token token = static_cast<llama_token>(info[0].As<Napi::Number>().Int32Value());
-  const llama_vocab* vocab = getVocabOrThrow();
 
-  // Use lloyal detokenize (optimized for single tokens)
-  std::string text = lloyal::tokenizer::detokenize(vocab, token, true);
+  // Use lloyal detokenize with model overload (optimized for single tokens)
+  std::string text = lloyal::tokenizer::detokenize(_model.get(), token, true);
 
   return Napi::String::New(env, text);
 }
@@ -716,10 +780,9 @@ Napi::Value SessionContext::isStopToken(const Napi::CallbackInfo& info) {
   }
 
   llama_token token = static_cast<llama_token>(info[0].As<Napi::Number>().Int32Value());
-  const llama_vocab* vocab = getVocabOrThrow();
 
-  // Check if token is end-of-generation (EOS, EOT, etc.)
-  bool isEog = llama_vocab_is_eog(vocab, token);
+  // Check if token is end-of-generation (EOS, EOT, etc.) using model overload
+  bool isEog = lloyal::tokenizer::is_eog(_model.get(), token);
 
   return Napi::Boolean::New(env, isEog);
 }
@@ -775,22 +838,20 @@ Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-
   llama_token next_token;
 
   // Use greedy if no params, otherwise use full sampling from liblloyal
   // Pattern matches HybridSessionContext.cpp:160-192
   if (info.Length() == 0 || !info[0].IsObject()) {
-    // No params - use greedy sampling
-    next_token = lloyal::sampler::greedy(_context, vocab);
+    // No params - use greedy sampling with model overload
+    next_token = lloyal::sampler::greedy(_context, _model.get());
   } else {
     // Use adapter to convert JS params → liblloyal-compatible structure
     LloyalSamplingParams params = adaptSamplingParamsFromJS(info[0].As<Napi::Object>());
 
-    // Use liblloyal sample_with_params with grammar sampler
+    // Use liblloyal sample_with_params with model overload
     // Note: Advanced params (mirostat, dry, xtc) not yet supported in liblloyal
-    next_token = lloyal::sampler::sample_with_params(_context, vocab, params, _grammarSampler);
+    next_token = lloyal::sampler::sample_with_params(_context, _model.get(), params, _grammarSampler);
   }
 
   // Accept token to advance grammar parser state (if grammar active)
@@ -829,8 +890,8 @@ Napi::Value SessionContext::getVocabSize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
-  const llama_vocab* vocab = getVocabOrThrow();
-  return Napi::Number::New(env, static_cast<double>(lloyal::tokenizer::vocab_size(vocab)));
+  // Use model overload
+  return Napi::Number::New(env, static_cast<double>(lloyal::tokenizer::vocab_size(_model.get())));
 }
 
 // ===== GRAMMAR-CONSTRAINED GENERATION =====
@@ -852,9 +913,8 @@ Napi::Value SessionContext::getTokenScores(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Failed to get logits (ensure decode had logits=true)");
   }
 
-  // Get vocabulary size
-  const llama_vocab* vocab = getVocabOrThrow();
-  const int n_vocab = llama_vocab_n_tokens(vocab);
+  // Get vocabulary size using model overload
+  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
   if (n_vocab <= 0) {
     throw Napi::Error::New(env, "Invalid vocabulary size");
   }
@@ -889,8 +949,6 @@ Napi::Value SessionContext::initGrammar(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-
   // Reuse existing sampler if grammar unchanged (just reset parser state)
   if (_grammarSampler && _currentGrammar == grammarStr) {
     llama_sampler_reset(_grammarSampler);
@@ -903,8 +961,8 @@ Napi::Value SessionContext::initGrammar(const Napi::CallbackInfo& info) {
     _grammarSampler = nullptr;
   }
 
-  // Create new grammar sampler (persistent across tokens)
-  _grammarSampler = llama_sampler_init_grammar(vocab, grammarStr.c_str(), "root");
+  // Create new grammar sampler using liblloyal wrapper
+  _grammarSampler = lloyal::grammar::init_sampler(_model.get(), grammarStr);
   if (!_grammarSampler) {
     throw Napi::Error::New(env, "Failed to initialize grammar sampler - grammar may be invalid");
   }
@@ -929,8 +987,8 @@ Napi::Value SessionContext::applyGrammar(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  const llama_vocab* vocab = getVocabOrThrow();
-  const int n_vocab = llama_vocab_n_tokens(vocab);
+  // Use model overload for vocab_size
+  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
   // Get mutable access to logits
   Napi::Buffer<float> scoresBuffer = info[0].As<Napi::Buffer<float>>();
@@ -1147,6 +1205,49 @@ Napi::Value SessionContext::kvCacheClear(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   auto* worker = new KVCacheClearWorker(env, _context);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::kvCacheWriteFile(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Args: sequenceId, filepath, tokens
+  if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsArray()) {
+    throw Napi::TypeError::New(env, "Expected (sequenceId: number, filepath: string, tokens: number[])");
+  }
+
+  llama_seq_id seq = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());
+  std::string filepath = info[1].As<Napi::String>().Utf8Value();
+
+  // Extract tokens
+  Napi::Array jsTokens = info[2].As<Napi::Array>();
+  std::vector<llama_token> tokens;
+  tokens.reserve(jsTokens.Length());
+  for (uint32_t i = 0; i < jsTokens.Length(); i++) {
+    Napi::Value val = jsTokens.Get(i);
+    tokens.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  auto* worker = new KVCacheWriteFileWorker(env, _context, seq, filepath, std::move(tokens));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::kvCacheReadFile(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Args: sequenceId, filepath
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsString()) {
+    throw Napi::TypeError::New(env, "Expected (sequenceId: number, filepath: string)");
+  }
+
+  llama_seq_id seq = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());
+  std::string filepath = info[1].As<Napi::String>().Utf8Value();
+
+  auto* worker = new KVCacheReadFileWorker(env, _context, seq, filepath);
   worker->Queue();
   return worker->GetPromise();
 }

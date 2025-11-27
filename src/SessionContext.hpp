@@ -135,12 +135,25 @@ private:
   Napi::Value freeGrammar(const Napi::CallbackInfo& info);
 
   // ===== KV CACHE MANAGEMENT =====
-  // (To be implemented in Phase 3)
 
   Napi::Value kvCacheRemove(const Napi::CallbackInfo& info);
   Napi::Value kvCacheSave(const Napi::CallbackInfo& info);
   Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
   Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
+
+  /**
+   * Write KV cache state + tokens to a file for disk persistence
+   * Args: sequenceId (number), filepath (string), tokens (number[])
+   * Returns: Promise<number> (bytes written)
+   */
+  Napi::Value kvCacheWriteFile(const Napi::CallbackInfo& info);
+
+  /**
+   * Read KV cache state + tokens from a file
+   * Args: sequenceId (number), filepath (string)
+   * Returns: Promise<{ tokens: number[], bytesRead: number }>
+   */
+  Napi::Value kvCacheReadFile(const Napi::CallbackInfo& info);
 
   // ===== HELPERS =====
   // (To be implemented in Phase 6)
@@ -167,14 +180,6 @@ private:
     if (_disposed) {
       throw Napi::Error::New(Env(), "Context has been disposed");
     }
-  }
-
-  inline const llama_vocab* getVocabOrThrow() {
-    const llama_vocab* vocab = lloyal::tokenizer::get_vocab(_model.get());
-    if (!vocab) {
-      throw Napi::Error::New(Env(), "Failed to get vocabulary");
-    }
-    return vocab;
   }
 
   inline llama_seq_id toSeqId(double id) {

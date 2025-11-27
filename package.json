@@ -15,7 +15,8 @@
     "version": "node scripts/sync-versions.js && git add -A",
     "test": "npm run test:api && npm run test:e2e",
     "test:api": "node test/api.js",
-    "test:e2e": "node test/e2e.js"
+    "test:e2e": "node test/e2e.js",
+    "example": "node examples/chat/chat.mjs"
   },
   "repository": {
     "type": "git",
