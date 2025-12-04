@@ -6,6 +6,20 @@
  */
 
 /**
+ * Pooling type for embedding extraction
+ */
+export enum PoolingType {
+  /** No pooling - raw per-token embeddings */
+  NONE = 0,
+  /** Mean pooling - average of all token embeddings */
+  MEAN = 1,
+  /** CLS pooling - use first token embedding */
+  CLS = 2,
+  /** Last token pooling - use last token embedding */
+  LAST = 3,
+}
+
+/**
  * Options for creating an inference context
  */
 export interface ContextOptions {
@@ -17,6 +31,23 @@ export interface ContextOptions {
 
   /** Number of threads (default: 4) */
   nThreads?: number;
+
+  /**
+   * Enable embedding extraction mode
+   *
+   * When true, context is optimized for embedding extraction.
+   * Use with encode() and getEmbeddings() methods.
+   * Default: false (text generation mode)
+   */
+  embeddings?: boolean;
+
+  /**
+   * Pooling type for embedding extraction
+   *
+   * Only relevant when embeddings=true.
+   * Default: MEAN for embedding contexts, NONE otherwise
+   */
+  poolingType?: PoolingType;
 }
 
 /**
@@ -679,6 +710,97 @@ export interface SessionContext {
    * @returns True if template syntax is valid
    */
   validateChatTemplate(templateString: string): Promise<boolean>;
+
+  // ===== EMBEDDING EXTRACTION =====
+
+  /**
+   * Encode tokens for embedding extraction
+   *
+   * Unlike decode(), this marks ALL tokens with logits=true which is
+   * required for embedding extraction. Use with embeddings=true context.
+   *
+   * Workflow:
+   * 1. Create context with { embeddings: true, poolingType: PoolingType.MEAN }
+   * 2. Tokenize your text
+   * 3. Clear KV cache (important between different texts!)
+   * 4. Call encode() with tokens
+   * 5. Call getEmbeddings() to get the vector
+   *
+   * Cost: ~5-50ms depending on text length and model
+   *
+   * @param tokens Token IDs from tokenize()
+   * @example
+   * ```typescript
+   * // Create embedding context
+   * const ctx = await createContext({
+   *   modelPath: './nomic-embed.gguf',
+   *   embeddings: true,
+   *   poolingType: PoolingType.MEAN
+   * });
+   *
+   * // Get embedding for text
+   * const tokens = await ctx.tokenize("Hello world");
+   * await ctx.kvCacheClear();  // Important between texts!
+   * await ctx.encode(tokens);
+   * const embedding = ctx.getEmbeddings();
+   * ```
+   */
+  encode(tokens: number[]): Promise<void>;
+
+  /**
+   * Get embedding vector from context (after encode)
+   *
+   * Returns the embedding vector for the encoded text.
+   * Call after encode() to extract embeddings.
+   *
+   * The vector dimension depends on the model (e.g., 768 for nomic-embed).
+   * Use getEmbeddingDimension() to get the size.
+   *
+   * Cost: ~0.5ms (extraction from model state)
+   *
+   * @param normalize Apply L2 normalization (default: true for cosine similarity)
+   * @returns Float32Array of embedding values
+   * @example
+   * ```typescript
+   * await ctx.encode(tokens);
+   *
+   * // Get L2-normalized embedding (for cosine similarity)
+   * const embedding = ctx.getEmbeddings();
+   *
+   * // Or raw embedding without normalization
+   * const rawEmbedding = ctx.getEmbeddings(false);
+   * ```
+   */
+  getEmbeddings(normalize?: boolean): Float32Array;
+
+  /**
+   * Get embedding dimension for model
+   *
+   * Returns the size of embedding vectors this model produces.
+   * Common values: 768 (BERT-like), 1024, 2048, 4096.
+   *
+   * Cost: <0.01ms (fast model property lookup)
+   *
+   * @returns Embedding dimension
+   * @example
+   * ```typescript
+   * const dim = ctx.getEmbeddingDimension();
+   * console.log(`Model produces ${dim}-dimensional embeddings`);
+   * ```
+   */
+  getEmbeddingDimension(): number;
+
+  /**
+   * Check if context has pooling enabled
+   *
+   * Returns true if context was created with embeddings=true and
+   * a pooling type other than NONE.
+   *
+   * Cost: <0.01ms
+   *
+   * @returns True if pooling is enabled
+   */
+  hasPooling(): boolean;
 
   // ===== NATIVE REFERENCE IMPLEMENTATIONS (for testing) =====
 

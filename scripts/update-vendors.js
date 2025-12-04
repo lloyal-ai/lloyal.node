@@ -30,7 +30,11 @@ const VENDORS = {
     include: [
       'include/**/*.hpp',
       'include/**/*.h',
-      'tests/**/*',
+      // Note: tests/ directory NOT included - it contains:
+      // - Unit test source files (not needed for npm consumers)
+      // - tests/lib/ prebuilt xcframeworks (hundreds of MB)
+      // - tests/fixtures/ test models (80MB+)
+      // lloyal.node only needs headers for N-API compilation
       'CMakeLists.txt',
       'README.md',
       'LICENSE'
