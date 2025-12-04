@@ -179,10 +179,7 @@ jobs:
             exit 1
           fi
 
-          if grep -q "package/vendor/liblloyal/tests/lib" package-contents.txt; then
-            echo "❌ ERROR: tests/lib/ prebuilt binaries should not be in package!"
-            exit 1
-          fi
+          # Note: vendor/liblloyal/tests/ is no longer vendored (only headers needed)
 
           echo "✅ Package contents verified!"
 
