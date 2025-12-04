@@ -20,7 +20,6 @@ const fs = require('fs');
 const POSSIBLE_PATHS = [
   process.env.LLAMA_EMBED_MODEL,
   path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'),
-  path.join(__dirname, '../liblloyal/tests/fixtures/nomic-embed-text-v1.5.Q4_K_M.gguf'),
 ].filter(Boolean);
 
 const EMBED_MODEL_PATH = POSSIBLE_PATHS.find(p => fs.existsSync(p));
