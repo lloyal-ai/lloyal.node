@@ -9,6 +9,7 @@
 #include <lloyal/chat_template.hpp>
 #include <lloyal/grammar.hpp>
 #include <lloyal/kv.hpp>
+#include <lloyal/embedding.hpp>
 #include <cmath>
 
 namespace liblloyal_node {
@@ -406,6 +407,39 @@ private:
 };
 
 /**
+ * AsyncWorker for encode operation (embedding extraction)
+ * Unlike DecodeWorker, marks ALL tokens with logits=true
+ */
+class EncodeWorker : public Napi::AsyncWorker {
+public:
+  EncodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens) {}
+
+  void Execute() override {
+    try {
+      lloyal::decoder::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
+    } catch (const std::exception& e) {
+      SetError(e.what());
+    }
+  }
+
+  void OnOK() override {
+    _deferred.Resolve(Env().Undefined());
+  }
+
+  void OnError(const Napi::Error& err) override {
+    _deferred.Reject(err.Value());
+  }
+
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  std::vector<llama_token> _tokens;
+};
+
+/**
  * AsyncWorker for detokenize operation
  */
 class DetokenizeWorker : public Napi::AsyncWorker {
@@ -535,6 +569,12 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("formatChat", &SessionContext::formatChat),
     InstanceMethod("jsonSchemaToGrammar", &SessionContext::jsonSchemaToGrammar),
     InstanceMethod("validateChatTemplate", &SessionContext::validateChatTemplate),
+
+    // ===== EMBEDDING EXTRACTION =====
+    InstanceMethod("encode", &SessionContext::encode),
+    InstanceMethod("getEmbeddings", &SessionContext::getEmbeddings),
+    InstanceMethod("getEmbeddingDimension", &SessionContext::getEmbeddingDimension),
+    InstanceMethod("hasPooling", &SessionContext::hasPooling),
 
     // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
     InstanceMethod("computeEntropy", &SessionContext::computeEntropy),
@@ -769,6 +809,87 @@ Napi::Value SessionContext::tokenToText(const Napi::CallbackInfo& info) {
   std::string text = lloyal::tokenizer::detokenize(_model.get(), token, true);
 
   return Napi::String::New(env, text);
+}
+
+// ===== EMBEDDING EXTRACTION =====
+
+Napi::Value SessionContext::encode(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    throw Napi::TypeError::New(env, "Expected (tokens: number[])");
+  }
+
+  // Extract tokens
+  Napi::Array jsTokens = info[0].As<Napi::Array>();
+  std::vector<llama_token> tokens;
+  tokens.reserve(jsTokens.Length());
+  for (uint32_t i = 0; i < jsTokens.Length(); i++) {
+    Napi::Value val = jsTokens[i];
+    if (!val.IsNumber()) {
+      throw Napi::TypeError::New(env, "Token array must contain only numbers");
+    }
+    tokens.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  // Run async
+  auto* worker = new EncodeWorker(env, _context, tokens);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::getEmbeddings(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_context) {
+    throw Napi::Error::New(env, "Context not initialized");
+  }
+
+  // Check for optional normalize parameter (default true = L2)
+  bool normalize = true;
+  if (info.Length() > 0 && info[0].IsBoolean()) {
+    normalize = info[0].As<Napi::Boolean>().Value();
+  }
+
+  try {
+    // Use liblloyal embedding::get
+    auto normMode = normalize ? lloyal::embedding::Normalize::L2 : lloyal::embedding::Normalize::None;
+    std::vector<float> embeddings = lloyal::embedding::get(_context, normMode);
+
+    // Copy to Float32Array
+    Napi::Float32Array result = Napi::Float32Array::New(env, embeddings.size());
+    std::memcpy(result.Data(), embeddings.data(), embeddings.size() * sizeof(float));
+
+    return result;
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
+}
+
+Napi::Value SessionContext::getEmbeddingDimension(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_model) {
+    throw Napi::Error::New(env, "Model not initialized");
+  }
+
+  int32_t dim = lloyal::embedding::dimension(_model.get());
+  return Napi::Number::New(env, static_cast<double>(dim));
+}
+
+Napi::Value SessionContext::hasPooling(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_context) {
+    throw Napi::Error::New(env, "Context not initialized");
+  }
+
+  bool hasPool = lloyal::embedding::has_pooling(_context);
+  return Napi::Boolean::New(env, hasPool);
 }
 
 Napi::Value SessionContext::isStopToken(const Napi::CallbackInfo& info) {
@@ -1281,6 +1402,19 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     nThreads = options.Get("nThreads").As<Napi::Number>().Int32Value();
   }
 
+  // Extract embeddings mode (optional, default false)
+  bool embeddingsMode = false;
+  if (options.Has("embeddings") && options.Get("embeddings").IsBoolean()) {
+    embeddingsMode = options.Get("embeddings").As<Napi::Boolean>().Value();
+  }
+
+  // Extract pooling type (optional, default MEAN for embeddings, NONE otherwise)
+  // 0 = NONE, 1 = MEAN, 2 = CLS, 3 = LAST
+  int32_t poolingType = embeddingsMode ? 1 : 0;  // Default to MEAN for embedding contexts
+  if (options.Has("poolingType") && options.Get("poolingType").IsNumber()) {
+    poolingType = options.Get("poolingType").As<Napi::Number>().Int32Value();
+  }
+
   // Ensure llama backend is initialized on main thread (thread-safe, once)
   BackendManager::ensureInitialized();
 
@@ -1322,7 +1456,12 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   ctx_params.n_ubatch = lloyal::defaults::N_BATCH_INIT;
   ctx_params.n_threads = static_cast<uint32_t>(nThreads);
 
-  std::cout << "[CreateContext] Creating context..." << std::endl;
+  // Apply embedding-specific params
+  ctx_params.embeddings = embeddingsMode;
+  ctx_params.pooling_type = static_cast<enum llama_pooling_type>(poolingType);
+
+  std::cout << "[CreateContext] Creating context (embeddings=" << embeddingsMode
+            << ", pooling=" << poolingType << ")..." << std::endl;
   llama_context* ctx = llama_init_from_model(sharedModel.get(), ctx_params);
 
   if (!ctx) {

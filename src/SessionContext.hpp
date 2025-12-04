@@ -161,6 +161,35 @@ private:
   Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
   Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);
 
+  // ===== EMBEDDING EXTRACTION =====
+
+  /**
+   * Encode tokens for embedding extraction
+   * Unlike decode(), marks ALL tokens with logits=true
+   * Args: tokens (number[])
+   * Returns: Promise<void>
+   */
+  Napi::Value encode(const Napi::CallbackInfo& info);
+
+  /**
+   * Get embeddings from context (after encode)
+   * Args: normalize (optional boolean, default true for L2)
+   * Returns: Float32Array
+   */
+  Napi::Value getEmbeddings(const Napi::CallbackInfo& info);
+
+  /**
+   * Get embedding dimension for model
+   * Returns: number
+   */
+  Napi::Value getEmbeddingDimension(const Napi::CallbackInfo& info);
+
+  /**
+   * Check if context has pooling enabled
+   * Returns: boolean
+   */
+  Napi::Value hasPooling(const Napi::CallbackInfo& info);
+
 private:
   // ===== INTERNAL STATE =====
 
