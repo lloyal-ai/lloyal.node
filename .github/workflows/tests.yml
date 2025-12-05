@@ -92,18 +92,7 @@ jobs:
         if: runner.os != 'Windows'
         run: npm run test:e2e
         timeout-minutes: 5
-
-      - name: Run Embedding tests (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
-          npm run test:embedding
-        timeout-minutes: 5
-
-      - name: Run Embedding tests (Unix)
-        if: runner.os != 'Windows'
-        run: npm run test:embedding
-        timeout-minutes: 5
+        # Note: E2E tests include embedding suite which skips gracefully if no embedding model
 
       - name: Display build info
         if: always()
@@ -206,7 +195,6 @@ jobs:
           echo "✓ Node.js 18, 20, 22 compatibility verified"
           echo "✓ npm package contents verified"
           echo "✓ API tests passed (11 tests)"
-          echo "✓ E2E tests passed (4 validation tests)"
-          echo "✓ Embedding tests passed (8 tests)"
+          echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
           echo ""
           echo "Phase 1 (Build from Source) Status: ${{ needs.test-vendored-sources.result }}"

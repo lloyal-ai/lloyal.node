@@ -7,6 +7,7 @@ Thin N-API wrapper over [liblloyal](https://github.com/lloyal-ai/liblloyal) for 
 - **Prebuilt Binaries**: Install in <1 minute on 7 common platforms (macOS, Linux, Windows)
 - **Raw & Thin**: Direct access to llama.cpp primitives via liblloyal
 - **Zero-Copy Logits**: `getLogits()` returns Float32Array pointing to llama.cpp memory
+- **Embeddings**: Extract L2-normalized embeddings with configurable pooling (MEAN, CLS, LAST)
 - **GPU Acceleration**: Metal (macOS), CUDA, and Vulkan support with dedicated prebuilts
 - **BYO llama.cpp**: Swap `libllama.dylib` for custom builds (dynamic linking)
 - **Native Reference**: Includes native entropy/greedy implementations for testing
@@ -318,6 +319,8 @@ Creates a new inference context.
 - `modelPath: string` - Path to .gguf model file (required)
 - `nCtx?: number` - Context size (default: 2048)
 - `nThreads?: number` - Number of threads (default: 4)
+- `embeddings?: boolean` - Enable embedding mode (default: false)
+- `poolingType?: number` - Pooling type: 0=NONE, 1=MEAN, 2=CLS, 3=LAST (default: model's default)
 
 **Returns:** `Promise<SessionContext>`
 
@@ -329,6 +332,14 @@ Creates a new inference context.
 - **`decode(tokens: number[], position: number): Promise<void>`** - Decode tokens through model
 - **`tokenize(text: string): Promise<number[]>`** - Tokenize text to token IDs
 - **`detokenize(tokens: number[]): Promise<string>`** - Detokenize tokens to text
+
+#### Embeddings
+
+- **`encode(tokens: number[]): Promise<void>`** - Encode tokens for embedding extraction
+- **`getEmbeddings(normalize?: boolean): Float32Array`** - Get embeddings (optionally L2-normalized)
+- **`hasPooling(): boolean`** - Check if context has pooling enabled
+- **`getEmbeddingDimension(): number`** - Get embedding vector dimension
+- **`kvCacheClear(): Promise<void>`** - Clear KV cache (call between texts for embeddings)
 
 #### Native References (for testing)
 
@@ -418,9 +429,9 @@ npm run test:e2e      # Correctness and determinism validation
 ### Tests
 
 - **`test/api.js`**: API functionality tests and performance benchmarks
-- **`test/e2e.js`**: End-to-end validation with deterministic output checks
+- **`test/e2e.js`**: End-to-end validation (text generation + embeddings)
 
-Tests use SmolLM2-1.7B-Instruct with chat templates to simulate real-world usage patterns.
+Tests use SmolLM2-1.7B-Instruct for text generation and nomic-embed-text for embeddings. Embedding tests skip gracefully if no embedding model is available.
 
 ## Distribution & Releases
 
