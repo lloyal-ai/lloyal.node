@@ -10,6 +10,7 @@
 #include <lloyal/grammar.hpp>
 #include <lloyal/kv.hpp>
 #include <lloyal/embedding.hpp>
+#include <lloyal/logits.hpp>
 #include <cmath>
 
 namespace liblloyal_node {
@@ -628,6 +629,34 @@ void SessionContext::initializeContext(
   std::cerr << "  Shared refcount: " << _model.use_count() << std::endl;
 }
 
+// ===== LOGITS BUFFER MANAGEMENT =====
+
+void SessionContext::invalidateLogits() {
+  // The Kill Switch: Detach any active logits buffer
+  //
+  // This is called before any operation that invalidates the logits pointer:
+  // - decode() - new forward pass overwrites logits
+  // - encode() - embedding pass overwrites logits
+  // - dispose() - context is destroyed
+  //
+  // After detach, any JS code holding a reference to the buffer will get
+  // a TypeError when trying to access it - exactly what we want.
+  if (!_logitsBufferRef.IsEmpty()) {
+    try {
+      Napi::ArrayBuffer buffer = _logitsBufferRef.Value();
+      if (!buffer.IsDetached()) {
+        buffer.Detach();
+      }
+    } catch (...) {
+      // Buffer may have been garbage collected - that's fine
+    }
+    _logitsBufferRef.Reset();
+  }
+
+  // Increment step counter - any new getLogits() call will create fresh buffer
+  _decodeStepId++;
+}
+
 Napi::Value SessionContext::getLogits(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -636,23 +665,42 @@ Napi::Value SessionContext::getLogits(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  // Get raw logits pointer (zero-copy)
-  float* logits = llama_get_logits_ith(_context, -1);
-  if (!logits) {
-    throw Napi::Error::New(env, "Failed to get logits");
+  // ===== MEMOIZATION: Return same buffer if already created for this step =====
+  //
+  // Pattern: "Memoized Step-Scoped Views"
+  // If caller calls getLogits() twice in the same step, return the same buffer.
+  // This avoids creating multiple views into the same memory.
+  if (_logitsStepId == _decodeStepId && !_logitsBufferRef.IsEmpty()) {
+    // Same step, reuse existing buffer
+    Napi::ArrayBuffer existingBuffer = _logitsBufferRef.Value();
+    const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+    return Napi::Float32Array::New(env, n_vocab, existingBuffer, 0);
   }
 
-  // Use model overload for vocab_size
+  // ===== NEW BUFFER: Get logits via lloyal wrapper (handles null checks) =====
+  //
+  // lloyal::logits::get() throws descriptive errors if:
+  // - Context is null
+  // - Logits unavailable (decode() not called with logits=true)
+  float* logits;
+  try {
+    logits = lloyal::logits::get(_context, -1);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
+
   const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
-  // Create Float32Array wrapping the logits (zero-copy!)
-  // WARNING: This is only valid until next decode() call
-  return Napi::Float32Array::New(
-    env,
-    n_vocab,
-    Napi::ArrayBuffer::New(env, logits, n_vocab * sizeof(float)),
-    0
-  );
+  // Create ArrayBuffer wrapping the logits (zero-copy!)
+  // Store reference for memoization and future revocation
+  Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, logits, n_vocab * sizeof(float));
+
+  // Store weak reference for memoization
+  _logitsBufferRef = Napi::Reference<Napi::ArrayBuffer>::New(buffer, 1);
+  _logitsStepId = _decodeStepId;
+
+  // Return Float32Array view
+  return Napi::Float32Array::New(env, n_vocab, buffer, 0);
 }
 
 Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
@@ -662,6 +710,9 @@ Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
   if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsNumber()) {
     throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number)");
   }
+
+  // Revoke any active logits buffer before decode
+  invalidateLogits();
 
   // Extract tokens
   Napi::Array jsTokens = info[0].As<Napi::Array>();
@@ -733,10 +784,12 @@ Napi::Value SessionContext::computeEntropy(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  // Get logits
-  float* logits = llama_get_logits_ith(_context, -1);
-  if (!logits) {
-    throw Napi::Error::New(env, "Failed to get logits");
+  // Get logits via lloyal wrapper (handles null checks)
+  float* logits;
+  try {
+    logits = lloyal::logits::get(_context, -1);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
   }
 
   // Use model overload for vocab_size
@@ -820,6 +873,9 @@ Napi::Value SessionContext::encode(const Napi::CallbackInfo& info) {
   if (info.Length() < 1 || !info[0].IsArray()) {
     throw Napi::TypeError::New(env, "Expected (tokens: number[])");
   }
+
+  // Revoke any active logits buffer before encode
+  invalidateLogits();
 
   // Extract tokens
   Napi::Array jsTokens = info[0].As<Napi::Array>();
@@ -987,7 +1043,10 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!_disposed) {
-    // Free grammar sampler first
+    // Revoke any active logits buffer before disposing
+    invalidateLogits();
+
+    // Free grammar sampler
     if (_grammarSampler) {
       llama_sampler_free(_grammarSampler);
       _grammarSampler = nullptr;
@@ -1027,11 +1086,13 @@ Napi::Value SessionContext::getTokenScores(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Context not initialized");
   }
 
-  // Get raw logits pointer from llama.cpp (last-step logits, index -1)
+  // Get raw logits pointer via lloyal wrapper (handles null checks)
   // Returns mutable float* - we need to modify logits for grammar constraints
-  float* logits = llama_get_logits_ith(_context, -1);
-  if (!logits) {
-    throw Napi::Error::New(env, "Failed to get logits (ensure decode had logits=true)");
+  float* logits;
+  try {
+    logits = lloyal::logits::get(_context, -1);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
   }
 
   // Get vocabulary size using model overload

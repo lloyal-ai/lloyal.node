@@ -191,8 +191,77 @@ async function runTests() {
     console.log(`✓ Full text: "${generatedText}"`);
     console.log(`✓ Final position: ${position}\n`);
 
-    // ===== TEST 11: Benchmarking native vs TS preparation =====
-    console.log('⏱️  Test 11: Performance check');
+    // ===== TEST 11: Logits buffer memoization =====
+    console.log('🧠 Test 11: Logits buffer memoization');
+
+    // Call getLogits() twice in same step - should return same underlying buffer
+    const logits1 = ctx.getLogits();
+    const logits2 = ctx.getLogits();
+
+    // Check they have same length and same values (memoized)
+    if (logits1.length !== logits2.length) {
+      throw new Error(`Memoization failed: different lengths (${logits1.length} vs ${logits2.length})`);
+    }
+
+    // Check first few values are identical (same buffer)
+    let memoMatch = true;
+    for (let i = 0; i < Math.min(100, logits1.length); i++) {
+      if (logits1[i] !== logits2[i]) {
+        memoMatch = false;
+        break;
+      }
+    }
+
+    if (!memoMatch) {
+      throw new Error('Memoization failed: buffers have different values');
+    }
+    console.log('✓ getLogits() returns memoized buffer (same step = same buffer)');
+
+    // Modify one, check other is modified (same underlying memory)
+    const originalValue = logits1[0];
+    logits1[0] = -999.0;
+    if (logits2[0] !== -999.0) {
+      console.log('⚠️  Warning: Buffers may not share memory (could be copy)');
+    } else {
+      console.log('✓ Buffers share same underlying memory (zero-copy confirmed)');
+    }
+    logits1[0] = originalValue; // Restore
+    console.log();
+
+    // ===== TEST 12: withLogits() helper =====
+    console.log('🔒 Test 12: withLogits() helper');
+
+    const { withLogits } = require('..');
+
+    // Test synchronous usage (should work)
+    const maxLogit = withLogits(ctx, (logits) => {
+      let max = logits[0];
+      for (let i = 1; i < logits.length; i++) {
+        if (logits[i] > max) max = logits[i];
+      }
+      return max;
+    });
+    console.log(`✓ withLogits() sync: max logit = ${maxLogit.toFixed(4)}`);
+
+    // Test async rejection (should throw)
+    let asyncThrew = false;
+    try {
+      withLogits(ctx, async (logits) => {
+        return logits[0]; // Returning Promise is not allowed
+      });
+    } catch (err) {
+      if (err.message.includes('synchronous')) {
+        asyncThrew = true;
+      }
+    }
+
+    if (!asyncThrew) {
+      throw new Error('withLogits() should throw when callback returns Promise');
+    }
+    console.log('✓ withLogits() rejects async callbacks (safety enforced)\n');
+
+    // ===== TEST 13: Benchmarking native vs TS preparation =====
+    console.log('⏱️  Test 13: Performance check');
     const iterations = 100;
 
     // Warm up

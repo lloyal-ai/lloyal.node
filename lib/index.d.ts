@@ -875,3 +875,65 @@ export interface SessionContext {
  * ```
  */
 export function createContext(options: ContextOptions): Promise<SessionContext>;
+
+/**
+ * Safe logits access with Runtime Borrow Checker pattern
+ *
+ * Ensures logits are only accessed synchronously within the callback.
+ * The callback MUST NOT:
+ * - Store the logits reference
+ * - Return a Promise (will throw)
+ * - Call decode() (would invalidate logits)
+ *
+ * This is a "runtime borrow checker" - it prevents async mutations
+ * while you're working with borrowed logits.
+ *
+ * Pattern: "Memoized Step-Scoped Views with Explicit Revocation"
+ * - Memoization: If getLogits() called twice in same step, returns same buffer
+ * - Revocation: On decode(), the previous buffer is detached
+ *
+ * @template T Return type of the callback
+ * @param ctx The session context
+ * @param fn Synchronous callback that uses logits - must not return a Promise
+ * @returns The result from the callback
+ * @throws Error if callback returns a Promise (async usage not allowed)
+ *
+ * @example Safe synchronous usage
+ * ```typescript
+ * // Compute entropy synchronously
+ * const entropy = withLogits(ctx, (logits) => {
+ *   let maxLogit = logits[0];
+ *   for (let i = 1; i < logits.length; i++) {
+ *     if (logits[i] > maxLogit) maxLogit = logits[i];
+ *   }
+ *
+ *   let sumExp = 0;
+ *   for (let i = 0; i < logits.length; i++) {
+ *     sumExp += Math.exp(logits[i] - maxLogit);
+ *   }
+ *
+ *   let entropy = 0;
+ *   for (let i = 0; i < logits.length; i++) {
+ *     const p = Math.exp(logits[i] - maxLogit) / sumExp;
+ *     if (p > 0) entropy -= p * Math.log(p);
+ *   }
+ *   return entropy;
+ * });
+ *
+ * // Now safe to decode (previous logits buffer is revoked)
+ * await ctx.decode([nextToken], position++);
+ * ```
+ *
+ * @example Error: async callback
+ * ```typescript
+ * // This will throw!
+ * withLogits(ctx, async (logits) => {
+ *   await something();  // NOT ALLOWED
+ *   return logits[0];
+ * });
+ * ```
+ */
+export function withLogits<T>(
+  ctx: SessionContext,
+  fn: (logits: Float32Array) => T
+): T;
