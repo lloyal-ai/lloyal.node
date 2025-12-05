@@ -202,6 +202,18 @@ private:
   llama_sampler* _grammarSampler = nullptr;
   std::string _currentGrammar;  // Track current grammar string to avoid re-initialization
 
+  // ===== LOGITS BUFFER MANAGEMENT (Memoization + Revocation) =====
+  //
+  // Pattern: "Memoized Step-Scoped Views with Explicit Revocation"
+  //
+  // - Memoization: If getLogits() called twice in same step, return same buffer
+  // - Revocation: On decode(), detach previous buffer to prevent use-after-invalidation
+  //
+  // See: lloyal::logits::get() for the underlying safe wrapper
+  uint64_t _decodeStepId = 0;                           // Incremented on each decode()
+  uint64_t _logitsStepId = 0;                           // Step when _logitsBuffer was created
+  Napi::Reference<Napi::ArrayBuffer> _logitsBufferRef;  // Weak reference to detach on revocation
+
   // ===== INLINE HELPERS =====
   // Pattern matches HybridSessionContext.hpp:170-176
 
@@ -218,6 +230,19 @@ private:
   inline llama_pos toPos(double pos) {
     return static_cast<llama_pos>(pos);
   }
+
+  /**
+   * Invalidate any active logits buffer (The Kill Switch)
+   *
+   * Called before any operation that would invalidate the logits pointer:
+   * - decode()
+   * - encode()
+   * - dispose()
+   *
+   * Detaches the ArrayBuffer so any JS code holding a reference
+   * will get a TypeError when trying to access it.
+   */
+  void invalidateLogits();
 };
 
 /**
