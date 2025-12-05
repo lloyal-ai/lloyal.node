@@ -135,18 +135,60 @@ private:
   Napi::Value freeGrammar(const Napi::CallbackInfo& info);
 
   // ===== KV CACHE MANAGEMENT =====
-  // (To be implemented in Phase 3)
 
   Napi::Value kvCacheRemove(const Napi::CallbackInfo& info);
   Napi::Value kvCacheSave(const Napi::CallbackInfo& info);
   Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
   Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
 
+  /**
+   * Write KV cache state + tokens to a file for disk persistence
+   * Args: sequenceId (number), filepath (string), tokens (number[])
+   * Returns: Promise<number> (bytes written)
+   */
+  Napi::Value kvCacheWriteFile(const Napi::CallbackInfo& info);
+
+  /**
+   * Read KV cache state + tokens from a file
+   * Args: sequenceId (number), filepath (string)
+   * Returns: Promise<{ tokens: number[], bytesRead: number }>
+   */
+  Napi::Value kvCacheReadFile(const Napi::CallbackInfo& info);
+
   // ===== HELPERS =====
   // (To be implemented in Phase 6)
 
   Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
   Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);
+
+  // ===== EMBEDDING EXTRACTION =====
+
+  /**
+   * Encode tokens for embedding extraction
+   * Unlike decode(), marks ALL tokens with logits=true
+   * Args: tokens (number[])
+   * Returns: Promise<void>
+   */
+  Napi::Value encode(const Napi::CallbackInfo& info);
+
+  /**
+   * Get embeddings from context (after encode)
+   * Args: normalize (optional boolean, default true for L2)
+   * Returns: Float32Array
+   */
+  Napi::Value getEmbeddings(const Napi::CallbackInfo& info);
+
+  /**
+   * Get embedding dimension for model
+   * Returns: number
+   */
+  Napi::Value getEmbeddingDimension(const Napi::CallbackInfo& info);
+
+  /**
+   * Check if context has pooling enabled
+   * Returns: boolean
+   */
+  Napi::Value hasPooling(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====
@@ -167,14 +209,6 @@ private:
     if (_disposed) {
       throw Napi::Error::New(Env(), "Context has been disposed");
     }
-  }
-
-  inline const llama_vocab* getVocabOrThrow() {
-    const llama_vocab* vocab = lloyal::tokenizer::get_vocab(_model.get());
-    if (!vocab) {
-      throw Napi::Error::New(Env(), "Failed to get vocabulary");
-    }
-    return vocab;
   }
 
   inline llama_seq_id toSeqId(double id) {

@@ -6,7 +6,6 @@ prebuilds/
 
 # Vendor build artifacts (generated during npm install)
 vendor/llama.cpp/build-*/
-vendor/liblloyal/tests/lib/
 
 # Dependencies
 node_modules/
@@ -26,3 +25,5 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+
+.tmp

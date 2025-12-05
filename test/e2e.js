@@ -1,16 +1,22 @@
 /**
  * End-to-end test - verify correct and deterministic model output
  *
- * Uses deterministic sampling (temp=0) to validate:
- * 1. Known prompts produce expected answers
- * 2. Same prompt always produces same output (determinism)
- * 3. Complete inference pipeline works correctly
+ * Suites:
+ * 1. Text Generation - deterministic sampling, known prompts produce expected answers
+ * 2. Embeddings - embedding extraction, similarity computation (requires LLAMA_EMBED_MODEL)
  */
 
 const path = require('path');
 const fs = require('fs');
 
+// Model paths
 const MODEL_PATH = path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
+
+const EMBED_MODEL_PATHS = [
+  process.env.LLAMA_EMBED_MODEL,
+  path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'),
+].filter(Boolean);
+const EMBED_MODEL_PATH = EMBED_MODEL_PATHS.find(p => fs.existsSync(p));
 
 // Check if model exists
 if (!fs.existsSync(MODEL_PATH)) {
@@ -158,46 +164,246 @@ async function validateTestCase(modelPath, testCase) {
   return true;
 }
 
-async function runValidation() {
+// ═══════════════════════════════════════════════════════════════════════════
+// EMBEDDING SUITE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Compute cosine similarity between two vectors
+ */
+function cosineSimilarity(a, b) {
+  if (a.length !== b.length) {
+    throw new Error(`Vector length mismatch: ${a.length} vs ${b.length}`);
+  }
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  normA = Math.sqrt(normA);
+  normB = Math.sqrt(normB);
+
+  if (normA === 0 || normB === 0) return 0;
+  return dotProduct / (normA * normB);
+}
+
+/**
+ * Compute L2 norm of a vector
+ */
+function l2Norm(vec) {
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) {
+    sum += vec[i] * vec[i];
+  }
+  return Math.sqrt(sum);
+}
+
+/**
+ * Extract embedding for a text
+ */
+async function getEmbedding(ctx, text) {
+  const tokens = await ctx.tokenize(text);
+  await ctx.kvCacheClear();
+  await ctx.encode(tokens);
+  return ctx.getEmbeddings(true); // L2-normalized
+}
+
+/**
+ * Run embedding test suite
+ */
+async function runEmbeddingSuite() {
+  console.log('\n═══════════════════════════════════════');
+  console.log('=== Embedding Suite ===\n');
+
+  if (!EMBED_MODEL_PATH) {
+    console.log('⏭️  SKIPPED: No embedding model found');
+    console.log('   To run embedding tests, either:');
+    console.log('   - Set LLAMA_EMBED_MODEL=/path/to/embedding-model.gguf');
+    console.log('   - Place nomic-embed-text-v1.5.Q4_K_M.gguf in models/');
+    return { passed: 0, failed: 0, skipped: true };
+  }
+
+  console.log(`Model: ${path.basename(EMBED_MODEL_PATH)}`);
+  console.log(`Size: ${(fs.statSync(EMBED_MODEL_PATH).size / 1024 / 1024).toFixed(2)} MB\n`);
+
+  let passed = 0;
+  let failed = 0;
+  let ctx = null;
+
   try {
+    // Test 1: Create embedding context
+    console.log('📦 Test: createContext() with embedding mode');
+    ctx = await addon.createContext({
+      modelPath: EMBED_MODEL_PATH,
+      nCtx: 512,
+      nBatch: 512,
+      nThreads: 4,
+      embeddings: true,
+      poolingType: 1  // LLAMA_POOLING_TYPE_MEAN
+    });
+    console.log('   ✓ Embedding context created');
+    passed++;
+
+    // Test 2: Verify pooling is enabled
+    console.log('🔍 Test: hasPooling()');
+    const hasPool = ctx.hasPooling();
+    if (!hasPool) {
+      console.log('   ❌ FAIL: Pooling should be enabled');
+      failed++;
+    } else {
+      console.log(`   ✓ hasPooling(): ${hasPool}`);
+      passed++;
+    }
+
+    // Test 3: Get embedding dimension
+    console.log('📐 Test: getEmbeddingDimension()');
+    const dim = ctx.getEmbeddingDimension();
+    if (dim <= 0) {
+      console.log('   ❌ FAIL: Dimension should be positive');
+      failed++;
+    } else {
+      console.log(`   ✓ Embedding dimension: ${dim}`);
+      passed++;
+    }
+
+    // Test 4: Extract embedding and verify dimension
+    console.log('🧮 Test: Extract embedding');
+    const testText = "Hello world";
+    const emb1 = await getEmbedding(ctx, testText);
+    if (emb1.length !== dim) {
+      console.log(`   ❌ FAIL: Embedding length ${emb1.length} doesn't match dimension ${dim}`);
+      failed++;
+    } else {
+      console.log(`   ✓ Embedded "${testText}" → Float32Array(${emb1.length})`);
+      passed++;
+    }
+
+    // Test 5: Verify L2 normalization
+    console.log('📏 Test: L2 normalization');
+    const norm = l2Norm(emb1);
+    if (Math.abs(norm - 1.0) > 0.01) {
+      console.log(`   ❌ FAIL: L2 norm should be ~1.0, got ${norm}`);
+      failed++;
+    } else {
+      console.log(`   ✓ L2 norm: ${norm.toFixed(6)} (unit-normalized)`);
+      passed++;
+    }
+
+    // Test 6: Identical texts have high similarity
+    console.log('🔄 Test: Identical texts similarity');
+    const emb1_copy = await getEmbedding(ctx, testText);
+    const simIdentical = cosineSimilarity(emb1, emb1_copy);
+    if (simIdentical < 0.99) {
+      console.log(`   ❌ FAIL: Identical texts should have similarity ~1.0, got ${simIdentical}`);
+      failed++;
+    } else {
+      console.log(`   ✓ Similarity: ${simIdentical.toFixed(4)}`);
+      passed++;
+    }
+
+    // Test 7: Similar texts have higher similarity than different texts
+    console.log('📊 Test: Semantic similarity');
+    const textA = "The cat sat on the mat";
+    const textB = "A cat rested on the rug";
+    const textC = "Stock prices rose sharply";
+
+    const embA = await getEmbedding(ctx, textA);
+    const embB = await getEmbedding(ctx, textB);
+    const embC = await getEmbedding(ctx, textC);
+
+    const simSimilar = cosineSimilarity(embA, embB);
+    const simDifferent = cosineSimilarity(embA, embC);
+
+    if (simSimilar <= simDifferent) {
+      console.log(`   ❌ FAIL: Similar sentences should have higher similarity`);
+      console.log(`      Similar: ${simSimilar.toFixed(4)}, Different: ${simDifferent.toFixed(4)}`);
+      failed++;
+    } else {
+      console.log(`   ✓ Similar: ${simSimilar.toFixed(4)} > Different: ${simDifferent.toFixed(4)}`);
+      passed++;
+    }
+
+    // Test 8: Similar texts have reasonable similarity
+    if (simSimilar < 0.5) {
+      console.log(`   ❌ FAIL: Similar sentences should have similarity > 0.5`);
+      failed++;
+    } else {
+      console.log(`   ✓ Similar sentences have reasonable similarity (${simSimilar.toFixed(4)} > 0.5)`);
+      passed++;
+    }
+
+  } finally {
+    if (ctx) {
+      ctx.dispose();
+    }
+  }
+
+  return { passed, failed, skipped: false };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN TEST RUNNER
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runAllTests() {
+  try {
+    // Suite 1: Text Generation
+    console.log('=== Text Generation Suite ===\n');
     console.log('Starting validation...\n');
 
-    // Run all test cases
-    let passed = 0;
-    let failed = 0;
+    let genPassed = 0;
+    let genFailed = 0;
 
     for (const testCase of TEST_CASES) {
       const result = await validateTestCase(MODEL_PATH, testCase);
       if (result) {
-        passed++;
+        genPassed++;
       } else {
-        failed++;
+        genFailed++;
       }
     }
 
-    // Summary
-    console.log('═══════════════════════════════════════');
-    console.log(`Results: ${passed}/${TEST_CASES.length} tests passed`);
+    // Suite 2: Embeddings
+    const embedResult = await runEmbeddingSuite();
 
-    if (failed === 0) {
-      console.log('✅ All validation tests passed!');
-      console.log('   Model is generating correct, deterministic output.');
+    // Final Summary
+    console.log('\n═══════════════════════════════════════');
+    console.log('=== Final Results ===\n');
+
+    const totalPassed = genPassed + embedResult.passed;
+    const totalFailed = genFailed + embedResult.failed;
+
+    console.log(`Text Generation: ${genPassed}/${TEST_CASES.length} passed`);
+    if (embedResult.skipped) {
+      console.log(`Embeddings: SKIPPED (no model)`);
+    } else {
+      console.log(`Embeddings: ${embedResult.passed}/${embedResult.passed + embedResult.failed} passed`);
+    }
+    console.log(`\nTotal: ${totalPassed}/${totalPassed + totalFailed} tests passed`);
+
+    if (totalFailed === 0) {
+      console.log('\n✅ All E2E tests passed!');
       process.exit(0);
     } else {
-      console.log(`❌ ${failed} tests failed`);
-      console.log('   Model may not be working correctly.');
+      console.log(`\n❌ ${totalFailed} tests failed`);
       process.exit(1);
     }
 
   } catch (err) {
-    console.error('\n❌ Validation failed:', err.message);
+    console.error('\n❌ Test run failed:', err.message);
     console.error(err.stack);
     process.exit(1);
   }
 }
 
-// Run validation
-runValidation().catch(err => {
+// Run all tests
+runAllTests().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });

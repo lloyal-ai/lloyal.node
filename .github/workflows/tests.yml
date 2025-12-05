@@ -92,6 +92,7 @@ jobs:
         if: runner.os != 'Windows'
         run: npm run test:e2e
         timeout-minutes: 5
+        # Note: E2E tests include embedding suite which skips gracefully if no embedding model
 
       - name: Display build info
         if: always()
@@ -167,10 +168,7 @@ jobs:
             exit 1
           fi
 
-          if grep -q "package/vendor/liblloyal/tests/lib" package-contents.txt; then
-            echo "❌ ERROR: tests/lib/ prebuilt binaries should not be in package!"
-            exit 1
-          fi
+          # Note: vendor/liblloyal/tests/ is no longer vendored (only headers needed)
 
           echo "✅ Package contents verified!"
 
@@ -197,6 +195,6 @@ jobs:
           echo "✓ Node.js 18, 20, 22 compatibility verified"
           echo "✓ npm package contents verified"
           echo "✓ API tests passed (11 tests)"
-          echo "✓ E2E tests passed (4 validation tests)"
+          echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
           echo ""
           echo "Phase 1 (Build from Source) Status: ${{ needs.test-vendored-sources.result }}"
