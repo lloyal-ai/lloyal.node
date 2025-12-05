@@ -212,7 +212,7 @@ private:
   // See: lloyal::logits::get() for the underlying safe wrapper
   uint64_t _decodeStepId = 0;                           // Incremented on each decode()
   uint64_t _logitsStepId = 0;                           // Step when _logitsBuffer was created
-  Napi::Reference<Napi::ArrayBuffer> _logitsBufferRef;  // Weak reference to detach on revocation
+  Napi::Reference<Napi::ArrayBuffer> _logitsBufferRef;  // Strong reference - kept alive so we can Detach() on revocation
 
   // ===== INLINE HELPERS =====
   // Pattern matches HybridSessionContext.hpp:170-176
