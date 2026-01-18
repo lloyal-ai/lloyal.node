@@ -1,7 +1,7 @@
 {
   "name": "lloyal.node",
   "version": "0.1.0",
-  "description": "Thin N-API wrapper over liblloyal for Node.js - raw llama.cpp inference primitives",
+  "description": "N-API client for liblloyal+llama.cpp",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "gypfile": true,

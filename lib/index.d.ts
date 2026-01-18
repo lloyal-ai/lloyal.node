@@ -812,6 +812,172 @@ export interface SessionContext {
    */
   freeSamplerHandle(handle: number): void;
 
+  // ===== METRICS API =====
+
+  /**
+   * Compute surprisal (negative log-likelihood) for a specific token.
+   *
+   * Measures how "surprising" the model finds the given token:
+   * - Low surprisal: Model expected this token (high probability)
+   * - High surprisal: Model didn't expect this token (low probability)
+   *
+   * @param pickedTokenId - Token ID to compute surprisal for
+   * @param base - Logarithm base: "nats" (default) or "bits"
+   * @returns Surprisal value in specified base
+   *
+   * @example
+   * ```typescript
+   * // After decode with logits=true
+   * const token = ctx.sampleNextToken();
+   * const surprisal = ctx.modelSurprisal(token, "bits");
+   * console.log(`Model surprise: ${surprisal.toFixed(2)} bits`);
+   * ```
+   *
+   * COST: O(1) - direct probability lookup from logits
+   * REQUIRES: decode() called with logits=true
+   */
+  modelSurprisal(pickedTokenId: number, base?: "nats" | "bits"): number;
+
+  /**
+   * Compute entropy of the entire logits distribution.
+   *
+   * Measures model uncertainty:
+   * - Low entropy: Model is confident (peaked distribution)
+   * - High entropy: Model is uncertain (flat distribution)
+   *
+   * @param base - Logarithm base: "nats" (default), "bits", or "base10"
+   * @returns Entropy value in specified base
+   *
+   * @example
+   * ```typescript
+   * // Check model confidence before sampling
+   * const entropy = ctx.modelEntropy("bits");
+   * if (entropy > 5.0) {
+   *   console.log("Model is very uncertain - consider adjusting parameters");
+   * }
+   * ```
+   *
+   * COST: O(n_vocab) - must sum over all token probabilities
+   * REQUIRES: decode() called with logits=true
+   * ALGORITHM: Numerically stable log-sum-exp (metrics.hpp:73-81)
+   */
+  modelEntropy(base?: "nats" | "bits"): number;
+
+  /**
+   * Create a new perplexity tracker.
+   *
+   * @returns Integer handle to the tracker
+   *
+   * @example
+   * ```typescript
+   * const tracker = ctx.createPerplexityTracker();
+   *
+   * // Add surprisals during generation
+   * for (let i = 0; i < tokens.length; i++) {
+   *   const surprisal = ctx.modelSurprisal(tokens[i]);
+   *   ctx.addSurprisal(tracker, surprisal);
+   * }
+   *
+   * const ppl = ctx.getPerplexity(tracker);
+   * console.log(`Sequence perplexity: ${ppl.toFixed(2)}`);
+   *
+   * ctx.freePerplexityTracker(tracker);
+   * ```
+   */
+  createPerplexityTracker(): number;
+
+  /**
+   * Add a surprisal value to the rolling tracker.
+   *
+   * @param handle - Tracker handle from createPerplexityTracker()
+   * @param surprisal - Surprisal value (from modelSurprisal or computed)
+   *
+   * @example
+   * ```typescript
+   * const surprisal = ctx.modelSurprisal(tokenId, "nats");
+   * ctx.addSurprisal(tracker, surprisal);
+   * ```
+   *
+   * COST: O(1) - numerically stable accumulation
+   * THREAD-SAFETY: Not thread-safe (handle is session-local)
+   */
+  addSurprisal(handle: number, surprisal: number): void;
+
+  /**
+   * Get current perplexity value.
+   *
+   * @param handle - Tracker handle
+   * @returns Perplexity = exp(average_surprisal_in_nats)
+   *
+   * @example
+   * ```typescript
+   * const ppl = ctx.getPerplexity(tracker);
+   * console.log(`Current PPL: ${ppl.toFixed(2)}`);
+   * ```
+   *
+   * FORMULA: PPL = exp(sum_surprisals / count)
+   * RANGE: [1, ∞) where 1 = perfect prediction
+   */
+  getPerplexity(handle: number): number;
+
+  /**
+   * Clone a perplexity tracker (for fork/branch scenarios).
+   *
+   * @param sourceHandle - Handle to clone from
+   * @returns New handle with same accumulated state
+   *
+   * @example
+   * ```typescript
+   * // Branch A and B start from same base perplexity
+   * const baseTracker = ctx.createPerplexityTracker();
+   * // ... accumulate base surprisals ...
+   *
+   * const branchA = ctx.clonePerplexityTracker(baseTracker);
+   * const branchB = ctx.clonePerplexityTracker(baseTracker);
+   *
+   * // Branch A and B now track independently
+   * ctx.addSurprisal(branchA, surprisalA);
+   * ctx.addSurprisal(branchB, surprisalB);
+   * ```
+   */
+  clonePerplexityTracker(sourceHandle: number): number;
+
+  /**
+   * Reset tracker to initial state (count=0, sum=0).
+   *
+   * @param handle - Tracker handle to reset
+   *
+   * @example
+   * ```typescript
+   * // Reuse tracker for multiple sequences
+   * const tracker = ctx.createPerplexityTracker();
+   *
+   * for (const sequence of sequences) {
+   *   ctx.resetPerplexityTracker(tracker);
+   *   // ... process sequence ...
+   *   const ppl = ctx.getPerplexity(tracker);
+   * }
+   * ```
+   */
+  resetPerplexityTracker(handle: number): void;
+
+  /**
+   * Get number of tokens tracked.
+   *
+   * @param handle - Tracker handle
+   * @returns Number of surprisal values added
+   */
+  getPerplexityCount(handle: number): number;
+
+  /**
+   * Free perplexity tracker resources.
+   *
+   * @param handle - Tracker handle to free
+   *
+   * NOTE: Auto-freed in dispose() if not manually freed
+   */
+  freePerplexityTracker(handle: number): void;
+
   // ===== ATOMIC DECODE+CAPTURE =====
 
   /**
