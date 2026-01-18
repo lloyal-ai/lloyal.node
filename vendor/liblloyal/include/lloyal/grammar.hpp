@@ -132,4 +132,71 @@ inline llama_sampler *init_sampler(const llama_model *model,
   return sampler;
 }
 
+/**
+ * Clone a grammar sampler (for fork/branching).
+ *
+ * Creates a deep copy of the sampler including its parser state.
+ * Use when forking a stepper to preserve grammar position.
+ *
+ * @param smpl Source sampler to clone
+ * @return New sampler with same state, or nullptr if input was null
+ *
+ * OWNERSHIP: Caller owns returned sampler and must call llama_sampler_free()
+ */
+inline llama_sampler *clone_sampler(llama_sampler *smpl) {
+  if (!smpl) {
+    LLOYAL_LOG_DEBUG("[grammar::clone_sampler] Input is null, returning null");
+    return nullptr;
+  }
+
+  llama_sampler *cloned = llama_sampler_clone(smpl);
+
+  if (!cloned) {
+    LLOYAL_LOG_DEBUG("[grammar::clone_sampler] ERROR: llama_sampler_clone failed");
+  } else {
+    LLOYAL_LOG_DEBUG("[grammar::clone_sampler] Cloned sampler successfully");
+  }
+
+  return cloned;
+}
+
+/**
+ * Free a grammar sampler
+ *
+ * @param smpl Sampler to free (safe to call with nullptr)
+ */
+inline void free_sampler(llama_sampler* smpl) {
+  if (smpl) {
+    llama_sampler_free(smpl);
+  }
+}
+
+/**
+ * Apply grammar constraint to candidates
+ *
+ * Modifies candidates in-place, masking tokens that violate grammar.
+ *
+ * @param smpl Grammar sampler
+ * @param cur_p Candidate array (modified in-place)
+ */
+inline void apply(llama_sampler* smpl, llama_token_data_array* cur_p) {
+  if (smpl && cur_p) {
+    llama_sampler_apply(smpl, cur_p);
+  }
+}
+
+/**
+ * Accept a token into grammar state
+ *
+ * Advances the grammar parser state.
+ *
+ * @param smpl Grammar sampler
+ * @param token Token to accept
+ */
+inline void accept(llama_sampler* smpl, llama_token token) {
+  if (smpl) {
+    llama_sampler_accept(smpl, token);
+  }
+}
+
 } // namespace lloyal::grammar
