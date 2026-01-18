@@ -48,6 +48,15 @@ export interface ContextOptions {
    * Default: MEAN for embedding contexts, NONE otherwise
    */
   poolingType?: PoolingType;
+
+  /**
+   * Maximum number of sequences for multi-sequence support
+   *
+   * Set > 1 to enable multiple independent KV cache sequences.
+   * When sequences share a common prefix, kv_unified=true (default) is optimal.
+   * Default: 1 (single sequence)
+   */
+  nSeqMax?: number;
 }
 
 /**
@@ -186,6 +195,7 @@ export interface SessionContext {
    *
    * @param tokens Token IDs from tokenize()
    * @param position Where these tokens start in the sequence
+   * @param seqId Sequence ID (default: 0)
    * @example
    * ```typescript
    * const tokens = await ctx.tokenize("Hello world");
@@ -194,9 +204,13 @@ export interface SessionContext {
    *
    * // Generate next token
    * await ctx.decode([nextToken], position++);
+   *
+   * // Multi-sequence: decode to different sequences
+   * await ctx.decode(tokens, 0, 0);  // Sequence 0
+   * await ctx.decode(tokens, 0, 1);  // Sequence 1
    * ```
    */
-  decode(tokens: number[], position: number): Promise<void>;
+  decode(tokens: number[], position: number, seqId?: number): Promise<void>;
 
   /**
    * STEP 2a: Get token scores for custom sampling (zero-copy, mutable)
@@ -642,6 +656,229 @@ export interface SessionContext {
    * ```
    */
   freeGrammar(): void;
+
+  // ===== KV SEQUENCE OPERATIONS =====
+
+  /**
+   * Copy KV cache from one sequence to another
+   *
+   * Duplicates the KV cache state from source to destination sequence.
+   * After copying, both sequences can continue independently.
+   *
+   * NOTE: llama.cpp only supports full sequence copies.
+   * p0/p1 parameters are for API compatibility but partial
+   * ranges will trigger an assertion failure in llama.cpp.
+   *
+   * Cost: ~1-5ms depending on sequence length
+   *
+   * @param srcSeqId Source sequence to copy from
+   * @param dstSeqId Destination sequence to copy to
+   * @param p0 Start position (default: 0, must be 0 for llama.cpp)
+   * @param p1 End position (default: -1 = end, must be -1 for llama.cpp)
+   * @example
+   * ```typescript
+   * // Decode initial prompt to seq 0
+   * await ctx.decode(promptTokens, 0);
+   *
+   * // Copy seq 0 -> seq 1
+   * ctx.kvSeqCopy(0, 1);
+   *
+   * // Now both sequences can continue independently
+   * await ctx.decode([tokenA], position, 0);
+   * await ctx.decode([tokenB], position, 1);
+   * ```
+   */
+  kvSeqCopy(srcSeqId: number, dstSeqId: number, p0?: number, p1?: number): void;
+
+  /**
+   * Keep only specified sequence, remove all others
+   *
+   * NOTE: After kvSeqCopy, cells may be shared across sequences.
+   * kvSeqKeep removes sequence associations but pos_max may
+   * still return positions. For complete removal, use
+   * kvCacheRemove(seqId, 0, -1) for each unwanted sequence.
+   *
+   * @param seqId Sequence ID to keep
+   */
+  kvSeqKeep(seqId: number): void;
+
+  /**
+   * Get max position in sequence
+   *
+   * Returns the highest position index in the specified sequence,
+   * or -1 if the sequence is empty.
+   *
+   * Cost: <0.01ms (fast sync operation)
+   *
+   * @param seqId Sequence ID to query
+   * @returns Max position index, or -1 if empty
+   * @example
+   * ```typescript
+   * const pos = ctx.kvSeqPosMax(0);
+   * if (pos === -1) {
+   *   console.log('Sequence is empty');
+   * } else {
+   *   console.log(`Sequence has ${pos + 1} tokens`);
+   * }
+   * ```
+   */
+  kvSeqPosMax(seqId: number): number;
+
+  // ===== HANDLE-BASED GRAMMAR =====
+
+  /**
+   * Create a new grammar sampler (returns handle)
+   *
+   * Creates an independent grammar sampler instance with its own state.
+   *
+   * Unlike initGrammar() which uses a single internal sampler, this returns
+   * a handle that can be used with applySampler/acceptSamplerToken.
+   * Multiple handles can coexist with independent parser states.
+   *
+   * Cost: ~0.1-1ms depending on grammar complexity
+   *
+   * @param grammarStr GBNF grammar string
+   * @returns Handle to the created sampler
+   * @example
+   * ```typescript
+   * const grammarHandle = ctx.createSampler(jsonGrammar);
+   *
+   * // Apply grammar constraints to logits
+   * ctx.applySampler(grammarHandle, logitsBuffer);
+   * ctx.acceptSamplerToken(grammarHandle, token);
+   *
+   * // Create independent copy with same grammar
+   * const clonedHandle = ctx.cloneSampler(grammarHandle);
+   *
+   * // Cleanup when done
+   * ctx.freeSamplerHandle(grammarHandle);
+   * ctx.freeSamplerHandle(clonedHandle);
+   * ```
+   */
+  createSampler(grammarStr: string): number;
+
+  /**
+   * Apply grammar constraints using handle-based sampler
+   *
+   * Masks invalid tokens with -Infinity based on parser state.
+   * Modifies the logits buffer in-place.
+   *
+   * @param handle Sampler handle from createSampler()
+   * @param logitsBuffer ArrayBuffer or TypedArray containing logits
+   */
+  applySampler(handle: number, logitsBuffer: ArrayBuffer | Float32Array): void;
+
+  /**
+   * Accept token to advance grammar parser state (handle-based)
+   *
+   * Must be called after sampling to advance the grammar parser.
+   * This is the handle-based equivalent of acceptToken().
+   *
+   * @param handle Sampler handle from createSampler()
+   * @param tokenId Token that was sampled
+   */
+  acceptSamplerToken(handle: number, tokenId: number): void;
+
+  /**
+   * Clone a grammar sampler
+   *
+   * Creates a copy of the sampler with identical parser state.
+   * Both handles can then be used independently with their own state.
+   *
+   * @param handle Sampler handle to clone
+   * @returns New handle to cloned sampler
+   * @example
+   * ```typescript
+   * const original = ctx.createSampler(jsonGrammar);
+   * ctx.acceptSamplerToken(original, openBrace);
+   *
+   * // Clone preserves parser state (already accepted openBrace)
+   * const copy = ctx.cloneSampler(original);
+   *
+   * // Both can now continue independently
+   * ctx.acceptSamplerToken(original, tokenA);
+   * ctx.acceptSamplerToken(copy, tokenB);
+   * ```
+   */
+  cloneSampler(handle: number): number;
+
+  /**
+   * Free a grammar sampler handle
+   *
+   * Releases memory for the specified sampler.
+   * Handle becomes invalid after this call.
+   *
+   * @param handle Sampler handle to free
+   */
+  freeSamplerHandle(handle: number): void;
+
+  // ===== ATOMIC DECODE+CAPTURE =====
+
+  /**
+   * Decode tokens and capture logits atomically
+   *
+   * Mutex-protected operation that decodes tokens and immediately
+   * copies logits to the destination buffer before releasing the lock.
+   * Prevents race conditions in concurrent decode scenarios.
+   *
+   * Use this instead of separate decode() + getLogits() calls when
+   * you need guaranteed consistency between decode and logits capture.
+   *
+   * @param tokens Token IDs to decode
+   * @param position Start position in sequence
+   * @param seqId Sequence ID
+   * @param destBuffer Pre-allocated buffer to receive logits (vocabSize floats)
+   * @example
+   * ```typescript
+   * // Pre-allocate buffer (reuse across calls)
+   * const logitsBuffer = new Float32Array(ctx.vocabSize);
+   *
+   * // Atomic decode + capture
+   * ctx.decodeAndCapture([token], position, seqId, logitsBuffer);
+   *
+   * // Safe to process logitsBuffer - it's an independent copy
+   * const nextToken = sampleFromLogits(logitsBuffer);
+   * ```
+   */
+  decodeAndCapture(
+    tokens: number[],
+    position: number,
+    seqId: number,
+    destBuffer: ArrayBuffer | Float32Array
+  ): void;
+
+  // ===== KV CACHE FILE PERSISTENCE =====
+
+  /**
+   * Write KV cache state + tokens to file
+   *
+   * Persists KV cache state for later restoration.
+   * Useful for checkpointing long conversations.
+   *
+   * @param sequenceId Sequence ID to save
+   * @param filepath Path to save file
+   * @param tokens Tokens that were decoded into this sequence
+   * @returns Promise resolving to bytes written
+   */
+  kvCacheWriteFile(
+    sequenceId: number,
+    filepath: string,
+    tokens: number[]
+  ): Promise<number>;
+
+  /**
+   * Read KV cache state + tokens from file
+   *
+   * Restores KV cache state from a previous kvCacheWriteFile call.
+   *
+   * @param sequenceId Sequence ID to restore to
+   * @param filepath Path to saved file
+   * @returns Promise resolving to tokens and bytes read
+   */
+  kvCacheReadFile(
+    sequenceId: number,
+    filepath: string
+  ): Promise<{ tokens: number[]; bytesRead: number }>;
 
   // ===== HELPERS =====
 
