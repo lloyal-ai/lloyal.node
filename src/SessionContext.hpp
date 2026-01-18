@@ -4,7 +4,9 @@
 #include <lloyal/tokenizer.hpp>
 #include <llama/llama.h>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace liblloyal_node {
@@ -45,8 +47,11 @@ private:
 
   /**
    * Decode tokens through model
-   * Args: tokens (number[]), position (number)
+   * Args: tokens (number[]), position (number), seqId? (number, default 0)
    * Returns: Promise<void>
+   *
+   * The seqId parameter specifies which KV cache sequence to update.
+   * Use different seqIds for independent parallel sequences.
    */
   Napi::Value decode(const Napi::CallbackInfo& info);
 
@@ -127,7 +132,6 @@ private:
   // ===== GRAMMAR-CONSTRAINED GENERATION =====
   // (To be implemented in Phase 4)
 
-  Napi::Value getTokenScores(const Napi::CallbackInfo& info);
   Napi::Value initGrammar(const Napi::CallbackInfo& info);
   Napi::Value applyGrammar(const Napi::CallbackInfo& info);
   Napi::Value acceptToken(const Napi::CallbackInfo& info);
@@ -140,6 +144,70 @@ private:
   Napi::Value kvCacheSave(const Napi::CallbackInfo& info);
   Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
   Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
+
+  // ===== KV SEQUENCE OPERATIONS =====
+
+  /**
+   * Copy KV cache from one sequence to another
+   * Args: srcSeqId (number), dstSeqId (number), p0? (number), p1? (number)
+   */
+  Napi::Value kvSeqCopy(const Napi::CallbackInfo& info);
+
+  /**
+   * Keep only specified sequence, remove all others
+   * Args: seqId (number)
+   */
+  Napi::Value kvSeqKeep(const Napi::CallbackInfo& info);
+
+  /**
+   * Get max position in sequence
+   * Args: seqId (number)
+   * Returns: number (-1 if empty)
+   */
+  Napi::Value kvSeqPosMax(const Napi::CallbackInfo& info);
+
+  // ===== HANDLE-BASED GRAMMAR =====
+
+  /**
+   * Create a new grammar sampler, returns handle
+   * Args: grammarStr (string)
+   * Returns: number (handle)
+   */
+  Napi::Value createSampler(const Napi::CallbackInfo& info);
+
+  /**
+   * Apply grammar constraints to logits buffer
+   * Args: handle (number), logitsBuffer (ArrayBuffer)
+   */
+  Napi::Value applySampler(const Napi::CallbackInfo& info);
+
+  /**
+   * Accept token to advance grammar parser state
+   * Args: handle (number), tokenId (number)
+   */
+  Napi::Value acceptSamplerToken(const Napi::CallbackInfo& info);
+
+  /**
+   * Clone a grammar sampler
+   * Args: handle (number)
+   * Returns: number (new handle)
+   */
+  Napi::Value cloneSampler(const Napi::CallbackInfo& info);
+
+  /**
+   * Free a grammar sampler
+   * Args: handle (number)
+   */
+  Napi::Value freeSamplerHandle(const Napi::CallbackInfo& info);
+
+  // ===== ATOMIC DECODE+CAPTURE =====
+
+  /**
+   * Decode tokens and capture logits atomically (mutex protected)
+   * Args: tokens (number[]), position (number), seqId (number), destBuffer (ArrayBuffer)
+   * Returns: Promise<void>
+   */
+  Napi::Value decodeAndCapture(const Napi::CallbackInfo& info);
 
   /**
    * Write KV cache state + tokens to a file for disk persistence
@@ -201,6 +269,13 @@ private:
   // Pattern matches HybridSessionContext.hpp:197-200
   llama_sampler* _grammarSampler = nullptr;
   std::string _currentGrammar;  // Track current grammar string to avoid re-initialization
+
+  // ===== HANDLE-BASED GRAMMAR =====
+  std::unordered_map<int32_t, llama_sampler*> _samplerHandles;
+  int32_t _nextSamplerHandle = 1;
+
+  // ===== DECODE MUTEX =====
+  std::mutex _decodeMutex;
 
   // ===== LOGITS BUFFER MANAGEMENT (Memoization + Revocation) =====
   //

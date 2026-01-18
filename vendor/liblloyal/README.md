@@ -3,8 +3,8 @@
 This directory contains vendored sources from the liblloyal project.
 
 **Source:** liblloyal/ git submodule
-**Commit:** e62c3d93ac59cb72ce0f247f53259978fdf432bd
-**Vendored:** 2025-12-05T06:24:58.849Z
+**Commit:** 2fd20a50213b99589b91b65356eac8e67695b903
+**Vendored:** 2026-01-18T13:51:23.104Z
 
 **DO NOT EDIT:** Files in this directory are copied from git submodules.
 To update, run: npm run update-vendors
