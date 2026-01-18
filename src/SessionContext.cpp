@@ -379,12 +379,13 @@ private:
  */
 class DecodeWorker : public Napi::AsyncWorker {
 public:
-  DecodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens, int32_t pos)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _pos(pos) {}
+  DecodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens,
+               int32_t pos, llama_seq_id seqId = 0)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _pos(pos), _seqId(seqId) {}
 
   void Execute() override {
     try {
-      lloyal::decoder::decode_tokens(_ctx, _tokens, _pos, lloyal::defaults::N_BATCH_PROCESS);
+      lloyal::decoder::decode_tokens(_ctx, _tokens, _pos, lloyal::defaults::N_BATCH_PROCESS, _seqId);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -405,6 +406,7 @@ private:
   llama_context* _ctx;
   std::vector<llama_token> _tokens;
   int32_t _pos;
+  llama_seq_id _seqId;
 };
 
 /**
@@ -559,12 +561,26 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvCacheReadFile", &SessionContext::kvCacheReadFile),
 
     // ===== GRAMMAR-CONSTRAINED GENERATION =====
-    InstanceMethod("getTokenScores", &SessionContext::getTokenScores),
     InstanceMethod("initGrammar", &SessionContext::initGrammar),
     InstanceMethod("applyGrammar", &SessionContext::applyGrammar),
     InstanceMethod("acceptToken", &SessionContext::acceptToken),
     InstanceMethod("resetGrammar", &SessionContext::resetGrammar),
     InstanceMethod("freeGrammar", &SessionContext::freeGrammar),
+
+    // ===== KV SEQUENCE OPERATIONS =====
+    InstanceMethod("kvSeqCopy", &SessionContext::kvSeqCopy),
+    InstanceMethod("kvSeqKeep", &SessionContext::kvSeqKeep),
+    InstanceMethod("kvSeqPosMax", &SessionContext::kvSeqPosMax),
+
+    // ===== HANDLE-BASED GRAMMAR =====
+    InstanceMethod("createSampler", &SessionContext::createSampler),
+    InstanceMethod("applySampler", &SessionContext::applySampler),
+    InstanceMethod("acceptSamplerToken", &SessionContext::acceptSamplerToken),
+    InstanceMethod("cloneSampler", &SessionContext::cloneSampler),
+    InstanceMethod("freeSamplerHandle", &SessionContext::freeSamplerHandle),
+
+    // ===== ATOMIC DECODE+CAPTURE =====
+    InstanceMethod("decodeAndCapture", &SessionContext::decodeAndCapture),
 
     // ===== HELPERS =====
     InstanceMethod("formatChat", &SessionContext::formatChat),
@@ -601,7 +617,15 @@ SessionContext::SessionContext(const Napi::CallbackInfo& info)
 
 SessionContext::~SessionContext() {
   if (!_disposed) {
-    // Free grammar sampler first (pattern matches HybridSessionContext.cpp:72)
+    // Free handle-based grammar samplers first
+    for (auto& [handle, sampler] : _samplerHandles) {
+      if (sampler) {
+        llama_sampler_free(sampler);
+      }
+    }
+    _samplerHandles.clear();
+
+    // Free legacy global grammar sampler (pattern matches HybridSessionContext.cpp:72)
     if (_grammarSampler) {
       llama_sampler_free(_grammarSampler);
       _grammarSampler = nullptr;
@@ -708,7 +732,7 @@ Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number)");
+    throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number, seqId?: number)");
   }
 
   // Revoke any active logits buffer before decode
@@ -728,8 +752,14 @@ Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
 
   int32_t position = info[1].As<Napi::Number>().Int32Value();
 
+  // Extract optional seqId (default 0 for backward compatibility)
+  llama_seq_id seqId = 0;
+  if (info.Length() >= 3 && info[2].IsNumber()) {
+    seqId = static_cast<llama_seq_id>(info[2].As<Napi::Number>().Int32Value());
+  }
+
   // Run async
-  auto* worker = new DecodeWorker(env, _context, tokens, position);
+  auto* worker = new DecodeWorker(env, _context, tokens, position, seqId);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1031,10 +1061,9 @@ Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
     next_token = lloyal::sampler::sample_with_params(_context, _model.get(), params, _grammarSampler);
   }
 
-  // Accept token to advance grammar parser state (if grammar active)
-  if (_grammarSampler) {
-    llama_sampler_accept(_grammarSampler, next_token);
-  }
+  // NOTE: Auto-accept removed to support two-phase sampling
+  // Caller must explicitly call acceptToken() or acceptSamplerToken() after sampling
+  // This enables separation between token generation and grammar state updates
 
   return Napi::Number::New(env, static_cast<double>(next_token));
 }
@@ -1046,7 +1075,15 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
     // Revoke any active logits buffer before disposing
     invalidateLogits();
 
-    // Free grammar sampler
+    // Free handle-based grammar samplers
+    for (auto& [handle, sampler] : _samplerHandles) {
+      if (sampler) {
+        llama_sampler_free(sampler);
+      }
+    }
+    _samplerHandles.clear();
+
+    // Free legacy global grammar sampler
     if (_grammarSampler) {
       llama_sampler_free(_grammarSampler);
       _grammarSampler = nullptr;
@@ -1077,44 +1114,6 @@ Napi::Value SessionContext::getVocabSize(const Napi::CallbackInfo& info) {
 // ===== GRAMMAR-CONSTRAINED GENERATION =====
 // Pattern matches HybridSessionContext.cpp:383-546
 // All methods are SYNC (no AsyncWorker) per SessionContext.nitro.ts
-
-Napi::Value SessionContext::getTokenScores(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // Get raw logits pointer via lloyal wrapper (handles null checks)
-  // Returns mutable float* - we need to modify logits for grammar constraints
-  float* logits;
-  try {
-    logits = lloyal::logits::get(_context, -1);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
-  }
-
-  // Get vocabulary size using model overload
-  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-  if (n_vocab <= 0) {
-    throw Napi::Error::New(env, "Invalid vocabulary size");
-  }
-
-  // Create Buffer wrapping the logits (zero-copy!)
-  // CRITICAL: Logits are valid only until next llama_decode() call
-  size_t byte_size = n_vocab * sizeof(float);
-
-  // Note: Using external Buffer - no copy, points directly to llama.cpp memory
-  return Napi::Buffer<float>::New(
-    env,
-    logits,
-    n_vocab,
-    [](Napi::Env /*env*/, float* /*data*/) {
-      // No-op finalizer: llama.cpp owns and manages this memory
-    }
-  );
-}
 
 Napi::Value SessionContext::initGrammar(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -1157,8 +1156,8 @@ Napi::Value SessionContext::applyGrammar(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
-  if (info.Length() < 1 || !info[0].IsBuffer()) {
-    throw Napi::TypeError::New(env, "Expected (scoresBuffer: Buffer)");
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "Expected (logits: ArrayBuffer | TypedArray | Buffer)");
   }
 
   if (!_grammarSampler) {
@@ -1172,11 +1171,31 @@ Napi::Value SessionContext::applyGrammar(const Napi::CallbackInfo& info) {
   // Use model overload for vocab_size
   const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
-  // Get mutable access to logits
-  Napi::Buffer<float> scoresBuffer = info[0].As<Napi::Buffer<float>>();
-  float* logits = scoresBuffer.Data();
+  // Get mutable access to logits - accept ArrayBuffer, TypedArray, or Buffer
+  float* logits = nullptr;
+
+  if (info[0].IsTypedArray()) {
+    // Float32Array from getLogits()
+    Napi::TypedArray ta = info[0].As<Napi::TypedArray>();
+    if (ta.TypedArrayType() != napi_float32_array) {
+      throw Napi::TypeError::New(env, "Expected Float32Array, got different TypedArray type");
+    }
+    Napi::Float32Array f32 = info[0].As<Napi::Float32Array>();
+    logits = f32.Data();
+  } else if (info[0].IsArrayBuffer()) {
+    // Raw ArrayBuffer
+    Napi::ArrayBuffer ab = info[0].As<Napi::ArrayBuffer>();
+    logits = static_cast<float*>(ab.Data());
+  } else if (info[0].IsBuffer()) {
+    // Legacy Buffer support
+    Napi::Buffer<float> buf = info[0].As<Napi::Buffer<float>>();
+    logits = buf.Data();
+  } else {
+    throw Napi::TypeError::New(env, "Expected (logits: ArrayBuffer | TypedArray | Buffer)");
+  }
+
   if (!logits) {
-    throw Napi::Error::New(env, "Invalid scores buffer");
+    throw Napi::Error::New(env, "Invalid logits buffer");
   }
 
   // Build token data array from logits
@@ -1244,6 +1263,238 @@ Napi::Value SessionContext::freeGrammar(const Napi::CallbackInfo& info) {
     llama_sampler_free(_grammarSampler);
     _grammarSampler = nullptr;
     _currentGrammar.clear();
+  }
+
+  return env.Undefined();
+}
+
+// ===== KV SEQUENCE OPERATIONS =====
+
+Napi::Value SessionContext::kvSeqCopy(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::TypeError::New(env, "Expected (srcSeqId, dstSeqId, p0?, p1?)");
+  }
+
+  llama_seq_id src = toSeqId(info[0].As<Napi::Number>().DoubleValue());
+  llama_seq_id dst = toSeqId(info[1].As<Napi::Number>().DoubleValue());
+  llama_pos p0 = info.Length() > 2 ? toPos(info[2].As<Napi::Number>().DoubleValue()) : 0;
+  llama_pos p1 = info.Length() > 3 ? toPos(info[3].As<Napi::Number>().DoubleValue()) : -1;
+
+  lloyal::kv::seq_cp(_context, src, dst, p0, p1);
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::kvSeqKeep(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "Expected (seqId)");
+  }
+
+  llama_seq_id seq = toSeqId(info[0].As<Napi::Number>().DoubleValue());
+  lloyal::kv::seq_keep(_context, seq);
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::kvSeqPosMax(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "Expected (seqId)");
+  }
+
+  llama_seq_id seq = toSeqId(info[0].As<Napi::Number>().DoubleValue());
+  llama_pos pos = lloyal::kv::pos_max(_context, seq);
+  return Napi::Number::New(env, static_cast<double>(pos));
+}
+
+// ===== HANDLE-BASED GRAMMAR =====
+
+Napi::Value SessionContext::createSampler(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    throw Napi::TypeError::New(env, "Expected (grammarStr: string)");
+  }
+
+  std::string grammarStr = info[0].As<Napi::String>().Utf8Value();
+  llama_sampler* sampler = lloyal::grammar::init_sampler(_model.get(), grammarStr);
+
+  if (!sampler) {
+    throw Napi::Error::New(env, "Failed to create grammar sampler");
+  }
+
+  int32_t handle = _nextSamplerHandle++;
+  _samplerHandles[handle] = sampler;
+
+  return Napi::Number::New(env, static_cast<double>(handle));
+}
+
+Napi::Value SessionContext::applySampler(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::TypeError::New(env, "Expected (handle, logitsBuffer)");
+  }
+
+  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
+
+  auto it = _samplerHandles.find(handle);
+  if (it == _samplerHandles.end()) {
+    throw Napi::Error::New(env, "Invalid sampler handle");
+  }
+
+  // Get logits buffer
+  Napi::ArrayBuffer buffer;
+  if (info[1].IsArrayBuffer()) {
+    buffer = info[1].As<Napi::ArrayBuffer>();
+  } else if (info[1].IsTypedArray()) {
+    buffer = info[1].As<Napi::TypedArray>().ArrayBuffer();
+  } else {
+    throw Napi::TypeError::New(env, "Expected ArrayBuffer or TypedArray");
+  }
+
+  float* logits = static_cast<float*>(buffer.Data());
+  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+
+  // Build candidates array
+  std::vector<llama_token_data> candidates(n_vocab);
+  for (int i = 0; i < n_vocab; i++) {
+    candidates[i] = llama_token_data{static_cast<llama_token>(i), logits[i], 0.0f};
+  }
+
+  llama_token_data_array arr = {candidates.data(), static_cast<size_t>(n_vocab), -1, false};
+
+  // Apply grammar (modifies candidates)
+  llama_sampler_apply(it->second, &arr);
+
+  // Write back to buffer
+  for (int i = 0; i < n_vocab; i++) {
+    logits[i] = candidates[i].logit;
+  }
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::acceptSamplerToken(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::TypeError::New(env, "Expected (handle, tokenId)");
+  }
+
+  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
+  llama_token token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
+
+  auto it = _samplerHandles.find(handle);
+  if (it == _samplerHandles.end()) {
+    throw Napi::Error::New(env, "Invalid sampler handle");
+  }
+
+  llama_sampler_accept(it->second, token);
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::cloneSampler(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "Expected (handle)");
+  }
+
+  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
+
+  auto it = _samplerHandles.find(handle);
+  if (it == _samplerHandles.end()) {
+    throw Napi::Error::New(env, "Invalid sampler handle");
+  }
+
+  llama_sampler* cloned = lloyal::grammar::clone_sampler(it->second);
+  if (!cloned) {
+    throw Napi::Error::New(env, "Failed to clone sampler");
+  }
+
+  int32_t newHandle = _nextSamplerHandle++;
+  _samplerHandles[newHandle] = cloned;
+
+  return Napi::Number::New(env, static_cast<double>(newHandle));
+}
+
+Napi::Value SessionContext::freeSamplerHandle(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "Expected (handle)");
+  }
+
+  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
+
+  auto it = _samplerHandles.find(handle);
+  if (it != _samplerHandles.end()) {
+    llama_sampler_free(it->second);
+    _samplerHandles.erase(it);
+  }
+
+  return env.Undefined();
+}
+
+// ===== ATOMIC DECODE+CAPTURE =====
+
+Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 4) {
+    throw Napi::TypeError::New(env, "Expected (tokens, position, seqId, destBuffer)");
+  }
+
+  // Parse tokens
+  Napi::Array tokensArray = info[0].As<Napi::Array>();
+  std::vector<llama_token> tokens(tokensArray.Length());
+  for (uint32_t i = 0; i < tokensArray.Length(); i++) {
+    tokens[i] = static_cast<llama_token>(tokensArray.Get(i).As<Napi::Number>().Int32Value());
+  }
+
+  int32_t position = info[1].As<Napi::Number>().Int32Value();
+  llama_seq_id seqId = toSeqId(info[2].As<Napi::Number>().DoubleValue());
+
+  // Get dest buffer
+  Napi::ArrayBuffer destBuffer;
+  if (info[3].IsArrayBuffer()) {
+    destBuffer = info[3].As<Napi::ArrayBuffer>();
+  } else if (info[3].IsTypedArray()) {
+    destBuffer = info[3].As<Napi::TypedArray>().ArrayBuffer();
+  } else {
+    throw Napi::TypeError::New(env, "destBuffer must be ArrayBuffer or TypedArray");
+  }
+
+  float* dest = static_cast<float*>(destBuffer.Data());
+  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+
+  // Atomic: lock mutex through decode + logits copy
+  {
+    std::lock_guard<std::mutex> lock(_decodeMutex);
+
+    // Invalidate any existing logits views
+    invalidateLogits();
+    _decodeStepId++;
+
+    // Decode
+    lloyal::decoder::decode_tokens(_context, tokens, position, 512, seqId);
+
+    // Capture logits immediately
+    float* logits = lloyal::logits::get(_context, -1);
+    std::memcpy(dest, logits, n_vocab * sizeof(float));
   }
 
   return env.Undefined();
@@ -1476,6 +1727,15 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     poolingType = options.Get("poolingType").As<Napi::Number>().Int32Value();
   }
 
+  // Extract nSeqMax (optional, default 1)
+  // Set > 1 to enable multiple independent KV cache sequences (kvSeqCopy, etc.)
+  // NOTE: When sequences share a common prefix, kv_unified=true (default) is optimal.
+  //       If sequences don't share a prefix, consider setting kv_unified=false for perf.
+  int32_t nSeqMax = 1;
+  if (options.Has("nSeqMax") && options.Get("nSeqMax").IsNumber()) {
+    nSeqMax = options.Get("nSeqMax").As<Napi::Number>().Int32Value();
+  }
+
   // Ensure llama backend is initialized on main thread (thread-safe, once)
   BackendManager::ensureInitialized();
 
@@ -1516,6 +1776,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   ctx_params.n_batch = lloyal::defaults::N_BATCH_INIT;
   ctx_params.n_ubatch = lloyal::defaults::N_BATCH_INIT;
   ctx_params.n_threads = static_cast<uint32_t>(nThreads);
+  ctx_params.n_seq_max = static_cast<uint32_t>(nSeqMax);
 
   // Apply embedding-specific params
   ctx_params.embeddings = embeddingsMode;

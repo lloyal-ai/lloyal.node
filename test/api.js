@@ -304,6 +304,141 @@ async function runTests() {
     console.log(`✓ getLogits() x${iterations}: ${logitsTime}ms (${(logitsTime/iterations).toFixed(3)}ms avg)`);
     console.log(`  (This is the baseline overhead for TS sampling)\n`);
 
+    // ===== TEST 14: Multi-sequence KV operations =====
+    console.log('🌲 Test 14: Multi-sequence KV operations');
+
+    // Create a new context with multi-sequence support
+    const ctx2 = await addon.createContext({
+      modelPath: MODEL_PATH,
+      nCtx: 512,
+      nThreads: 4,
+      nSeqMax: 4  // Enable multi-sequence support
+    });
+    console.log('✓ Created context with nSeqMax=4');
+
+    const seq0Tokens = await ctx2.tokenize("The quick brown fox");
+    await ctx2.decode(seq0Tokens, 0, 0); // Decode to seq 0
+
+    // Check seq 0 has tokens
+    const seq0Pos = ctx2.kvSeqPosMax(0);
+    console.log(`✓ kvSeqPosMax(0): ${seq0Pos}`);
+    if (seq0Pos < 0) {
+      throw new Error(`Seq 0 should have tokens, got pos_max=${seq0Pos}`);
+    }
+
+    // Seq 1 should be empty
+    const seq1Before = ctx2.kvSeqPosMax(1);
+    console.log(`✓ kvSeqPosMax(1) before copy: ${seq1Before}`);
+    if (seq1Before !== -1) {
+      throw new Error(`Seq 1 should be empty, got pos_max=${seq1Before}`);
+    }
+
+    // Copy seq 0 -> seq 1 (KV cache fork)
+    ctx2.kvSeqCopy(0, 1);
+    const seq1After = ctx2.kvSeqPosMax(1);
+    console.log(`✓ kvSeqCopy(0, 1): seq 1 pos_max now ${seq1After}`);
+    if (seq1After !== seq0Pos) {
+      throw new Error(`Seq 1 should match seq 0 after copy: ${seq1After} vs ${seq0Pos}`);
+    }
+
+    // Seq 0 should be unchanged
+    const seq0After = ctx2.kvSeqPosMax(0);
+    if (seq0After !== seq0Pos) {
+      throw new Error(`Seq 0 should be unchanged after copy: ${seq0After} vs ${seq0Pos}`);
+    }
+    console.log(`✓ Seq 0 unchanged after copy: ${seq0After}\n`);
+
+    // ===== TEST 15: Handle-based grammar =====
+    console.log('📜 Test 15: Handle-based grammar');
+
+    // Simple JSON grammar for testing
+    const jsonGrammar = `root ::= "{" ws "}" ws
+ws ::= [ \\t\\n]*`;
+
+    // Create sampler
+    const handle1 = ctx2.createSampler(jsonGrammar);
+    console.log(`✓ createSampler(): handle=${handle1}`);
+    if (typeof handle1 !== 'number' || handle1 <= 0) {
+      throw new Error(`Invalid sampler handle: ${handle1}`);
+    }
+
+    // Clone sampler (for fork)
+    const handle2 = ctx2.cloneSampler(handle1);
+    console.log(`✓ cloneSampler(${handle1}): new handle=${handle2}`);
+    if (handle2 === handle1) {
+      throw new Error('Cloned handle should be different from original');
+    }
+
+    // Apply sampler to logits buffer
+    const testLogits = new Float32Array(ctx2.vocabSize);
+    testLogits.fill(0.5); // Fill with dummy values
+    ctx2.applySampler(handle1, testLogits);
+    console.log(`✓ applySampler(${handle1}, logits): modified logits in-place`);
+
+    // Check that some values were masked (set to -Infinity)
+    let maskedCount = 0;
+    for (let i = 0; i < testLogits.length; i++) {
+      if (testLogits[i] === -Infinity || testLogits[i] < -1e30) {
+        maskedCount++;
+      }
+    }
+    console.log(`✓ Grammar masked ${maskedCount}/${testLogits.length} tokens`);
+
+    // Accept a token (advance grammar state)
+    const openBrace = (await ctx2.tokenize("{"))[0];
+    ctx2.acceptSamplerToken(handle1, openBrace);
+    console.log(`✓ acceptSamplerToken(${handle1}, ${openBrace})`);
+
+    // Free samplers
+    ctx2.freeSamplerHandle(handle1);
+    ctx2.freeSamplerHandle(handle2);
+    console.log(`✓ freeSamplerHandle(): both handles freed\n`);
+
+    // ===== TEST 16: Atomic decodeAndCapture =====
+    console.log('⚛️  Test 16: Atomic decodeAndCapture');
+
+    // Clear and setup
+    await ctx2.kvCacheClear();
+    const captureTokens = await ctx2.tokenize("Hello");
+
+    // Pre-allocate destination buffer
+    const captureBuffer = new Float32Array(ctx2.vocabSize);
+
+    // Atomic decode + capture
+    ctx2.decodeAndCapture(captureTokens, 0, 0, captureBuffer);
+    console.log(`✓ decodeAndCapture(): decoded ${captureTokens.length} tokens`);
+
+    // Verify buffer has valid logits
+    let capturedHasNonZero = false;
+    let capturedHasNaN = false;
+    for (let i = 0; i < captureBuffer.length; i++) {
+      if (captureBuffer[i] !== 0.0) capturedHasNonZero = true;
+      if (isNaN(captureBuffer[i])) capturedHasNaN = true;
+    }
+
+    if (!capturedHasNonZero) {
+      throw new Error('Captured logits are all zeros!');
+    }
+    if (capturedHasNaN) {
+      throw new Error('Captured logits contain NaN!');
+    }
+    console.log(`✓ Captured buffer valid: has variation=${capturedHasNonZero}, has NaN=${capturedHasNaN}`);
+
+    // Verify it's a copy (modifying doesn't affect ctx2.getLogits())
+    const capturedOriginalValue = captureBuffer[0];
+    captureBuffer[0] = -999.0;
+    const ctx2Logits = ctx2.getLogits();
+    if (ctx2Logits[0] === -999.0) {
+      console.log('⚠️  Warning: decodeAndCapture may share memory with getLogits');
+    } else {
+      console.log(`✓ Captured buffer is independent copy`);
+    }
+    captureBuffer[0] = capturedOriginalValue;
+
+    // Cleanup multi-sequence context
+    ctx2.dispose();
+    console.log('✓ Multi-sequence context disposed\n');
+
     // ===== SUCCESS =====
     console.log('✅ All integration tests passed!\n');
 
