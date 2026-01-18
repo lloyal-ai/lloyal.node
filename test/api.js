@@ -439,6 +439,142 @@ ws ::= [ \\t\\n]*`;
     ctx2.dispose();
     console.log('✓ Multi-sequence context disposed\n');
 
+    // ============================================================================
+    // Test 17: Metrics API
+    // ============================================================================
+
+    console.log('🔢 Test 17: Metrics API');
+
+    // Setup: Clear cache and decode first token to get valid logits
+    await ctx.kvCacheClear();
+    await ctx.decode([tokens[0]], 0);
+    const token1 = ctx.greedySample();
+
+    // Test 17a: Model surprisal
+    const surprisalNats = ctx.modelSurprisal(token1, "nats");
+    const surprisalBits = ctx.modelSurprisal(token1, "bits");
+
+    if (typeof surprisalNats !== 'number' || surprisalNats < 0) {
+      throw new Error('modelSurprisal(nats) should return non-negative number');
+    }
+
+    if (Math.abs(surprisalBits - surprisalNats / Math.log(2)) > 0.01) {
+      throw new Error('modelSurprisal(bits) should equal surprisal(nats) / ln(2)');
+    }
+
+    console.log(`  ✓ modelSurprisal: ${surprisalBits.toFixed(2)} bits`);
+
+    // Test 17b: Model entropy
+    const entropyNats = ctx.modelEntropy("nats");
+    const entropyBits = ctx.modelEntropy("bits");
+
+    if (typeof entropyNats !== 'number' || entropyNats < 0) {
+      throw new Error('modelEntropy should return non-negative number');
+    }
+
+    if (Math.abs(entropyBits - entropyNats / Math.log(2)) > 0.01) {
+      throw new Error('modelEntropy(bits) should equal entropy(nats) / ln(2)');
+    }
+
+    console.log(`  ✓ modelEntropy: ${entropyBits.toFixed(2)} bits`);
+
+    // Test 17c: Perplexity tracker creation
+    const tracker = ctx.createPerplexityTracker();
+
+    if (typeof tracker !== 'number' || tracker <= 0) {
+      throw new Error('createPerplexityTracker should return positive integer handle');
+    }
+
+    console.log(`  ✓ createPerplexityTracker: handle=${tracker}`);
+
+    // Test 17d: Add surprisals and check count
+    ctx.addSurprisal(tracker, surprisalNats);
+
+    await ctx.decode([token1], 1);
+    const token2 = ctx.greedySample();
+    const surprisal2 = ctx.modelSurprisal(token2);
+    ctx.addSurprisal(tracker, surprisal2);
+
+    const count = ctx.getPerplexityCount(tracker);
+    if (count !== 2) {
+      throw new Error('getPerplexityCount should return correct count');
+    }
+
+    console.log(`  ✓ Added 2 surprisals, count=${count}`);
+
+    // Test 17e: Get perplexity
+    const ppl = ctx.getPerplexity(tracker);
+
+    if (typeof ppl !== 'number' || ppl < 1.0) {
+      throw new Error('getPerplexity should return value >= 1.0');
+    }
+
+    // Verify formula: PPL = exp(avg_surprisal)
+    const expectedPpl = Math.exp((surprisalNats + surprisal2) / 2);
+    if (Math.abs(ppl - expectedPpl) > 0.01) {
+      throw new Error('PPL formula should be exp(sum_surprisals / count)');
+    }
+
+    console.log(`  ✓ getPerplexity: ${ppl.toFixed(2)}`);
+
+    // Test 17f: Clone tracker
+    const cloned = ctx.clonePerplexityTracker(tracker);
+
+    if (typeof cloned !== 'number' || cloned === tracker) {
+      throw new Error('clonePerplexityTracker should return new unique handle');
+    }
+
+    const clonedPpl = ctx.getPerplexity(cloned);
+    if (Math.abs(clonedPpl - ppl) > 0.01) {
+      throw new Error('Cloned tracker should have same perplexity as original');
+    }
+
+    console.log(`  ✓ clonePerplexityTracker: cloned handle=${cloned}`);
+
+    // Test 17g: Independent tracking
+    await ctx.decode([token2], 2);
+    const token3 = ctx.greedySample();
+    const surprisal3 = ctx.modelSurprisal(token3);
+
+    ctx.addSurprisal(tracker, surprisal3);       // Add to original
+    const pplOriginal = ctx.getPerplexity(tracker);
+    const pplCloned = ctx.getPerplexity(cloned);
+
+    if (pplOriginal === pplCloned) {
+      throw new Error('Original and cloned trackers should track independently');
+    }
+
+    console.log(`  ✓ Independent tracking: original=${pplOriginal.toFixed(2)}, cloned=${pplCloned.toFixed(2)}`);
+
+    // Test 17h: Reset tracker
+    ctx.resetPerplexityTracker(cloned);
+
+    const resetCount = ctx.getPerplexityCount(cloned);
+    if (resetCount !== 0) {
+      throw new Error('resetPerplexityTracker should set count to 0');
+    }
+
+    console.log(`  ✓ resetPerplexityTracker: count=${resetCount}`);
+
+    // Test 17i: Free trackers
+    ctx.freePerplexityTracker(tracker);
+    ctx.freePerplexityTracker(cloned);
+
+    console.log(`  ✓ Freed both trackers`);
+
+    // Test 17j: Invalid handle error
+    try {
+      ctx.getPerplexity(tracker); // Already freed
+      throw new Error('Should throw on invalid handle');
+    } catch (e) {
+      if (!e.message.includes('Invalid perplexity tracker handle')) {
+        throw new Error('Should have correct error message for invalid handle');
+      }
+      console.log(`  ✓ Invalid handle throws error`);
+    }
+
+    console.log('✅ Test 17: Metrics API passed\n');
+
     // ===== SUCCESS =====
     console.log('✅ All integration tests passed!\n');
 
