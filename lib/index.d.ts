@@ -519,6 +519,32 @@ export interface SessionContext {
    */
   kvCacheClear(): Promise<void>;
 
+  /**
+   * Atomic clear+reseed operation
+   *
+   * Implements the StreamingLLM pattern:
+   * 1. Clear entire KV cache
+   * 2. Re-decode original sinks (first N tokens from conversation start)
+   * 3. Re-decode tail (last M recent tokens)
+   *
+   *
+   * @param sinks - ORIGINAL first N tokens from conversation start (typically 4)
+   * @param tail - Recent M tokens to preserve (typically 508-1020)
+   * @returns Promise that resolves when reseed completes
+   *
+   * @example
+   * ```typescript
+   * const ORIGINAL_SINKS = allTokens.slice(0, 4);
+   *
+   * const tail = allTokens.slice(-508);  // Last 508 tokens
+   * await ctx.clearAndReseed(ORIGINAL_SINKS, tail);
+   *
+   * const nextToken = ctx.greedySample();
+   * await ctx.decode([nextToken], 512);
+   * ```
+   */
+  clearAndReseed(sinks: number[], tail: number[]): Promise<void>;
+
   // ===== GRAMMAR-CONSTRAINED GENERATION =====
 
   /**
@@ -836,7 +862,7 @@ export interface SessionContext {
    * COST: O(1) - direct probability lookup from logits
    * REQUIRES: decode() called with logits=true
    */
-  modelSurprisal(pickedTokenId: number, base?: "nats" | "bits"): number;
+  modelSurprisal(pickedTokenId: number, base?: 'nats' | 'bits'): number;
 
   /**
    * Compute entropy of the entire logits distribution.
@@ -861,7 +887,7 @@ export interface SessionContext {
    * REQUIRES: decode() called with logits=true
    * ALGORITHM: Numerically stable log-sum-exp (metrics.hpp:73-81)
    */
-  modelEntropy(base?: "nats" | "bits"): number;
+  modelEntropy(base?: 'nats' | 'bits'): number;
 
   /**
    * Create a new perplexity tracker.
