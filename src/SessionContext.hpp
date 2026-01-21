@@ -146,6 +146,13 @@ private:
   Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
   Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
 
+  /**
+   * Atomic clear+reseed operation for KV cache compression
+   * Args: sinks (Array<number>), tail (Array<number>)
+   * Returns: void (Promise)
+   */
+  Napi::Value clearAndReseed(const Napi::CallbackInfo& info);
+
   // ===== KV SEQUENCE OPERATIONS =====
 
   /**

@@ -253,6 +253,42 @@ private:
 };
 
 /**
+ * AsyncWorker for clearAndReseed operation (StreamingLLM)
+ * Uses lloyal::kv::clear_and_reseed() - the validated API
+ */
+class ClearAndReseedWorker : public Napi::AsyncWorker {
+public:
+  ClearAndReseedWorker(Napi::Env env, llama_context* ctx,
+                       std::vector<llama_token> sinks,
+                       std::vector<llama_token> tail,
+                       int32_t n_batch)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+      _sinks(std::move(sinks)), _tail(std::move(tail)), _n_batch(n_batch) {}
+
+  void Execute() override {
+    // Use lloyal::kv::clear_and_reseed() - handles clear+decode atomically
+    lloyal::kv::clear_and_reseed(_ctx, _sinks, _tail, _n_batch);
+  }
+
+  void OnOK() override {
+    _deferred.Resolve(Env().Undefined());
+  }
+
+  void OnError(const Napi::Error& err) override {
+    _deferred.Reject(err.Value());
+  }
+
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  std::vector<llama_token> _sinks;
+  std::vector<llama_token> _tail;
+  int32_t _n_batch;
+};
+
+/**
  * AsyncWorker for kvCacheWriteFile operation
  * Writes KV cache state + tokens to a file for disk persistence
  */
@@ -558,6 +594,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvCacheSave", &SessionContext::kvCacheSave),
     InstanceMethod("kvCacheLoad", &SessionContext::kvCacheLoad),
     InstanceMethod("kvCacheClear", &SessionContext::kvCacheClear),
+    InstanceMethod("clearAndReseed", &SessionContext::clearAndReseed),
     InstanceMethod("kvCacheWriteFile", &SessionContext::kvCacheWriteFile),
     InstanceMethod("kvCacheReadFile", &SessionContext::kvCacheReadFile),
 
@@ -1852,6 +1889,11 @@ Napi::Value SessionContext::kvCacheRemove(const Napi::CallbackInfo& info) {
     throw Napi::TypeError::New(env, "Expected (sequenceId: number, start: number, end: number)");
   }
 
+  // CRITICAL: Invalidate logits before KV cache modification
+  // Logits may reference positions that will be evicted
+  // (matches pattern from decode() line 801, encode() line 1035)
+  invalidateLogits();
+
   double sequenceId = info[0].As<Napi::Number>().DoubleValue();
   double start = info[1].As<Napi::Number>().DoubleValue();
   double end = info[2].As<Napi::Number>().DoubleValue();
@@ -1897,6 +1939,47 @@ Napi::Value SessionContext::kvCacheClear(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   auto* worker = new KVCacheClearWorker(env, _context);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::clearAndReseed(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Args: sinks (Array<number>), tail (Array<number>)
+  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
+    throw Napi::TypeError::New(env, "Expected (sinks: number[], tail: number[])");
+  }
+
+  // Extract sinks array
+  Napi::Array jsSinks = info[0].As<Napi::Array>();
+  std::vector<llama_token> sinks;
+  sinks.reserve(jsSinks.Length());
+  for (uint32_t i = 0; i < jsSinks.Length(); i++) {
+    Napi::Value val = jsSinks.Get(i);
+    if (!val.IsNumber()) {
+      throw Napi::TypeError::New(env, "sinks array must contain only numbers");
+    }
+    sinks.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  // Extract tail array
+  Napi::Array jsTail = info[1].As<Napi::Array>();
+  std::vector<llama_token> tail;
+  tail.reserve(jsTail.Length());
+  for (uint32_t i = 0; i < jsTail.Length(); i++) {
+    Napi::Value val = jsTail.Get(i);
+    if (!val.IsNumber()) {
+      throw Napi::TypeError::New(env, "tail array must contain only numbers");
+    }
+    tail.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  // Use default batch size (512) from context params
+  int32_t n_batch = 512;
+
+  auto* worker = new ClearAndReseedWorker(env, _context, std::move(sinks), std::move(tail), n_batch);
   worker->Queue();
   return worker->GetPromise();
 }
