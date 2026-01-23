@@ -115,7 +115,7 @@ function main() {
   // 1. Check for user-specified GPU variant via environment variable
   if (process.env.LLOYAL_GPU) {
     const gpu = process.env.LLOYAL_GPU.toLowerCase();
-    const packageName = `@lloyal/lloyal.node-${PLATFORM}-${ARCH}-${gpu}`;
+    const packageName = `@lloyal-labs/lloyal.node-${PLATFORM}-${ARCH}-${gpu}`;
 
     log(`LLOYAL_GPU=${gpu}, looking for ${packageName}...`);
     const binDir = findPrebuilt(packageName);
@@ -131,7 +131,7 @@ function main() {
   // 2. Check for GPU variants in priority order
   const gpuVariants = ['cuda', 'vulkan'];
   for (const gpu of gpuVariants) {
-    const packageName = `@lloyal/lloyal.node-${PLATFORM}-${ARCH}-${gpu}`;
+    const packageName = `@lloyal-labs/lloyal.node-${PLATFORM}-${ARCH}-${gpu}`;
     const binDir = findPrebuilt(packageName);
 
     if (binDir) {
@@ -142,7 +142,7 @@ function main() {
   }
 
   // 3. Check for default platform package (CPU or Metal on macOS)
-  const defaultPackage = `@lloyal/lloyal.node-${PLATFORM}-${ARCH}`;
+  const defaultPackage = `@lloyal-labs/lloyal.node-${PLATFORM}-${ARCH}`;
   const binDir = findPrebuilt(defaultPackage);
 
   if (binDir) {

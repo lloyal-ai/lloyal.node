@@ -1,5 +1,5 @@
 {
-  "name": "@lloyal/lloyal.node-PLATFORM",
+  "name": "@lloyal-labs/lloyal.node-PLATFORM",
   "version": "0.0.0",
   "description": "Lloyal native binary for PLATFORM",
   "main": "index.js",
@@ -18,5 +18,5 @@
     "url": "git+https://github.com/lloyal-ai/lloyal.node.git"
   },
   "author": "lloyal.ai",
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
