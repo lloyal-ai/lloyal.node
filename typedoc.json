@@ -1,0 +1,51 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["lib/index.d.ts"],
+  "out": "docs/api",
+  "name": "lloyal.node API Reference",
+  "includeVersion": true,
+  "readme": "README.md",
+  "exclude": [
+    "**/node_modules/**",
+    "**/build/**",
+    "**/build-*/**",
+    "**/*.gyp",
+    "vendor/**",
+    "liblloyal/**",
+    "llama.cpp/**"
+  ],
+  "navigation": {
+    "includeCategories": true,
+    "includeGroups": true
+  },
+  "categorizeByGroup": true,
+  "defaultCategory": "Core",
+  "categoryOrder": [
+    "Core",
+    "Configuration",
+    "Sampling",
+    "*"
+  ],
+  "sort": ["kind", "instance-first", "required-first", "alphabetical"],
+  "kindSortOrder": [
+    "Function",
+    "Interface",
+    "Enum",
+    "TypeAlias"
+  ],
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "excludeExternals": false,
+  "hideGenerator": false,
+  "sidebarLinks": {
+    "GitHub": "https://github.com/lloyal-ai/lloyal.node",
+    "npm": "https://www.npmjs.com/package/lloyal.node"
+  },
+  "gitRevision": "main",
+  "githubPages": true,
+  "skipErrorChecking": true,
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true
+  }
+}

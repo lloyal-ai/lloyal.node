@@ -14,7 +14,7 @@
     "build:debug": "node-gyp rebuild --debug",
     "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple vendor/llama.cpp/build-linux vendor/llama.cpp/build-apple",
     "version": "node scripts/sync-versions.js && git add -A",
-    "docs": "jsdoc -c jsdoc.json",
+    "docs": "npx typedoc",
     "test": "npm run test:api && npm run test:e2e",
     "test:api": "node test/api.js",
     "test:e2e": "node test/e2e.js",
@@ -47,8 +47,7 @@
   "devDependencies": {
     "glob": "^11.0.0",
     "node-gyp": "^10.2.0",
-    "jsdoc": "^4.0.2",
-    "clean-jsdoc-theme": "^4.3.0"
+    "typedoc": "^0.27.5"
   },
   "optionalDependencies": {
     "@lloyal-labs/lloyal.node-darwin-arm64": "0.1.0",
