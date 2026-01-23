@@ -47,6 +47,23 @@ jobs:
             gpu: cuda
             cuda_version: 12.2.0
             package: win32-x64-cuda
+          - os: windows-2022
+            arch: x64
+            gpu: vulkan
+            package: win32-x64-vulkan
+
+          # Linux ARM64 (new for v1.0)
+          - os: ubuntu-22.04
+            arch: arm64
+            gpu: cpu
+            package: linux-arm64
+            docker_platform: linux/arm64
+          - os: ubuntu-22.04
+            arch: arm64
+            gpu: cuda
+            package: linux-arm64-cuda
+            docker_image: nvcr.io/nvidia/l4t-cuda:12.6-devel
+            docker_platform: linux/arm64
 
     steps:
       - name: Checkout code
@@ -87,12 +104,65 @@ jobs:
         with:
           cuda: '12.2.0'
 
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.gpu == 'vulkan' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/1.3.275.0/windows/VulkanSDK-1.3.275.0-Installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile VulkanSDK.exe
+          Start-Process -FilePath .\VulkanSDK.exe -ArgumentList '/S' -Wait
+          echo "VULKAN_SDK=C:\VulkanSDK\1.3.275.0" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Setup QEMU for ARM64
+        if: matrix.arch == 'arm64' && runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
       # Build
       - name: Install npm dependencies
+        if: matrix.arch != 'arm64' || runner.os != 'Linux'
         run: npm install
 
-      - name: Build native module
+      - name: Build native module (x64 or native ARM64)
+        if: matrix.arch != 'arm64' || runner.os != 'Linux'
         run: npm run build
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
+
+      - name: Build native module (ARM64 via Docker)
+        if: matrix.arch == 'arm64' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Determine Docker image
+          if [ -n "${{ matrix.docker_image }}" ]; then
+            IMAGE="${{ matrix.docker_image }}"
+          else
+            IMAGE="arm64v8/ubuntu:22.04"
+          fi
+
+          # Build inside ARM64 container
+          docker run --rm --platform ${{ matrix.docker_platform }} \
+            -v $PWD:/workspace -w /workspace \
+            -e LLOYAL_GPU=${{ matrix.gpu }} \
+            $IMAGE bash -c "
+              # Install build dependencies
+              apt-get update
+              apt-get install -y build-essential cmake git curl
+
+              # Install Node.js 20
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get install -y nodejs
+
+              # Install CUDA toolkit if needed
+              if [ '${{ matrix.gpu }}' = 'cuda' ]; then
+                apt-get install -y cuda-toolkit-12-6 || true
+              fi
+
+              # Build
+              npm install
+              npm run build
+            "
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
 
