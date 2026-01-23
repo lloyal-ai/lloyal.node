@@ -225,27 +225,29 @@ npm publish
 
 ---
 
-## Phase 2: Core Platform Prebuilts
+## Phase 2: Core Platform Prebuilts ✅ COMPLETE
 
 ### Overview
 
-**Audience:** Production users on common platforms
-**Timeline:** v0.5.0 - v1.0.0
-**Distribution:** npm registry with 3 prebuilt packages
+**Status:** ✅ Implemented (v0.1.0)
+**Audience:** Production users on common x64 platforms
+**Distribution:** 7 npm packages covering 80%+ of developers
 
-### Platform Selection
+### Platform Packages (Implemented)
 
-Target the **top 3 most common developer platforms**:
+| Package | Platform | Arch | GPU | Status |
+|---------|----------|------|-----|--------|
+| `@lloyal/lloyal.node-darwin-arm64` | macOS | arm64 | Metal | ✅ Working |
+| `@lloyal/lloyal.node-darwin-x64` | macOS | x64 | CPU | ✅ Working |
+| `@lloyal/lloyal.node-linux-x64` | Linux | x64 | CPU | ✅ Working |
+| `@lloyal/lloyal.node-linux-x64-cuda` | Linux | x64 | CUDA 12.2 | ✅ Working |
+| `@lloyal/lloyal.node-linux-x64-vulkan` | Linux | x64 | Vulkan | ✅ Working |
+| `@lloyal/lloyal.node-win32-x64` | Windows | x64 | CPU | ✅ Working |
+| `@lloyal/lloyal.node-win32-x64-cuda` | Windows | x64 | CUDA 12.2 | ✅ Working |
 
-| Package | Platform | Arch | GPU | Coverage |
-|---------|----------|------|-----|----------|
-| `@lloyal/lloyal.node-darwin-arm64` | macOS | arm64 | Metal | ~40% |
-| `@lloyal/lloyal.node-linux-x64` | Linux | x64 | CPU | ~20% |
-| `@lloyal/lloyal.node-win32-x64` | Windows | x64 | CPU | ~10% |
+**Total coverage:** ~80% of developers with instant install
 
-**Total coverage:** ~70% of developers with instant install
-
-**Unsupported platforms** (Linux arm64, macOS x64, Windows arm64): Fallback to source build
+**Note:** Original Phase 2 plan was 3 packages, but we exceeded expectations by implementing 7 packages including GPU variants.
 
 ### Architecture
 
@@ -481,35 +483,42 @@ if (mainPkg.optionalDependencies) {
 
 ---
 
-## Phase 3: Full Platform Matrix
+## Phase 3: Full Platform Matrix ⚙️ IN PROGRESS (v1.0)
 
 ### Overview
 
+**Status:** ⚙️ Implementing (target: v1.0.0)
 **Audience:** All users, all platforms, all GPU variants
-**Timeline:** v1.x.x+ (mature project with resources)
-**Distribution:** 10+ platform/GPU packages
+**Timeline:** v1.0.0
+**Distribution:** 10 platform/GPU packages covering 95%+ deployments
 
-### Platform Packages
+### Platform Packages (v1.0 Target)
 
-**CPU-only (6 packages):**
-```
-@lloyal/lloyal.node-darwin-arm64   (macOS Apple Silicon, Metal built-in)
-@lloyal/lloyal.node-darwin-x64     (macOS Intel, CPU only)
-@lloyal/lloyal.node-linux-x64      (Linux x64, CPU only)
-@lloyal/lloyal.node-linux-arm64    (Linux ARM64, CPU only)
-@lloyal/lloyal.node-win32-x64      (Windows x64, CPU only)
-@lloyal/lloyal.node-win32-arm64    (Windows ARM64, CPU only)
-```
+**Already Implemented (7 packages from Phase 2+):**
+- ✅ `@lloyal/lloyal.node-darwin-arm64` (macOS Apple Silicon, Metal)
+- ✅ `@lloyal/lloyal.node-darwin-x64` (macOS Intel, CPU)
+- ✅ `@lloyal/lloyal.node-linux-x64` (Linux x64, CPU)
+- ✅ `@lloyal/lloyal.node-linux-x64-cuda` (Linux x64 + CUDA 12.2)
+- ✅ `@lloyal/lloyal.node-linux-x64-vulkan` (Linux x64 + Vulkan)
+- ✅ `@lloyal/lloyal.node-win32-x64` (Windows x64, CPU)
+- ✅ `@lloyal/lloyal.node-win32-x64-cuda` (Windows x64 + CUDA 12.2)
 
-**GPU variants (6+ packages):**
-```
-@lloyal/lloyal.node-linux-x64-cuda     (Linux x64 + CUDA)
-@lloyal/lloyal.node-linux-x64-vulkan   (Linux x64 + Vulkan)
-@lloyal/lloyal.node-linux-arm64-cuda   (Linux ARM64 + CUDA)
-@lloyal/lloyal.node-linux-arm64-vulkan (Linux ARM64 + Vulkan)
-@lloyal/lloyal.node-win32-x64-cuda     (Windows x64 + CUDA)
-@lloyal/lloyal.node-win32-x64-vulkan   (Windows x64 + Vulkan)
-```
+**New for v1.0 (3 packages):**
+- 🔄 `@lloyal/lloyal.node-linux-arm64` (Linux ARM64 - AWS Graviton, Raspberry Pi)
+- 🔄 `@lloyal/lloyal.node-linux-arm64-cuda` (Linux ARM64 + CUDA - NVIDIA Jetson)
+- 🔄 `@lloyal/lloyal.node-win32-x64-vulkan` (Windows x64 + Vulkan - AMD/Intel GPU)
+
+**Deferred to v1.1+ (2 packages):**
+- ⏸️ `@lloyal/lloyal.node-win32-arm64` (Windows ARM64 - awaiting GitHub Actions ARM64 Windows runners)
+- ⏸️ `@lloyal/lloyal.node-darwin-x64-vulkan` (macOS Intel + eGPU - negligible use case)
+
+### What Changed from Original Plan
+
+**Original Phase 3 (docs):** 12 packages including win32-arm64, darwin-x64-vulkan
+
+**Actual v1.0 Phase 3:** 10 packages
+
+**Rationale:** 10 packages cover 95%+ of real-world usage. Remaining 2 packages require infrastructure not yet available (win32-arm64) or serve minimal users (darwin-x64-vulkan).
 
 ### GPU Variant Installation
 
@@ -552,51 +561,62 @@ if (!hasVariant(gpu)) {
 }
 ```
 
-### CI/CD Expansion
+### CI/CD Implementation (v1.0)
 
-Expand build matrix to 12+ jobs:
+Build matrix with 10 jobs (see `.github/workflows/release.yml`):
 
 ```yaml
 strategy:
   matrix:
     include:
-      # CPU variants
-      - { os: macos-14, arch: arm64, variant: default }
-      - { os: macos-13, arch: x64, variant: default }
-      - { os: ubuntu-22.04, arch: x64, variant: default }
-      - { os: ubuntu-22.04-arm, arch: arm64, variant: default }
-      - { os: windows-latest, arch: x64, variant: default }
-      - { os: windows-latest, arch: arm64, variant: default }
+      # macOS (2 jobs)
+      - { os: macos-14, arch: arm64, gpu: metal, package: darwin-arm64 }
+      - { os: macos-13, arch: x64, gpu: cpu, package: darwin-x64 }
 
-      # CUDA variants
-      - { os: ubuntu-22.04, arch: x64, variant: cuda, container: nvidia/cuda:12.6 }
-      - { os: ubuntu-22.04-arm, arch: arm64, variant: cuda, container: nvidia/cuda:12.6 }
-      - { os: windows-latest, arch: x64, variant: cuda, cuda-version: 12.9 }
+      # Linux x64 (3 jobs)
+      - { os: ubuntu-22.04, arch: x64, gpu: cpu, package: linux-x64 }
+      - { os: ubuntu-22.04, arch: x64, gpu: cuda, package: linux-x64-cuda }
+      - { os: ubuntu-22.04, arch: x64, gpu: vulkan, package: linux-x64-vulkan }
 
-      # Vulkan variants
-      - { os: ubuntu-22.04, arch: x64, variant: vulkan }
-      - { os: ubuntu-22.04-arm, arch: arm64, variant: vulkan }
-      - { os: windows-latest, arch: x64, variant: vulkan }
+      # Linux ARM64 (2 jobs - Docker + QEMU)
+      - { os: ubuntu-22.04, arch: arm64, gpu: cpu, package: linux-arm64, docker_platform: linux/arm64 }
+      - { os: ubuntu-22.04, arch: arm64, gpu: cuda, package: linux-arm64-cuda, docker_image: nvcr.io/nvidia/l4t-cuda:12.6-devel }
+
+      # Windows (3 jobs)
+      - { os: windows-2022, arch: x64, gpu: cpu, package: win32-x64 }
+      - { os: windows-2022, arch: x64, gpu: cuda, package: win32-x64-cuda, cuda_version: 12.2.0 }
+      - { os: windows-2022, arch: x64, gpu: vulkan, package: win32-x64-vulkan }
 ```
 
-### Pros & Cons
+**Key Implementation Details:**
+- **ARM64 builds:** Use Docker + QEMU for cross-compilation (GitHub Actions has no native ARM64 Linux runners)
+- **CUDA ARM64:** Use NVIDIA L4T (Linux for Tegra) Docker image for Jetson compatibility
+- **Vulkan Windows:** Install LunarG Vulkan SDK during CI build step
+
+### Pros & Cons (v1.0 Implementation)
 
 **Pros:**
-- Best user experience (instant install + optimal performance)
-- Covers 100% of platforms
-- GPU acceleration out of box
+- Excellent user experience (instant install + optimal performance)
+- Covers 95%+ of real-world deployments
+- GPU acceleration out of box (CUDA, Vulkan, Metal)
+- ARM64 support (AWS Graviton, Jetson, Raspberry Pi)
 - Professional distribution
 
 **Cons:**
-- Complex CI/CD (12+ jobs, cross-compilation, GPU toolchains)
-- High maintenance burden (12+ packages to version/publish)
-- Storage/bandwidth costs ($$$)
-- Platform-specific bugs to debug
+- Moderate CI/CD complexity (10 jobs, cross-compilation, GPU toolchains)
+- Maintenance burden (10 packages to version/publish)
+- Storage/bandwidth costs (50-150MB per package)
+- Platform-specific bugs to debug (especially ARM64 QEMU builds)
+- Cannot fully test all platforms in CI (no ARM64 hardware runners)
 
-### When to Use
+### Success Metrics
 
-- Established project with funding/resources
-- Large user base demanding GPU support
+**Phase 3 v1.0 considered successful when:**
+- All 10 platform packages build successfully in CI
+- All 10 packages published to npm registry
+- `npm install lloyal.node` works on all 10 platforms
+- Community validation on ARM64 hardware (Graviton, Raspberry Pi, Jetson)
+- No regression in existing 7 packages
 - Commercial product expectations
 
 ---
