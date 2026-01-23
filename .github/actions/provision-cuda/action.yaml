@@ -1,0 +1,94 @@
+name: Provision CUDA Toolkit
+
+description: Install CUDA toolkit for lloyal.node builds across all platforms
+
+inputs:
+  version:
+    description: "CUDA toolkit version"
+    required: false
+    default: "12.6.2"
+  arch:
+    description: "Target architecture (x64 or arm64)"
+    required: true
+
+outputs:
+  cuda-path:
+    description: "CUDA installation path"
+    value: ${{ steps.set-cuda-path.outputs.cuda-path }}
+
+runs:
+  using: "composite"
+  steps:
+    # Windows: Install via Chocolatey
+    - name: Install CUDA (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        $version = $env:VERSION
+        $version_major_minor = $version.Split('.')[0..1] -join '.'
+        $version_slug = $version_major_minor.Replace('.', '_')
+        $cuda_path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${version_major_minor}"
+
+        Write-Host "Installing CUDA ${version} via Chocolatey..."
+        choco install cuda --version=${version} -y --no-progress
+
+        # Set environment variables
+        Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH=${cuda_path}"
+        Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH_V${version_slug}=${cuda_path}"
+        Add-Content -Path $env:GITHUB_PATH -Value "${cuda_path}\bin"
+        Add-Content -Path $env:GITHUB_PATH -Value "${cuda_path}\libnvvp"
+
+        Write-Host "CUDA installed at: ${cuda_path}"
+
+    # Linux x64: Install from NVIDIA repos
+    - name: Install CUDA (Linux x64)
+      if: runner.os == 'Linux' && inputs.arch == 'x64'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        version_major_minor=$(echo $VERSION | cut -d. -f1,2)
+        version_slug=$(echo $version_major_minor | tr '.' '-')
+
+        echo "Installing CUDA ${version_major_minor} for x86_64..."
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+        sudo dpkg -i cuda-keyring_1.1-1_all.deb
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq cuda-toolkit-${version_slug} build-essential cmake
+
+        cuda_path="/usr/local/cuda-${version_major_minor}"
+        echo "CUDA_PATH=${cuda_path}" >> $GITHUB_ENV
+        echo "${cuda_path}/bin" >> $GITHUB_PATH
+
+        echo "CUDA installed at: ${cuda_path}"
+
+    # Linux ARM64: Install from NVIDIA repos
+    - name: Install CUDA (Linux ARM64)
+      if: runner.os == 'Linux' && inputs.arch == 'arm64'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        version_major_minor=$(echo $VERSION | cut -d. -f1,2)
+        version_slug=$(echo $version_major_minor | tr '.' '-')
+
+        echo "Installing CUDA ${version_major_minor} for arm64..."
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/arm64/cuda-keyring_1.1-1_all.deb
+        sudo dpkg -i cuda-keyring_1.1-1_all.deb
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq cuda-toolkit-${version_slug} build-essential cmake
+
+        cuda_path="/usr/local/cuda-${version_major_minor}"
+        echo "CUDA_PATH=${cuda_path}" >> $GITHUB_ENV
+        echo "${cuda_path}/bin" >> $GITHUB_PATH
+
+        echo "CUDA installed at: ${cuda_path}"
+
+    # Set output
+    - name: Set CUDA path output
+      id: set-cuda-path
+      shell: bash
+      run: |
+        echo "cuda-path=${CUDA_PATH}" >> $GITHUB_OUTPUT

@@ -54,9 +54,12 @@
     "@lloyal/lloyal.node-linux-x64-vulkan": "0.1.0",
     "@lloyal/lloyal.node-linux-arm64": "0.1.0",
     "@lloyal/lloyal.node-linux-arm64-cuda": "0.1.0",
+    "@lloyal/lloyal.node-linux-arm64-vulkan": "0.1.0",
     "@lloyal/lloyal.node-win32-x64": "0.1.0",
     "@lloyal/lloyal.node-win32-x64-cuda": "0.1.0",
-    "@lloyal/lloyal.node-win32-x64-vulkan": "0.1.0"
+    "@lloyal/lloyal.node-win32-x64-vulkan": "0.1.0",
+    "@lloyal/lloyal.node-win32-arm64": "0.1.0",
+    "@lloyal/lloyal.node-win32-arm64-vulkan": "0.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
