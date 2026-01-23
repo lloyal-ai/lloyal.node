@@ -18,7 +18,7 @@ jobs:
             arch: arm64
             gpu: metal
             package: darwin-arm64
-          - os: macos-13
+          - os: macos-15-intel
             arch: x64
             gpu: cpu
             package: darwin-x64
