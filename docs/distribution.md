@@ -51,10 +51,10 @@ To force a specific GPU backend, install the platform package directly:
 
 ```bash
 # Force CUDA on Linux
-npm install @lloyal/lloyal.node-linux-x64-cuda
+npm install @lloyal-labs/lloyal.node-linux-x64-cuda
 
 # Force Vulkan on Windows
-npm install @lloyal/lloyal.node-win32-x64-vulkan
+npm install @lloyal-labs/lloyal.node-win32-x64-vulkan
 ```
 
 Or set an environment variable before installation:
@@ -102,14 +102,14 @@ Requires NVIDIA GPU with compute capability 6.0+ and CUDA 12.6 runtime.
 
 **Linux/Windows:**
 ```bash
-npm install @lloyal/lloyal.node-linux-x64-cuda
+npm install @lloyal-labs/lloyal.node-linux-x64-cuda
 # or
-npm install @lloyal/lloyal.node-win32-x64-cuda
+npm install @lloyal-labs/lloyal.node-win32-x64-cuda
 ```
 
 **Jetson (ARM64):**
 ```bash
-npm install @lloyal/lloyal.node-linux-arm64-cuda
+npm install @lloyal-labs/lloyal.node-linux-arm64-cuda
 ```
 
 ### Vulkan (Cross-Platform)
@@ -117,9 +117,9 @@ npm install @lloyal/lloyal.node-linux-arm64-cuda
 Works with AMD, Intel, NVIDIA, and Qualcomm GPUs. Requires Vulkan 1.3+ drivers.
 
 ```bash
-npm install @lloyal/lloyal.node-linux-x64-vulkan
+npm install @lloyal-labs/lloyal.node-linux-x64-vulkan
 # or
-npm install @lloyal/lloyal.node-win32-x64-vulkan
+npm install @lloyal-labs/lloyal.node-win32-x64-vulkan
 ```
 
 ### CPU-Only
@@ -127,9 +127,9 @@ npm install @lloyal/lloyal.node-win32-x64-vulkan
 No GPU acceleration. Works on all platforms.
 
 ```bash
-npm install @lloyal/lloyal.node-darwin-x64   # macOS Intel
-npm install @lloyal/lloyal.node-linux-x64    # Linux x64
-npm install @lloyal/lloyal.node-win32-x64    # Windows x64
+npm install @lloyal-labs/lloyal.node-darwin-x64   # macOS Intel
+npm install @lloyal-labs/lloyal.node-linux-x64    # Linux x64
+npm install @lloyal-labs/lloyal.node-win32-x64    # Windows x64
 ```
 
 ---
@@ -144,8 +144,8 @@ npm install @lloyal/lloyal.node-win32-x64    # Windows x64
 {
   "name": "lloyal.node",
   "optionalDependencies": {
-    "@lloyal/lloyal.node-darwin-arm64": "1.0.0",
-    "@lloyal/lloyal.node-linux-x64-cuda": "1.0.0",
+    "@lloyal-labs/lloyal.node-darwin-arm64": "1.0.0",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "1.0.0",
     ...
   }
 }
@@ -160,12 +160,12 @@ Each platform package contains:
 - Platform-specific shared libraries (`*.dylib`, `*.so`, `*.dll`)
 - Minimal dependencies (no build tools required)
 
-**Package naming:** `@lloyal/lloyal.node-{platform}-{arch}[-{gpu}]`
+**Package naming:** `@lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]`
 
 Examples:
-- `@lloyal/lloyal.node-darwin-arm64` (macOS Apple Silicon with Metal)
-- `@lloyal/lloyal.node-linux-x64-cuda` (Linux x64 with CUDA 12.6)
-- `@lloyal/lloyal.node-win32-arm64-vulkan` (Windows ARM64 with Vulkan)
+- `@lloyal-labs/lloyal.node-darwin-arm64` (macOS Apple Silicon with Metal)
+- `@lloyal-labs/lloyal.node-linux-x64-cuda` (Linux x64 with CUDA 12.6)
+- `@lloyal-labs/lloyal.node-win32-arm64-vulkan` (Windows ARM64 with Vulkan)
 
 ---
 
@@ -277,14 +277,14 @@ git push origin v1.0.0
 
 GitHub Actions automatically:
 - Builds all 13 platform packages
-- Publishes to npm registry (`@lloyal/lloyal.node-*`)
+- Publishes to npm registry (`@lloyal-labs/lloyal.node-*`)
 - Publishes main package (`lloyal.node`)
 
 **4. Verify release:**
 
 ```bash
 npm info lloyal.node
-npm info @lloyal/lloyal.node-linux-x64-cuda
+npm info @lloyal-labs/lloyal.node-linux-x64-cuda
 ```
 
 ### Version Management

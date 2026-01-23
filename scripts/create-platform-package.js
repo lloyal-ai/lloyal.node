@@ -33,7 +33,7 @@ const OS_MAP = {
 
 const osName = OS_MAP[osRunner] || process.platform;
 
-console.log(`\n=== Creating platform package: @lloyal/lloyal.node-${packageName} ===\n`);
+console.log(`\n=== Creating platform package: @lloyal-labs/lloyal.node-${packageName} ===\n`);
 
 // Create directories
 fs.mkdirSync(BIN_DIR, { recursive: true });
@@ -101,7 +101,7 @@ if (fs.existsSync(templatePath)) {
 } else {
   // Fallback template if file doesn't exist yet
   pkgJson = {
-    name: '@lloyal/lloyal.node-PLATFORM',
+    name: '@lloyal-labs/lloyal.node-PLATFORM',
     version: '0.0.0',
     description: 'Lloyal native binary for PLATFORM',
     main: 'index.js',
@@ -110,12 +110,12 @@ if (fs.existsSync(templatePath)) {
       type: 'git',
       url: 'git+https://github.com/lloyal-ai/lloyal.node.git'
     },
-    license: 'MIT'
+    license: 'Apache-2.0'
   };
 }
 
 // Update with actual values
-pkgJson.name = `@lloyal/lloyal.node-${packageName}`;
+pkgJson.name = `@lloyal-labs/lloyal.node-${packageName}`;
 pkgJson.version = mainPackageJson.version;
 pkgJson.description = `Lloyal native binary for ${packageName}`;
 pkgJson.os = [osName];
@@ -142,7 +142,7 @@ console.log(`  ✓ Created index.js`);
 
 // Summary
 console.log(`\n✅ Platform package created successfully!`);
-console.log(`\nPackage: @lloyal/lloyal.node-${packageName}@${pkgJson.version}`);
+console.log(`\nPackage: @lloyal-labs/lloyal.node-${packageName}@${pkgJson.version}`);
 console.log(`Location: ${PKG_DIR}`);
 console.log(`\nContents:`);
 fs.readdirSync(BIN_DIR).forEach(f => {
