@@ -32,7 +32,7 @@
     "llm"
   ],
   "author": "lloyal.ai",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/lloyal-ai/lloyal.node/issues"
@@ -62,7 +62,7 @@
     "@lloyal/lloyal.node-win32-arm64-vulkan": "0.1.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "lib/",
