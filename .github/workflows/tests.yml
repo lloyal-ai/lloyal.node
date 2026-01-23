@@ -1,4 +1,4 @@
-name: Phase 1 Tests (Build from Source)
+name: Build & Test
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
-        # NO submodules - we're testing vendor/ sources (Phase 1 requirement)
+        # NO submodules - we're testing vendor/ sources
 
       - name: Pull Git LFS files
         run: git lfs pull
@@ -104,7 +104,7 @@ jobs:
           echo "Node: ${{ matrix.node }}"
           echo "Platform: $(node -p 'process.platform')"
           echo "Arch: $(node -p 'process.arch')"
-          echo "Vendor sources used: YES (Phase 1)"
+          echo "Built from vendored sources: YES"
           if [ -f vendor/VERSIONS.json ]; then
             echo "Vendored versions:"
             cat vendor/VERSIONS.json
@@ -189,12 +189,12 @@ jobs:
       - name: Check test results
         run: |
           echo "================================"
-          echo "Phase 1 Test Results"
+          echo "Test Results Summary"
           echo "================================"
-          echo "✓ Vendor sources tested on Linux, macOS, Windows"
+          echo "✓ Source builds tested on Linux, macOS, Windows"
           echo "✓ Node.js 22, 24 (LTS) compatibility verified"
           echo "✓ npm package contents verified"
           echo "✓ API tests passed (11 tests)"
           echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
           echo ""
-          echo "Phase 1 (Build from Source) Status: ${{ needs.test-vendored-sources.result }}"
+          echo "Build & Test Status: ${{ needs.test-vendored-sources.result }}"
