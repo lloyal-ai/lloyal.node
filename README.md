@@ -2,10 +2,6 @@
 
 Node.js bindings for [liblloyal](https://github.com/lloyal-ai/liblloyal)—the inference kernel that orchestrates llama.cpp in-process for agentic inference patterns.
 
-**Today:** Core liblloyal primitives and Test Time Alignment via TypeScript sampling.
-
-**Coming (vNext):** Atomic state forking, KV-LRU (leasing), SMMA (Single Model Multi-Agent) orchestration—bringing liblloyal's Branch and Lease to TypeScript.
-
 ## Installation
 
 ```bash
@@ -74,7 +70,7 @@ console.log(response);
 
 ## Test-Time Alignment
 
-TTA is the fusion of application state with sampling strategy at every token step. Instead of generating text and validating after, you enforce constraints _during_ generation.
+TTA is token-level test-time alignment by exposing logits so TypeScript can apply stateful policies/constraints to the full next-token distribution before sampling—no retraining. Enabling fusion of application state with sampling strategy at every token step. Instead of generating text and validating after, you enforce constraints _during_ generation.
 
 This requires two things:
 

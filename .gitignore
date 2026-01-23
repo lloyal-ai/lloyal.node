@@ -4,6 +4,9 @@ prebuilds/
 *.node
 /include/
 
+# Test models (too large for git)
+models/
+
 # Vendor build artifacts (generated during npm install)
 vendor/llama.cpp/build-*/
 
