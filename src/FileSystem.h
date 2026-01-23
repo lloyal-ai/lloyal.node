@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cerrno>
 
-namespace margelo::nitro::nitrollama {
+namespace liblloyal_node {
 
 /**
  * File system operations and validation service
@@ -103,4 +103,4 @@ namespace FileSystem {
     }
 }
 
-} // namespace margelo::nitro::nitrollama
+} // namespace liblloyal_node

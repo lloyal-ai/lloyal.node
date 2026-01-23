@@ -2,6 +2,7 @@
 
 #include <napi.h>
 #include <lloyal/tokenizer.hpp>
+#include <lloyal/metrics.hpp>
 #include <llama/llama.h>
 #include <memory>
 #include <mutex>
@@ -130,7 +131,7 @@ private:
   Napi::Value getMemorySize(const Napi::CallbackInfo& info);
 
   // ===== GRAMMAR-CONSTRAINED GENERATION =====
-  // (To be implemented in Phase 4)
+  // Legacy single-grammar API (deprecated, use handle-based API below)
 
   Napi::Value initGrammar(const Napi::CallbackInfo& info);
   Napi::Value applyGrammar(const Napi::CallbackInfo& info);
@@ -144,6 +145,13 @@ private:
   Napi::Value kvCacheSave(const Napi::CallbackInfo& info);
   Napi::Value kvCacheLoad(const Napi::CallbackInfo& info);
   Napi::Value kvCacheClear(const Napi::CallbackInfo& info);
+
+  /**
+   * Atomic clear+reseed operation for KV cache compression
+   * Args: sinks (Array<number>), tail (Array<number>)
+   * Returns: void (Promise)
+   */
+  Napi::Value clearAndReseed(const Napi::CallbackInfo& info);
 
   // ===== KV SEQUENCE OPERATIONS =====
 
@@ -224,7 +232,7 @@ private:
   Napi::Value kvCacheReadFile(const Napi::CallbackInfo& info);
 
   // ===== HELPERS =====
-  // (To be implemented in Phase 6)
+  // Utility functions (not yet implemented)
 
   Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
   Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);
@@ -258,6 +266,67 @@ private:
    */
   Napi::Value hasPooling(const Napi::CallbackInfo& info);
 
+  // ===== METRICS API =====
+
+  /**
+   * Compute surprisal for a specific token
+   * Args: pickedTokenId (number), base? (string: "nats" | "bits" | "base10")
+   * Returns: number (surprisal in specified base)
+   */
+  Napi::Value modelSurprisal(const Napi::CallbackInfo& info);
+
+  /**
+   * Compute entropy of logits distribution
+   * Args: base? (string: "nats" | "bits" | "base10")
+   * Returns: number (entropy in specified base)
+   */
+  Napi::Value modelEntropy(const Napi::CallbackInfo& info);
+
+  /**
+   * Create a new perplexity tracker
+   * Returns: number (handle)
+   */
+  Napi::Value createPerplexityTracker(const Napi::CallbackInfo& info);
+
+  /**
+   * Add surprisal value to tracker
+   * Args: handle (number), surprisal (number)
+   */
+  Napi::Value addSurprisal(const Napi::CallbackInfo& info);
+
+  /**
+   * Get current perplexity value
+   * Args: handle (number)
+   * Returns: number (perplexity)
+   */
+  Napi::Value getPerplexity(const Napi::CallbackInfo& info);
+
+  /**
+   * Clone perplexity tracker
+   * Args: sourceHandle (number)
+   * Returns: number (new handle)
+   */
+  Napi::Value clonePerplexityTracker(const Napi::CallbackInfo& info);
+
+  /**
+   * Reset tracker to initial state
+   * Args: handle (number)
+   */
+  Napi::Value resetPerplexityTracker(const Napi::CallbackInfo& info);
+
+  /**
+   * Get number of tokens tracked
+   * Args: handle (number)
+   * Returns: number (count)
+   */
+  Napi::Value getPerplexityCount(const Napi::CallbackInfo& info);
+
+  /**
+   * Free perplexity tracker resources
+   * Args: handle (number)
+   */
+  Napi::Value freePerplexityTracker(const Napi::CallbackInfo& info);
+
 private:
   // ===== INTERNAL STATE =====
 
@@ -273,6 +342,10 @@ private:
   // ===== HANDLE-BASED GRAMMAR =====
   std::unordered_map<int32_t, llama_sampler*> _samplerHandles;
   int32_t _nextSamplerHandle = 1;
+
+  // ===== HANDLE-BASED PERPLEXITY TRACKING =====
+  std::unordered_map<int32_t, lloyal::metrics::PerplexityHandle> _perplexityHandles;
+  int32_t _nextPerplexityHandle = 1;
 
   // ===== DECODE MUTEX =====
   std::mutex _decodeMutex;
@@ -305,6 +378,9 @@ private:
   inline llama_pos toPos(double pos) {
     return static_cast<llama_pos>(pos);
   }
+
+  // Parse base string ("nats", "bits", "base10") to lloyal::metrics::Base enum
+  static lloyal::metrics::Base parseBase(const std::string& baseStr);
 
   /**
    * Invalidate any active logits buffer (The Kill Switch)

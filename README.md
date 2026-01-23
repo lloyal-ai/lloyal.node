@@ -1,25 +1,10 @@
 # lloyal.node
 
-Thin N-API wrapper over [liblloyal](https://github.com/lloyal-ai/liblloyal) for Node.js - raw llama.cpp inference primitives.
+Node.js bindings for [liblloyal](https://github.com/lloyal-ai/liblloyal)—the inference kernel that orchestrates llama.cpp in-process for agentic inference patterns.
 
-## Features
+**Today:** Core liblloyal primitives and Test Time Alignment via TypeScript sampling.
 
-- **Prebuilt Binaries**: Install in <1 minute on 7 common platforms (macOS, Linux, Windows)
-- **Raw & Thin**: Direct access to llama.cpp primitives via liblloyal
-- **Zero-Copy Logits**: `getLogits()` returns Float32Array pointing to llama.cpp memory
-- **Embeddings**: Extract L2-normalized embeddings with configurable pooling (MEAN, CLS, LAST)
-- **GPU Acceleration**: Metal (macOS), CUDA, and Vulkan support with dedicated prebuilts
-- **BYO llama.cpp**: Swap `libllama.dylib` for custom builds (dynamic linking)
-- **Native Reference**: Includes native entropy/greedy implementations for testing
-- **TypeScript**: Full type definitions included
-
-## Use Cases
-
-A minimal Node.js binding for llama.cpp inference, suitable for:
-- **Testing & Validation**: Compare TypeScript implementations against native references
-- **Serverless Deployments**: Lightweight footprint for edge compute and Lambda-style functions
-- **Automation & CI**: Build deterministic test suites for LLM-powered workflows
-- **Research & Prototyping**: Direct access to llama.cpp primitives without framework overhead
+**Coming (vNext):** Atomic state forking, KV-LRU (leasing), SMMA (Single Model Multi-Agent) orchestration—bringing liblloyal's Branch and Lease to TypeScript.
 
 ## Installation
 
@@ -27,479 +12,347 @@ A minimal Node.js binding for llama.cpp inference, suitable for:
 npm install lloyal.node
 ```
 
-### Prebuilt Binaries (Recommended)
+Prebuilt binaries for 13 platforms:
 
-lloyal.node ships with **prebuilt binaries** for common platforms. Installation takes **<1 minute**:
+| Platform | Arch  | Acceleration        |
+| -------- | ----- | ------------------- |
+| macOS    | arm64 | Metal               |
+| macOS    | x64   | CPU                 |
+| Linux    | x64   | CPU / CUDA / Vulkan |
+| Linux    | arm64 | CPU / CUDA / Vulkan |
+| Windows  | x64   | CPU / CUDA / Vulkan |
+| Windows  | arm64 | CPU / Vulkan        |
 
-| Platform | Architecture | GPU | Package | Install Time |
-|----------|--------------|-----|---------|--------------|
-| **macOS** | Apple Silicon (arm64) | Metal | `@lloyal/lloyal.node-darwin-arm64` | <1 min ⚡ |
-| **macOS** | Intel (x64) | CPU | `@lloyal/lloyal.node-darwin-x64` | <1 min ⚡ |
-| **Linux** | x64 | CPU | `@lloyal/lloyal.node-linux-x64` | <1 min ⚡ |
-| **Linux** | x64 | CUDA | `@lloyal/lloyal.node-linux-x64-cuda` | <1 min ⚡ |
-| **Linux** | x64 | Vulkan | `@lloyal/lloyal.node-linux-x64-vulkan` | <1 min ⚡ |
-| **Windows** | x64 | CPU | `@lloyal/lloyal.node-win32-x64` | <1 min ⚡ |
-| **Windows** | x64 | CUDA | `@lloyal/lloyal.node-win32-x64-cuda` | <1 min ⚡ |
+Falls back to source build if your platform isn't covered.
 
-**How it works:**
-- npm automatically downloads the correct prebuilt for your platform
-- Platform packages are listed as `optionalDependencies`
-- Falls back to building from source if your platform isn't covered
+```bash
+LLOYAL_GPU=cuda npm install    # NVIDIA
+LLOYAL_GPU=vulkan npm install  # AMD/Intel
+LLOYAL_GPU=cpu npm install     # Force CPU
+```
 
-### Building from Source (Fallback)
+See [DISTRIBUTION.md](./docs/DISTRIBUTION.md) for package details.
 
-If no prebuilt is available for your platform, lloyal.node builds from **vendored sources** (5-15 minutes):
+## Quick Start
 
-**Prerequisites:**
-- Node.js ≥18
-- C++20 compiler (GCC, Clang, or MSVC)
-- CMake ≥3.14
-- node-gyp build tools
+Complete example with greedy sampling:
 
-**Supported platforms:**
-- Any platform with a C++20 compiler and CMake
-- GPU backends require additional dependencies (see GPU Acceleration section)
+```typescript
+import { createContext } from 'lloyal.node';
 
-## Using in Your Project
+async function generate(prompt: string, maxTokens = 100): Promise<string> {
+  const ctx = await createContext({
+    modelPath: './model.gguf',
+    nCtx: 2048,
+    nThreads: 4,
+  });
 
-Simply add lloyal.node as a dependency:
+  try {
+    const tokens = await ctx.tokenize(prompt);
+    await ctx.decode(tokens, 0);
 
-```json
-{
-  "dependencies": {
-    "lloyal.node": "^0.1.0"
+    const output: number[] = [];
+    let pos = tokens.length;
+
+    for (let i = 0; i < maxTokens; i++) {
+      const token = ctx.greedySample();
+      if (token < 0) break; // EOS
+
+      output.push(token);
+      await ctx.decode([token], pos++);
+    }
+
+    return ctx.detokenize(output);
+  } finally {
+    ctx.dispose();
   }
 }
+
+const response = await generate('The capital of France is');
+console.log(response);
 ```
 
-Then import and use:
+## Test-Time Alignment
 
-```javascript
-const { createContext } = require('lloyal.node');
+TTA is the fusion of application state with sampling strategy at every token step. Instead of generating text and validating after, you enforce constraints _during_ generation.
 
-const ctx = await createContext({
-  modelPath: './model.gguf'
-});
-```
+This requires two things:
 
-**That's it!** npm handles downloading prebuilts or building from source automatically.
+1. **Raw logits** — the probability distribution over all possible next tokens
+2. **TypeScript sampling** — so your app logic can modify probabilities before selection
 
-## Development & Contributing
-
-**Clone the repository:**
-
-```bash
-# Clone with submodules
-git clone --recursive https://github.com/lloyal-ai/lloyal.node.git
-cd lloyal.node
-
-# Build from source
-npm install
-npm run build
-```
-
-**Build process:**
-- **Linux**: Builds llama.cpp as a single shared library (`.so`) with `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`
-- **macOS**: Creates universal binary (arm64+x86_64) `libllama.dylib` with Metal/Accelerate support
-- **Windows**: Builds DLLs for llama.cpp + ggml
-
-**Why single combined library?** Dynamic linking to `libllama.so`/`.dylib` enables the "bring your own llama.cpp" pattern while avoiding ODR violations.
-
-**Active development workflow:**
-```bash
-git submodule update --remote    # Update submodules
-npm run clean                    # Clean build artifacts
-npm run build                    # Rebuild
-```
-
-### GPU Acceleration
-
-By default, lloyal.node auto-detects the best backend for your platform:
-
-| Platform | Default Backend | GPU Support |
-|----------|----------------|-------------|
-| **macOS (local)** | Metal | ✅ GPU acceleration |
-| **macOS (CI)** | CPU | ⚠️ No GPU (virtualized) |
-| **Linux** | CPU | Manual via `LLOYAL_GPU` |
-| **Windows** | CPU | Manual via `LLOYAL_GPU` |
-
-**Override with `LLOYAL_GPU` environment variable:**
-
-```bash
-# Force CPU-only build (disables all GPU backends)
-LLOYAL_GPU=cpu npm install
-
-# Enable CUDA (Linux/Windows with NVIDIA GPU)
-LLOYAL_GPU=cuda npm install
-
-# Enable Vulkan (Linux/Windows)
-LLOYAL_GPU=vulkan npm install
-
-# Enable Metal (macOS only, default on local builds)
-LLOYAL_GPU=metal npm install
-```
-
-**Requirements by Backend:**
-
-- **CPU**: No additional dependencies (works everywhere)
-- **Metal**: macOS only (built-in, requires physical GPU)
-- **CUDA**: NVIDIA GPU + [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) installed
-- **Vulkan**: [Vulkan SDK](https://vulkan.lunarg.com/) installed
-
-**⚠️ Runtime Dependencies & Dynamic Linking:**
-
-lloyal.node uses **dynamic linking** to a bundled `libllama.so`/`libllama.dylib`:
-
-```
-node_modules/lloyal.node/build/Release/
-├── lloyal.node              # N-API wrapper (links to libllama via @rpath)
-└── libllama.dylib           # llama.cpp + ggml (bundled, but swappable!)
-```
-
-**Batteries included, BYO supported:** The bundled llama library ships with the package, but you can replace it with your own build (same ABI required).
-
-GPU backends introduce **additional runtime dependencies**:
-
-| Backend | Bundled in Package | External Runtime Dependencies | Portable? |
-|---------|-------------------|-------------------------------|-----------|
-| **CPU** | `libllama.so` only | None | ✅ Yes |
-| **Metal** | `libllama.dylib` + Metal framework | macOS frameworks (always available) | ✅ Yes (macOS only) |
-| **CUDA** | `libllama.so` + CUDA code | `libcudart.so`, `libcublas.so`, etc. | ❌ No - requires CUDA runtime |
-| **Vulkan** | `libllama.so` + Vulkan code | `libvulkan.so` | ❌ No - requires Vulkan drivers |
-
-**CUDA/Vulkan builds are NOT portable** - they require the same GPU libraries at runtime:
-
-```bash
-# Build on machine with CUDA
-LLOYAL_GPU=cuda npm install  # ✅ Links against CUDA libs
-
-# Deploy to production without CUDA
-node app.js  # ❌ Error: libcudart.so.12 not found
-
-# Solution: Install CUDA runtime on production, or rebuild with CPU
-LLOYAL_GPU=cpu npm install  # ✅ Portable to any Linux machine
-```
-
-Check dynamic dependencies with:
-```bash
-# Linux
-ldd build/Release/lloyal.node
-
-# macOS
-otool -L build/Release/lloyal.node
-```
-
-**Bring Your Own llama.cpp:**
-
-Advanced users can replace the bundled llama library with a custom build:
-
-```bash
-# Build your custom llama.cpp (must match ABI)
-cd /path/to/your/llama.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON ...
-cmake --build build
-
-# Replace bundled library (AFTER npm install)
-cp /path/to/your/llama.cpp/build/libllama.so \
-   node_modules/lloyal.node/build/Release/libllama.so
-
-# Verify it loads
-node -e "require('lloyal.node').createContext({modelPath: './model.gguf'})"
-```
-
-**⚠️ ABI Compatibility Requirements:**
-- Same llama.cpp commit/version (API signatures must match)
-- Same backend (CPU/CUDA/Vulkan/Metal)
-- Same architecture (x86_64/arm64)
-- Mismatches cause runtime crashes or undefined behavior
-
-**Use cases:**
-- Custom llama.cpp patches
-- Organization-specific builds
-- Testing upstream llama.cpp changes
-- Optimized builds for specific hardware
-
-**Examples:**
-
-```bash
-# Deploy to AWS Lambda (CPU-only for compatibility)
-LLOYAL_GPU=cpu npm install
-
-# Development on Linux workstation with NVIDIA GPU
-LLOYAL_GPU=cuda npm install
-
-# Rebuild with different backend
-npm run clean
-LLOYAL_GPU=vulkan npm install
-```
-
-**Note:** The backend is determined at **build time**, not runtime. To switch backends, you must rebuild with `npm run clean && LLOYAL_GPU=<backend> npm install`.
-
-### How Include Paths Work
-
-liblloyal expects `#include <llama/llama.h>`, but llama.cpp provides headers at `include/llama.h`.
-
-**Solution:** The `npm install` script automatically creates a symlink structure:
-- `include/llama/` → `llama.cpp/include/*.h`
-- `include/ggml/` → `llama.cpp/ggml/include/*.h`
-
-These symlinks are **gitignored** and regenerated on each `npm install`. This approach:
-- Respects liblloyal's include path expectations (external package boundary)
-- Doesn't modify llama.cpp submodule structure
-- Works across platforms (Node.js handles symlinks portably)
-- Zero disk overhead (symlinks, not copies)
-
-**Note for Contributors:** The package uses git submodules for `liblloyal` and `llama.cpp` during development. npm users get vendored sources automatically. If you cloned the repo without `--recursive`:
-
-```bash
-git submodule update --init --recursive
-```
-
-### Test Models (Git LFS)
-
-The test suite uses [Git LFS](https://git-lfs.com/) to track the SmolLM2 model (~1GB). Install Git LFS before cloning:
-
-```bash
-# Install Git LFS (one-time setup)
-brew install git-lfs  # macOS
-# or: sudo apt-get install git-lfs  # Linux
-
-# Initialize Git LFS
-git lfs install
-
-# Clone with LFS files
-git clone --recursive https://github.com/lloyal-ai/lloyal.node.git
-```
-
-If you already cloned without LFS, pull the model:
-
-```bash
-git lfs pull
-```
-
-## Usage
+lloyal.node provides the logits. [tsampler](https://github.com/lloyal-ai/tsampler) provides the sampling:
 
 ```typescript
 import { createContext } from 'lloyal.node';
+import {
+  sampleWithStrategy,
+  computeModelEntropy,
+  TokenHistoryTracker,
+  SamplerWorkspace,
+  Xoroshiro128Plus,
+} from '@lloyal/tsampler';
 
-const ctx = await createContext({
-  modelPath: './model.gguf',
-  nCtx: 2048,
-  nThreads: 4
-});
+const ctx = await createContext({ modelPath: './model.gguf' });
+const prng = new Xoroshiro128Plus(42); // Deterministic PRNG
+const tokenHistory = new TokenHistoryTracker(64); // For repetition penalties
+const workspace = new SamplerWorkspace(256); // Pre-allocated, zero-alloc hot path
 
-try {
-  // Tokenize
-  const tokens = await ctx.tokenize("The capital of France is");
+const tokens = await ctx.tokenize(prompt);
+await ctx.decode(tokens, 0);
 
-  // Decode (forward pass)
-  await ctx.decode(tokens, 0);
+let pos = tokens.length;
+const output: number[] = [];
 
-  // Get raw logits (zero-copy!)
-  const logits = ctx.getLogits();  // Float32Array
+while (output.length < maxTokens) {
+  const logits = ctx.getLogits();
 
-  // Native reference implementations (for testing)
-  const entropy = ctx.computeEntropy();  // nats
-  const token = ctx.greedySample();      // token ID
+  // === YOUR STEERING LOGIC HERE ===
 
-  console.log(`Entropy: ${entropy.toFixed(3)} nats`);
-  console.log(`Greedy token: ${token}`);
-} finally {
-  ctx.dispose();  // Free native resources
+  // Enforce domain rules
+  if (currency === 'JPY') {
+    logits[DECIMAL_TOKEN] = -Infinity; // JPY has no decimal subdivision
+  }
+
+  // Adapt to model confidence
+  const entropy = computeModelEntropy(logits);
+  const params =
+    entropy < 2.0
+      ? { topK: 256, temperature: 1.5 } // Low confidence → explore more
+      : { topK: 40, temperature: 0.8 }; // High confidence → stay focused
+
+  // === END STEERING LOGIC ===
+
+  const token = sampleWithStrategy(logits, {
+    tokenHistory,
+    params,
+    workspace,
+    prng,
+  });
+
+  if (token < 0) break;
+
+  tokenHistory.accept(token);
+  output.push(token);
+  await ctx.decode([token], pos++);
 }
 ```
 
-## API
-
-### `createContext(options)`
-
-Creates a new inference context.
-
-**Options:**
-- `modelPath: string` - Path to .gguf model file (required)
-- `nCtx?: number` - Context size (default: 2048)
-- `nThreads?: number` - Number of threads (default: 4)
-- `embeddings?: boolean` - Enable embedding mode (default: false)
-- `poolingType?: number` - Pooling type: 0=NONE, 1=MEAN, 2=CLS, 3=LAST (default: model's default)
-
-**Returns:** `Promise<SessionContext>`
-
-### `SessionContext`
-
-#### Core Primitives
-
-- **`getLogits(): Float32Array`** - Get raw logits (zero-copy, valid until next decode)
-- **`decode(tokens: number[], position: number): Promise<void>`** - Decode tokens through model
-- **`tokenize(text: string): Promise<number[]>`** - Tokenize text to token IDs
-- **`detokenize(tokens: number[]): Promise<string>`** - Detokenize tokens to text
-
-#### Embeddings
-
-- **`encode(tokens: number[]): Promise<void>`** - Encode tokens for embedding extraction
-- **`getEmbeddings(normalize?: boolean): Float32Array`** - Get embeddings (optionally L2-normalized)
-- **`hasPooling(): boolean`** - Check if context has pooling enabled
-- **`getEmbeddingDimension(): number`** - Get embedding vector dimension
-- **`kvCacheClear(): Promise<void>`** - Clear KV cache (call between texts for embeddings)
-
-#### Native References (for testing)
-
-- **`computeEntropy(): number`** - Native entropy computation (nats)
-- **`greedySample(): number`** - Native greedy sampling
-
-#### Lifecycle
-
-- **`dispose(): void`** - Free native resources
-
-#### Properties
-
-- **`vocabSize: number`** - Model vocabulary size (readonly)
-
-## Example: Testing TS Sampler
+### Domain Constraints
 
 ```typescript
-import { createContext } from 'lloyal.node';
-import { computeModelEntropy } from '../tsampler';
+// Financial: JPY has no decimal subdivision
+if (currency === 'JPY' && parsingAmount) {
+  logits[DECIMAL_TOKEN] = -Infinity;
+  DIGIT_TOKENS.forEach((id) => (logits[id] += 2.0));
+}
 
-const ctx = await createContext({ modelPath: './model.gguf' });
+// Legal: Boost required terminology
+if (contractType === 'NDA') {
+  CONFIDENTIALITY_TOKENS.forEach((id) => (logits[id] += 5.0));
+}
 
-const tokens = await ctx.tokenize("Once upon a time");
-await ctx.decode(tokens, 0);
+// Medical: Enforce terminology based on actual lab values
+if (glucoseLevel > normalMax) {
+  ELEVATED_TOKENS.forEach((id) => (logits[id] += 10.0));
+  NORMAL_TOKENS.forEach((id) => (logits[id] = -Infinity));
+}
+```
 
-const logits = ctx.getLogits();
+### Quality Gates
 
-// TS implementation
+```typescript
+import { computeModelSurprisal, RollingPerplexity } from '@lloyal/tsampler';
+
+const ppl = new RollingPerplexity();
+
+while (generating) {
+  const logits = ctx.getLogits();
+  const token = sampleWithStrategy(logits, {
+    tokenHistory,
+    params,
+    workspace,
+    prng,
+  });
+
+  const surprisal = computeModelSurprisal(logits, token);
+  ppl.addSurprisal(surprisal);
+
+  if (ppl.ppl() > 50) {
+    // Generation quality degrading — options:
+    // 1. Trigger RAG retrieval for more context
+    // 2. Prune KV cache (evict stale context)
+    // 3. Early stop and retry with different prompt
+  }
+
+  // ...
+}
+```
+
+### Entropy-Adaptive Retrieval
+
+```typescript
+import { computeModelEntropy } from '@lloyal/tsampler';
+
+while (generating) {
+  const logits = ctx.getLogits();
+  const entropy = computeModelEntropy(logits);
+
+  if (entropy > 5.0) {
+    // Model is uncertain — retrieve relevant context
+    const context = await rag.retrieve(currentQuery);
+    await injectContext(ctx, context);
+    continue; // Re-evaluate with new context
+  }
+
+  const token = sampleWithStrategy(logits, {
+    tokenHistory,
+    params,
+    workspace,
+    prng,
+  });
+  // ...
+}
+```
+
+## Why TypeScript Sampling?
+
+|                         | Native C++   | TypeScript (tsampler) |
+| ----------------------- | ------------ | --------------------- |
+| Speed                   | ~0.3ms/token | ~3-5ms/token          |
+| Overhead vs 50ms decode | —            | ~6-10%                |
+| Logit steering          | ❌           | ✅                    |
+| Adaptive strategies     | ❌           | ✅                    |
+| OTA updates             | Rebuild app  | Ship new JS           |
+| Debugging               | printf       | Full inspect          |
+
+The overhead is imperceptible. A 50ms decode dominates; 3ms sampling is noise.
+
+### tsampler Capabilities
+
+[tsampler](https://github.com/lloyal-ai/tsampler) provides llama.cpp sampling parity in pure TypeScript:
+
+**Sampling methods:** greedy, top-k, top-p, min-p, typical-p, top-n-sigma, temperature, mirostat v1/v2
+
+**Penalties:** repetition, frequency, presence (exact llama.cpp formulas)
+
+**Infrastructure:**
+
+- `Xoroshiro128Plus` — deterministic PRNG, reproducible generations
+- `TokenHistoryTracker` — sliding window for penalty calculations
+- `SamplerWorkspace` — pre-allocated buffers, zero-alloc hot path
+- `computeModelEntropy()` — Shannon entropy in nats
+- `computeModelSurprisal()` — per-token surprisal
+- `RollingPerplexity` — streaming perplexity tracking
+
+### Native References
+
+lloyal.node includes native C++ implementations for validation:
+
+```typescript
+// TypeScript implementation
 const tsEntropy = computeModelEntropy(logits);
 
-// Native reference
+// Native reference (C++)
 const nativeEntropy = ctx.computeEntropy();
 
 // Should match within float precision
-assert(Math.abs(tsEntropy - nativeEntropy) < 1e-5);
-
-ctx.dispose();
+console.assert(Math.abs(tsEntropy - nativeEntropy) < 1e-5);
 ```
 
-## Architecture
+Available references:
 
-```
-┌─────────────────────────────────────┐
-│  JavaScript (lib/index.js)          │
-│  - createContext()                  │
-│  - SessionContext                   │
-└──────────────┬──────────────────────┘
-               │
-               │ N-API
-               │
-┌──────────────▼──────────────────────┐
-│  C++ (src/SessionContext.cpp)       │
-│  - Napi::ObjectWrap                 │
-│  - Async workers for I/O ops        │
-└──────────────┬──────────────────────┘
-               │
-               │ uses
-               │
-┌──────────────▼──────────────────────┐
-│  liblloyal (header-only)            │
-│  - decoder, sampler, tokenizer      │
-└──────────────┬──────────────────────┘
-               │
-               │ wraps
-               │
-┌──────────────▼──────────────────────┐
-│  llama.cpp                          │
-│  - libllama.a, libggml.a            │
-└─────────────────────────────────────┘
-```
+- `ctx.computeEntropy()` — Shannon entropy in nats
+- `ctx.greedySample()` — argmax token ID
 
-## Development
+Build with confidence. Validate against native. Deploy TypeScript.
 
-```bash
-# Clean build
-npm run clean
+## Embeddings
 
-# Debug build (with symbols)
-npm run build:debug
+lloyal.node supports embedding extraction with configurable pooling:
 
-# Run tests
-npm test              # Run all tests (API + E2E)
-npm run test:api      # API functionality and benchmarks
-npm run test:e2e      # Correctness and determinism validation
+```typescript
+import { createContext } from 'lloyal.node';
+
+const ctx = await createContext({
+  modelPath: './nomic-embed-text.gguf',
+  embeddings: true,
+  poolingType: 1, // 0=NONE, 1=MEAN, 2=CLS, 3=LAST
+});
+
+async function embed(text: string): Promise<Float32Array> {
+  const tokens = await ctx.tokenize(text);
+  await ctx.encode(tokens);
+
+  const embedding = ctx.getEmbeddings(true); // L2-normalized
+  await ctx.kvCacheClear(); // Reset for next text
+
+  return embedding;
+}
+
+const vec = await embed('Document to embed');
+console.log(`Dimension: ${ctx.getEmbeddingDimension()}`); // e.g., 768
 ```
 
-### Tests
+## API Reference
 
-- **`test/api.js`**: API functionality tests and performance benchmarks
-- **`test/e2e.js`**: End-to-end validation (text generation + embeddings)
+### Context Creation
 
-Tests use SmolLM2-1.7B-Instruct for text generation and nomic-embed-text for embeddings. Embedding tests skip gracefully if no embedding model is available.
-
-## Distribution & Releases
-
-### Platform Package Architecture
-
-lloyal.node uses the **industry-standard prebuilt pattern** (same as sharp, sqlite3, canvas):
-
-```
-lloyal.node (main package)
-├── optionalDependencies
-│   ├── @lloyal/lloyal.node-darwin-arm64
-│   ├── @lloyal/lloyal.node-darwin-x64
-│   ├── @lloyal/lloyal.node-linux-x64
-│   ├── @lloyal/lloyal.node-linux-x64-cuda
-│   ├── @lloyal/lloyal.node-linux-x64-vulkan
-│   ├── @lloyal/lloyal.node-win32-x64
-│   └── @lloyal/lloyal.node-win32-x64-cuda
-└── install script (prebuilt or fallback to source)
+```typescript
+const ctx = await createContext({
+  modelPath: string,       // Path to .gguf file (required)
+  nCtx?: number,           // Context size (default: 2048)
+  nThreads?: number,       // CPU threads (default: 4)
+  nGpuLayers?: number,     // Layers to offload to GPU (default: 0)
+  embeddings?: boolean,    // Enable embedding mode (default: false)
+  poolingType?: number     // 0=NONE, 1=MEAN, 2=CLS, 3=LAST (default: 0)
+});
 ```
 
-**Platform packages contain:**
-```
-@lloyal/lloyal.node-darwin-arm64/
-├── bin/
-│   ├── lloyal.node           # N-API binary
-│   └── libllama.dylib        # Shared library
-├── index.js                  # Exports path to binary
-└── package.json              # os: ["darwin"], cpu: ["arm64"]
-```
+### Inference
 
-### Release Process
+| Method                     | Returns             | Description                                           |
+| -------------------------- | ------------------- | ----------------------------------------------------- |
+| `tokenize(text)`           | `Promise<number[]>` | Text → token IDs                                      |
+| `detokenize(tokens)`       | `Promise<string>`   | Token IDs → text                                      |
+| `decode(tokens, position)` | `Promise<void>`     | Forward pass, populates KV cache                      |
+| `getLogits()`              | `Float32Array`      | Vocabulary-sized probability distribution (zero-copy) |
 
-**For maintainers:**
+### Native References
 
-```bash
-# 1. Update vendored sources (if needed)
-npm run update-vendors
+| Method             | Returns  | Description             |
+| ------------------ | -------- | ----------------------- |
+| `greedySample()`   | `number` | Argmax token ID         |
+| `computeEntropy()` | `number` | Shannon entropy in nats |
 
-# 2. Bump version (triggers sync-versions.js)
-npm version minor  # or major/patch
+### Embeddings
 
-# 3. Tag and push
-git push origin main --tags
+| Method                      | Returns         | Description                                |
+| --------------------------- | --------------- | ------------------------------------------ |
+| `encode(tokens)`            | `Promise<void>` | Forward pass for embedding extraction      |
+| `getEmbeddings(normalize?)` | `Float32Array`  | Embedding vector, optionally L2-normalized |
+| `getEmbeddingDimension()`   | `number`        | Vector dimension                           |
+| `kvCacheClear()`            | `Promise<void>` | Clear KV cache between texts               |
 
-# GitHub Actions automatically:
-# - Builds 7 platform packages
-# - Publishes to npm as @lloyal/lloyal.node-*
-# - Publishes main package with updated optionalDependencies
-```
+### Lifecycle
 
-**CI Pipeline:**
-- `.github/workflows/release.yml` builds on tag push
-- 7 parallel jobs for each platform/GPU variant
-- Installs platform dependencies (CUDA toolkit, Vulkan SDK)
-- Packages binaries to `bin/` directory
-- Publishes all packages with synchronized versions
+| Method      | Description                                           |
+| ----------- | ----------------------------------------------------- |
+| `dispose()` | Free native resources. **Required** — call when done. |
 
-### Vendoring Strategy
+## LLoyal Ecosystem
 
-**For npm registry distribution:**
-- llama.cpp and liblloyal sources vendored to `vendor/`
-- Run `npm run update-vendors` before publishing
-- Vendored sources enable source builds for unsupported platforms
+| Package                                                 | Language     | What it does                                                                                                                                                                                             |
+| ------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [liblloyal](https://github.com/lloyal-ai/liblloyal)     | C++          | Inference kernel. Orchestrates llama.cpp with composable primitives: tokenization, decoding, KV cache, sampling chains, metrics, embeddings. Plus `branch.hpp` / `lease.hpp` for state forking and SMMA. |
+| **lloyal.node**                                         | N-API        | Node.js bindings. Zero-copy logits, native references for validation.                                                                                                                                    |
+| [tsampler](https://github.com/lloyal-ai/tsampler)       | TypeScript   | Sampling library with llama.cpp parity. All filters, penalties, entropy metrics. Plugin for lloyal.node—consumes logits, returns tokens.                                                                 |
+| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native | Mobile bindings via Nitro Modules. Same liblloyal primitives on iOS/Android.                                                                                                                             |
 
-**For development:**
-- Use git submodules (`git clone --recursive`)
-- Update with `git submodule update --remote`
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, build instructions, and release process.
 
 ## License
 
-MIT
+Apache 2.0 — See [LICENSE](./LICENSE) for details.

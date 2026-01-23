@@ -37,7 +37,7 @@ jobs:
             gpu: vulkan
             package: linux-x64-vulkan
 
-          # Windows
+          # Windows x64
           - os: windows-2022
             arch: x64
             gpu: cpu
@@ -45,8 +45,37 @@ jobs:
           - os: windows-2022
             arch: x64
             gpu: cuda
-            cuda_version: 12.2.0
             package: win32-x64-cuda
+          - os: windows-2022
+            arch: x64
+            gpu: vulkan
+            package: win32-x64-vulkan
+
+          # Windows ARM64 (cross-compiled from x64)
+          - os: windows-2022
+            arch: arm64
+            gpu: cpu
+            package: win32-arm64
+            cross_compile: true
+          - os: windows-2022
+            arch: arm64
+            gpu: vulkan
+            package: win32-arm64-vulkan
+            cross_compile: true
+
+          # Linux ARM64 (native runners)
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: cpu
+            package: linux-arm64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: cuda
+            package: linux-arm64-cuda
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: vulkan
+            package: linux-arm64-vulkan
 
     steps:
       - name: Checkout code
@@ -57,44 +86,90 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
       # Platform-specific dependencies
-      - name: Install build tools (Linux)
-        if: runner.os == 'Linux' && matrix.gpu == 'cpu'
+      - name: Install build tools (Linux x64)
+        if: runner.os == 'Linux' && matrix.arch == 'x64' && matrix.gpu == 'cpu'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Install CUDA toolkit (Linux)
-        if: matrix.gpu == 'cuda' && runner.os == 'Linux'
+      - name: Install build tools (Linux ARM64)
+        if: runner.os == 'Linux' && matrix.arch == 'arm64'
         run: |
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y cuda-toolkit-12-2 build-essential cmake
+          sudo apt-get install -y build-essential cmake
+
+      - name: Provision CUDA toolkit
+        if: matrix.gpu == 'cuda' && runner.os == 'Linux'
+        uses: ./.github/actions/provision-cuda
+        with:
+          version: '12.6.2'
+          arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Linux)
         if: matrix.gpu == 'vulkan' && runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libvulkan-dev vulkan-tools
-
-      - name: Install CUDA toolkit (Windows)
-        if: matrix.gpu == 'cuda' && runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.2.11
+        uses: jakoch/install-vulkan-sdk-action@v1.2.4
         with:
-          cuda: '12.2.0'
+          vulkan_version: '1.4.313.0'
+          install_runtime: true
+          optional_components: com.lunarg.vulkan.arm64
+          cache: true
+          stripdown: true
+
+      - name: Provision CUDA toolkit
+        if: matrix.gpu == 'cuda' && runner.os == 'Windows'
+        uses: ./.github/actions/provision-cuda
+        with:
+          version: '12.6.2'
+          arch: ${{ matrix.arch }}
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.gpu == 'vulkan' && runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@v1.2.4
+        with:
+          vulkan_version: '1.4.313.0'
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      - name: Setup LLVM and Ninja for Windows ARM64 cross-compilation
+        if: runner.os == 'Windows' && matrix.cross_compile == true
+        shell: pwsh
+        run: |
+          # Install LLVM for cross-compilation
+          choco install llvm ninja -y
+
+          # Set environment for clang cross-compilation
+          echo "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # Build
       - name: Install npm dependencies
         run: npm install
 
-      - name: Build native module
+      - name: Build native module (Native builds)
+        if: matrix.cross_compile != true
         run: npm run build
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
+
+      - name: Build native module (Windows ARM64 cross-compile)
+        if: runner.os == 'Windows' && matrix.cross_compile == true
+        shell: pwsh
+        run: |
+          # Set up cross-compilation environment
+          $env:CMAKE_GENERATOR = "Ninja"
+          $env:CMAKE_TOOLCHAIN_FILE = "${{ github.workspace }}/cmake/arm64-cross.cmake"
+
+          # Build with cross-compilation
+          npm run build
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
+          ARCH: arm64
 
       # Package
       - name: Create platform package
@@ -122,7 +197,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
       - name: Sync package versions

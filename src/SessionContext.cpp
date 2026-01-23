@@ -11,6 +11,7 @@
 #include <lloyal/kv.hpp>
 #include <lloyal/embedding.hpp>
 #include <lloyal/logits.hpp>
+#include <lloyal/metrics.hpp>
 #include <cmath>
 
 namespace liblloyal_node {
@@ -37,8 +38,9 @@ struct LloyalSamplingParams {
 };
 
 // Convert JS object params → liblloyal-compatible structure
-// Note: For now this is a placeholder - Phase 5 will implement full conversion
-// from the new nested API structure (penalties, advanced, etc.)
+// Currently supports basic parameters (temperature, topK, topP, minP, seed)
+// and penalty group (repeat, frequency, presence, lastN).
+// Advanced parameters (mirostat, dry, xtc, typical_p) to be added as liblloyal adds support.
 static LloyalSamplingParams adaptSamplingParamsFromJS(Napi::Object paramsObj) {
   LloyalSamplingParams adapted;
 
@@ -77,12 +79,11 @@ static LloyalSamplingParams adaptSamplingParamsFromJS(Napi::Object paramsObj) {
     }
   }
 
-  // TODO Phase 5: Extract from advanced group (mirostat, dry, xtc)
-  // if (paramsObj.Has("advanced") && paramsObj.Get("advanced").IsObject()) {
-  //   Napi::Object advanced = paramsObj.Get("advanced").As<Napi::Object>();
-  //   adapted.typical_p = advanced.Get("typicalP").As<Napi::Number>().FloatValue();
-  //   // Note: mirostat, dry, xtc not yet supported in liblloyal
-  // }
+  // Future: Extract from advanced group when liblloyal adds support
+  // - typical_p (Locally Typical Sampling)
+  // - mirostat (Mirostat 1.0/2.0)
+  // - dry (Don't Repeat Yourself)
+  // - xtc (Extended Temperature Scaling)
 
   return adapted;
 }
@@ -249,6 +250,42 @@ public:
 private:
   Napi::Promise::Deferred _deferred;
   llama_context* _ctx;
+};
+
+/**
+ * AsyncWorker for clearAndReseed operation (StreamingLLM)
+ * Uses lloyal::kv::clear_and_reseed() - the validated API
+ */
+class ClearAndReseedWorker : public Napi::AsyncWorker {
+public:
+  ClearAndReseedWorker(Napi::Env env, llama_context* ctx,
+                       std::vector<llama_token> sinks,
+                       std::vector<llama_token> tail,
+                       int32_t n_batch)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+      _sinks(std::move(sinks)), _tail(std::move(tail)), _n_batch(n_batch) {}
+
+  void Execute() override {
+    // Use lloyal::kv::clear_and_reseed() - handles clear+decode atomically
+    lloyal::kv::clear_and_reseed(_ctx, _sinks, _tail, _n_batch);
+  }
+
+  void OnOK() override {
+    _deferred.Resolve(Env().Undefined());
+  }
+
+  void OnError(const Napi::Error& err) override {
+    _deferred.Reject(err.Value());
+  }
+
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  std::vector<llama_token> _sinks;
+  std::vector<llama_token> _tail;
+  int32_t _n_batch;
 };
 
 /**
@@ -420,7 +457,7 @@ public:
 
   void Execute() override {
     try {
-      lloyal::decoder::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
+      lloyal::embedding::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -557,6 +594,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvCacheSave", &SessionContext::kvCacheSave),
     InstanceMethod("kvCacheLoad", &SessionContext::kvCacheLoad),
     InstanceMethod("kvCacheClear", &SessionContext::kvCacheClear),
+    InstanceMethod("clearAndReseed", &SessionContext::clearAndReseed),
     InstanceMethod("kvCacheWriteFile", &SessionContext::kvCacheWriteFile),
     InstanceMethod("kvCacheReadFile", &SessionContext::kvCacheReadFile),
 
@@ -593,6 +631,17 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("getEmbeddingDimension", &SessionContext::getEmbeddingDimension),
     InstanceMethod("hasPooling", &SessionContext::hasPooling),
 
+    // ===== METRICS API =====
+    InstanceMethod("modelSurprisal", &SessionContext::modelSurprisal),
+    InstanceMethod("modelEntropy", &SessionContext::modelEntropy),
+    InstanceMethod("createPerplexityTracker", &SessionContext::createPerplexityTracker),
+    InstanceMethod("addSurprisal", &SessionContext::addSurprisal),
+    InstanceMethod("getPerplexity", &SessionContext::getPerplexity),
+    InstanceMethod("clonePerplexityTracker", &SessionContext::clonePerplexityTracker),
+    InstanceMethod("resetPerplexityTracker", &SessionContext::resetPerplexityTracker),
+    InstanceMethod("getPerplexityCount", &SessionContext::getPerplexityCount),
+    InstanceMethod("freePerplexityTracker", &SessionContext::freePerplexityTracker),
+
     // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
     InstanceMethod("computeEntropy", &SessionContext::computeEntropy),
     InstanceMethod("greedySample", &SessionContext::greedySample),
@@ -607,6 +656,13 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
 
   exports.Set("SessionContext", func);
   return exports;
+}
+
+// ===== HELPERS =====
+
+lloyal::metrics::Base SessionContext::parseBase(const std::string& baseStr) {
+  if (baseStr == "bits") return lloyal::metrics::Base::Bits;
+  return lloyal::metrics::Base::Nats;  // Default (matches metrics.hpp)
 }
 
 SessionContext::SessionContext(const Napi::CallbackInfo& info)
@@ -624,6 +680,12 @@ SessionContext::~SessionContext() {
       }
     }
     _samplerHandles.clear();
+
+    // Free handle-based perplexity trackers
+    for (auto& [napiHandle, pplHandle] : _perplexityHandles) {
+      lloyal::metrics::free_perplexity(pplHandle);
+    }
+    _perplexityHandles.clear();
 
     // Free legacy global grammar sampler (pattern matches HybridSessionContext.cpp:72)
     if (_grammarSampler) {
@@ -864,6 +926,71 @@ Napi::Value SessionContext::computeEntropy(const Napi::CallbackInfo& info) {
   return Napi::Number::New(env, entropy);
 }
 
+// ===== METRICS API =====
+
+Napi::Value SessionContext::modelSurprisal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected number (pickedTokenId)");
+  }
+
+  int32_t pickedTokenId = info[0].As<Napi::Number>().Int32Value();
+
+  // Optional base parameter (default: "nats")
+  std::string baseStr = "nats";
+  if (info.Length() >= 2 && info[1].IsString()) {
+    baseStr = info[1].As<Napi::String>().Utf8Value();
+  }
+
+  lloyal::metrics::Base base = parseBase(baseStr);
+
+  // Get logits pointer (zero-copy)
+  float* logits;
+  try {
+    logits = lloyal::logits::get(_context, -1);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
+
+  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+
+  // Compute surprisal
+  float surprisal = lloyal::metrics::model_surprisal(logits, n_vocab, pickedTokenId, base);
+
+  return Napi::Number::New(env, static_cast<double>(surprisal));
+}
+
+Napi::Value SessionContext::modelEntropy(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Optional base parameter (default: "nats")
+  std::string baseStr = "nats";
+  if (info.Length() >= 1 && info[0].IsString()) {
+    baseStr = info[0].As<Napi::String>().Utf8Value();
+  }
+
+  lloyal::metrics::Base base = parseBase(baseStr);
+
+  // Get logits pointer (zero-copy)
+  float* logits;
+  try {
+    logits = lloyal::logits::get(_context, -1);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
+
+  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+
+  // Compute entropy using metrics.hpp (replaces manual log-sum-exp)
+  float entropy = lloyal::metrics::model_entropy(logits, n_vocab, base);
+
+  return Napi::Number::New(env, static_cast<double>(entropy));
+}
+
 Napi::Value SessionContext::greedySample(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -1082,6 +1209,12 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
       }
     }
     _samplerHandles.clear();
+
+    // Free handle-based perplexity trackers
+    for (auto& [napiHandle, pplHandle] : _perplexityHandles) {
+      lloyal::metrics::free_perplexity(pplHandle);
+    }
+    _perplexityHandles.clear();
 
     // Free legacy global grammar sampler
     if (_grammarSampler) {
@@ -1448,6 +1581,169 @@ Napi::Value SessionContext::freeSamplerHandle(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// ===== PERPLEXITY TRACKING =====
+
+Napi::Value SessionContext::createPerplexityTracker(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Create new perplexity tracker via metrics.hpp
+  lloyal::metrics::PerplexityHandle handle = lloyal::metrics::create_perplexity();
+
+  // Generate N-API handle
+  int32_t napiHandle = _nextPerplexityHandle++;
+  _perplexityHandles[napiHandle] = handle;
+
+  return Napi::Number::New(env, static_cast<double>(napiHandle));
+}
+
+Napi::Value SessionContext::addSurprisal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected (handle: number, surprisal: number)");
+  }
+
+  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
+  double surprisal = info[1].As<Napi::Number>().DoubleValue();
+
+  // Lookup handle
+  auto it = _perplexityHandles.find(napiHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
+  }
+
+  // Add surprisal to tracker
+  lloyal::metrics::add_surprisal(it->second, static_cast<float>(surprisal));
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::getPerplexity(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected handle: number");
+  }
+
+  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
+
+  // Lookup handle
+  auto it = _perplexityHandles.find(napiHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
+  }
+
+  // Get perplexity value
+  float ppl = lloyal::metrics::get_ppl(it->second);
+
+  return Napi::Number::New(env, static_cast<double>(ppl));
+}
+
+Napi::Value SessionContext::clonePerplexityTracker(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected handle: number");
+  }
+
+  int32_t sourceHandle = info[0].As<Napi::Number>().Int32Value();
+
+  // Lookup source handle
+  auto it = _perplexityHandles.find(sourceHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid source perplexity tracker handle");
+  }
+
+  // Clone via metrics.hpp
+  lloyal::metrics::PerplexityHandle clonedHandle =
+      lloyal::metrics::clone_perplexity(it->second);
+
+  // Generate new N-API handle
+  int32_t newNapiHandle = _nextPerplexityHandle++;
+  _perplexityHandles[newNapiHandle] = clonedHandle;
+
+  return Napi::Number::New(env, static_cast<double>(newNapiHandle));
+}
+
+Napi::Value SessionContext::resetPerplexityTracker(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected handle: number");
+  }
+
+  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
+
+  // Lookup handle
+  auto it = _perplexityHandles.find(napiHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
+  }
+
+  // Reset tracker
+  lloyal::metrics::reset_perplexity(it->second);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::getPerplexityCount(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected handle: number");
+  }
+
+  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
+
+  // Lookup handle
+  auto it = _perplexityHandles.find(napiHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
+  }
+
+  // Get token count
+  int count = lloyal::metrics::get_count(it->second);
+
+  return Napi::Number::New(env, static_cast<double>(count));
+}
+
+Napi::Value SessionContext::freePerplexityTracker(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Argument validation
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected handle: number");
+  }
+
+  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
+
+  // Lookup and remove handle
+  auto it = _perplexityHandles.find(napiHandle);
+  if (it == _perplexityHandles.end()) {
+    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
+  }
+
+  // Free via metrics.hpp
+  lloyal::metrics::free_perplexity(it->second);
+
+  // Remove from map
+  _perplexityHandles.erase(it);
+
+  return env.Undefined();
+}
+
 // ===== ATOMIC DECODE+CAPTURE =====
 
 Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
@@ -1593,6 +1889,11 @@ Napi::Value SessionContext::kvCacheRemove(const Napi::CallbackInfo& info) {
     throw Napi::TypeError::New(env, "Expected (sequenceId: number, start: number, end: number)");
   }
 
+  // CRITICAL: Invalidate logits before KV cache modification
+  // Logits may reference positions that will be evicted
+  // (matches pattern from decode() line 801, encode() line 1035)
+  invalidateLogits();
+
   double sequenceId = info[0].As<Napi::Number>().DoubleValue();
   double start = info[1].As<Napi::Number>().DoubleValue();
   double end = info[2].As<Napi::Number>().DoubleValue();
@@ -1638,6 +1939,47 @@ Napi::Value SessionContext::kvCacheClear(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   auto* worker = new KVCacheClearWorker(env, _context);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::clearAndReseed(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Args: sinks (Array<number>), tail (Array<number>)
+  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
+    throw Napi::TypeError::New(env, "Expected (sinks: number[], tail: number[])");
+  }
+
+  // Extract sinks array
+  Napi::Array jsSinks = info[0].As<Napi::Array>();
+  std::vector<llama_token> sinks;
+  sinks.reserve(jsSinks.Length());
+  for (uint32_t i = 0; i < jsSinks.Length(); i++) {
+    Napi::Value val = jsSinks.Get(i);
+    if (!val.IsNumber()) {
+      throw Napi::TypeError::New(env, "sinks array must contain only numbers");
+    }
+    sinks.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  // Extract tail array
+  Napi::Array jsTail = info[1].As<Napi::Array>();
+  std::vector<llama_token> tail;
+  tail.reserve(jsTail.Length());
+  for (uint32_t i = 0; i < jsTail.Length(); i++) {
+    Napi::Value val = jsTail.Get(i);
+    if (!val.IsNumber()) {
+      throw Napi::TypeError::New(env, "tail array must contain only numbers");
+    }
+    tail.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
+  }
+
+  // Use default batch size (512) from context params
+  int32_t n_batch = 512;
+
+  auto* worker = new ClearAndReseedWorker(env, _context, std::move(sinks), std::move(tail), n_batch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1740,17 +2082,17 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   BackendManager::ensureInitialized();
 
   // Normalize and validate path BEFORE queuing async work
-  std::string fsPath = margelo::nitro::nitrollama::FileSystem::normalizePath(modelPath);
+  std::string fsPath = liblloyal_node::FileSystem::normalizePath(modelPath);
   if (fsPath != modelPath) {
     std::cout << "[CreateContext] Normalized " << modelPath << " → " << fsPath << std::endl;
   }
 
-  if (!margelo::nitro::nitrollama::FileSystem::exists(fsPath)) {
+  if (!liblloyal_node::FileSystem::exists(fsPath)) {
     std::cout << "[CreateContext] File does not exist: " << fsPath << std::endl;
     throw Napi::Error::New(env, "Model file not found: " + fsPath);
   }
 
-  size_t fileSize = margelo::nitro::nitrollama::FileSystem::getSize(fsPath);
+  size_t fileSize = liblloyal_node::FileSystem::getSize(fsPath);
   std::cout << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
 
   // Load model on main thread
