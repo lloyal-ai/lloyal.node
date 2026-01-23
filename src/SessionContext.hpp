@@ -131,7 +131,7 @@ private:
   Napi::Value getMemorySize(const Napi::CallbackInfo& info);
 
   // ===== GRAMMAR-CONSTRAINED GENERATION =====
-  // (To be implemented in Phase 4)
+  // Legacy single-grammar API (deprecated, use handle-based API below)
 
   Napi::Value initGrammar(const Napi::CallbackInfo& info);
   Napi::Value applyGrammar(const Napi::CallbackInfo& info);
@@ -232,7 +232,7 @@ private:
   Napi::Value kvCacheReadFile(const Napi::CallbackInfo& info);
 
   // ===== HELPERS =====
-  // (To be implemented in Phase 6)
+  // Utility functions (not yet implemented)
 
   Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
   Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);

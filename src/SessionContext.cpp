@@ -38,8 +38,9 @@ struct LloyalSamplingParams {
 };
 
 // Convert JS object params → liblloyal-compatible structure
-// Note: For now this is a placeholder - Phase 5 will implement full conversion
-// from the new nested API structure (penalties, advanced, etc.)
+// Currently supports basic parameters (temperature, topK, topP, minP, seed)
+// and penalty group (repeat, frequency, presence, lastN).
+// Advanced parameters (mirostat, dry, xtc, typical_p) to be added as liblloyal adds support.
 static LloyalSamplingParams adaptSamplingParamsFromJS(Napi::Object paramsObj) {
   LloyalSamplingParams adapted;
 
@@ -78,12 +79,11 @@ static LloyalSamplingParams adaptSamplingParamsFromJS(Napi::Object paramsObj) {
     }
   }
 
-  // TODO Phase 5: Extract from advanced group (mirostat, dry, xtc)
-  // if (paramsObj.Has("advanced") && paramsObj.Get("advanced").IsObject()) {
-  //   Napi::Object advanced = paramsObj.Get("advanced").As<Napi::Object>();
-  //   adapted.typical_p = advanced.Get("typicalP").As<Napi::Number>().FloatValue();
-  //   // Note: mirostat, dry, xtc not yet supported in liblloyal
-  // }
+  // Future: Extract from advanced group when liblloyal adds support
+  // - typical_p (Locally Typical Sampling)
+  // - mirostat (Mirostat 1.0/2.0)
+  // - dry (Don't Repeat Yourself)
+  // - xtc (Extended Temperature Scaling)
 
   return adapted;
 }
@@ -457,7 +457,7 @@ public:
 
   void Execute() override {
     try {
-      lloyal::decoder::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
+      lloyal::embedding::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -2082,17 +2082,17 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   BackendManager::ensureInitialized();
 
   // Normalize and validate path BEFORE queuing async work
-  std::string fsPath = margelo::nitro::nitrollama::FileSystem::normalizePath(modelPath);
+  std::string fsPath = liblloyal_node::FileSystem::normalizePath(modelPath);
   if (fsPath != modelPath) {
     std::cout << "[CreateContext] Normalized " << modelPath << " → " << fsPath << std::endl;
   }
 
-  if (!margelo::nitro::nitrollama::FileSystem::exists(fsPath)) {
+  if (!liblloyal_node::FileSystem::exists(fsPath)) {
     std::cout << "[CreateContext] File does not exist: " << fsPath << std::endl;
     throw Napi::Error::New(env, "Model file not found: " + fsPath);
   }
 
-  size_t fileSize = margelo::nitro::nitrollama::FileSystem::getSize(fsPath);
+  size_t fileSize = liblloyal_node::FileSystem::getSize(fsPath);
   std::cout << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
 
   // Load model on main thread
