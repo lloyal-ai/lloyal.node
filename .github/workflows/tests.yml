@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
-        node: [18, 20, 22]
+        node: [22, 24]
 
     steps:
       - name: Checkout code
@@ -133,7 +133,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Pack package
         run: npm pack
@@ -192,7 +192,7 @@ jobs:
           echo "Phase 1 Test Results"
           echo "================================"
           echo "✓ Vendor sources tested on Linux, macOS, Windows"
-          echo "✓ Node.js 18, 20, 22 compatibility verified"
+          echo "✓ Node.js 22, 24 (LTS) compatibility verified"
           echo "✓ npm package contents verified"
           echo "✓ API tests passed (11 tests)"
           echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
