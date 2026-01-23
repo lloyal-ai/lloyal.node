@@ -20,12 +20,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          lfs: true
         # NO submodules - we're testing vendor/ sources
 
-      - name: Pull Git LFS files
-        run: git lfs pull
+      - name: Cache test models
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: test-models-v1
+
+      - name: Download test models
+        run: bash scripts/download-test-models.sh
 
       - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4

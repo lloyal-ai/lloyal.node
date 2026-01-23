@@ -52,13 +52,17 @@ npm run clean && npm install && npm test
 
 ### Test Models
 
-The `models/` directory is not tracked in git (too large). To run tests that require models, download GGUF files manually:
+The `models/` directory is not tracked in git (too large). Download test models automatically:
 
 ```bash
-mkdir -p models/
-# Download models from Hugging Face or other sources
-# Example: SmolLM2, nomic-embed-text, etc.
+npm run download-models
 ```
+
+This downloads:
+- `SmolLM2-1.7B-Instruct-Q4_K_M.gguf` (1.0GB) - Text generation tests
+- `nomic-embed-text-v1.5.Q4_K_M.gguf` (80MB) - Embedding tests
+
+Models are cached in CI to avoid re-downloading on every run.
 
 ## Updating Dependencies
 

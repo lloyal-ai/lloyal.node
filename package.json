@@ -7,6 +7,7 @@
   "gypfile": true,
   "scripts": {
     "update-vendors": "node scripts/update-vendors.js",
+    "download-models": "bash scripts/download-test-models.sh",
     "prepare": "bash scripts/build-llama.sh",
     "install": "node scripts/install.js",
     "build": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
