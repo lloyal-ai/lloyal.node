@@ -292,6 +292,8 @@ console.log(`Dimension: ${ctx.getEmbeddingDimension()}`); // e.g., 768
 
 ## API Reference
 
+**📖 [Full API Documentation](https://lloyal-ai.github.io/lloyal.node)** - Complete reference with examples and type definitions
+
 ### Context Creation
 
 ```typescript

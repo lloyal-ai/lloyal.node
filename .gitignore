@@ -7,6 +7,9 @@ prebuilds/
 # Test models (too large for git)
 models/
 
+# Generated documentation
+docs/api/
+
 # Vendor build artifacts (generated during npm install)
 vendor/llama.cpp/build-*/
 

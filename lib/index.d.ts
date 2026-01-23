@@ -2,7 +2,6 @@
  * liblloyal-node TypeScript Definitions
  *
  * N-API bindings for liblloyal - Node.js native addon for llama.cpp inference
- * API adapted from @lloyal/nitro-llama SessionContext for full feature parity
  */
 
 /**
@@ -53,7 +52,7 @@ export interface ContextOptions {
    * Maximum number of sequences for multi-sequence support
    *
    * Set > 1 to enable multiple independent KV cache sequences.
-   * When sequences share a common prefix, kv_unified=true (default) is optimal.
+   * Useful for parallel decoding or conversation branching.
    * Default: 1 (single sequence)
    */
   nSeqMax?: number;
@@ -86,33 +85,56 @@ export interface PenaltyParams {
 
 /**
  * Mirostat sampling configuration
+ *
+ * Mirostat dynamically adjusts sampling to maintain target perplexity,
+ * preventing both repetition and incoherence. Useful for long-form generation
+ * where temperature alone produces inconsistent quality.
+ *
+ * Use Mirostat v2 (mode: 2) for most cases - it's more stable than v1.
  */
 export interface MirostatParams {
-  /** Mirostat mode (0 = disabled, 1 = v1, 2 = v2) */
+  /** Mirostat mode (0 = disabled, 1 = v1, 2 = v2). Recommended: 2 */
   mode?: number;
 
-  /** Target entropy */
+  /** Target entropy (perplexity = exp(tau)). Default: 5.0. Lower = more focused */
   tau?: number;
 
-  /** Learning rate */
+  /** Learning rate for entropy adjustment. Default: 0.1. Higher = faster adaptation */
   eta?: number;
 }
 
 /**
  * DRY (Don't Repeat Yourself) sampling parameters
+ *
+ * Penalizes repetition of token sequences, more sophisticated than
+ * simple repetition penalty. Useful for reducing loops and redundancy
+ * in generated text.
  */
 export interface DryParams {
+  /** Penalty strength (0.0 = disabled, higher = stronger penalty) */
   multiplier?: number;
+
+  /** Base penalty value (typically 1.75) */
   base?: number;
+
+  /** Minimum sequence length to trigger penalty (typically 2) */
   allowedLength?: number;
+
+  /** Number of recent tokens to scan for repetitions */
   penaltyLastN?: number;
 }
 
 /**
- * XTC sampler parameters
+ * XTC (eXclude Top Choices) sampler parameters
+ *
+ * Excludes very high probability tokens to increase output diversity.
+ * Useful when model is overly confident and produces repetitive text.
  */
 export interface XtcParams {
+  /** Probability of applying XTC (0.0 = disabled, 1.0 = always). Typical: 0.1 */
   probability?: number;
+
+  /** Confidence threshold above which tokens are excluded. Typical: 0.1 */
   threshold?: number;
 }
 
@@ -174,8 +196,8 @@ export interface SamplingParams {
 /**
  * A llama.cpp context for text generation
  *
- * Thread safety: All synchronous methods are safe on JS thread.
- * Async methods automatically run on Node.js worker threads.
+ * Represents a loaded model with KV cache for maintaining conversation state.
+ * Use createContext() to initialize, and dispose() when done to free memory.
  */
 export interface SessionContext {
   // ===== THE GENERATION LOOP =====
@@ -257,7 +279,7 @@ export interface SessionContext {
    *
    * WARNING: Buffer is only valid until next decode() call!
    *
-   * @returns Float32Array pointing to llama.cpp memory
+   * @returns Float32Array of unnormalized logits (vocabSize elements)
    */
   getLogits(): Float32Array;
 
@@ -296,9 +318,8 @@ export interface SessionContext {
    * Fast synchronous lookup in vocabulary table.
    * Call this on each generated token for streaming display.
    *
-   * Uses llama_token_to_piece() internally - optimized for per-token
-   * conversion during generation. For batch conversion of many tokens,
-   * use detokenize() instead.
+   * Optimized for per-token conversion during generation.
+   * For batch conversion of many tokens, use detokenize() instead.
    *
    * Cost: ~0.05ms
    *
@@ -374,7 +395,7 @@ export interface SessionContext {
    * Inverse of tokenize(). Use for reconstructing complete text
    * from token sequences (e.g., after KV cache operations).
    *
-   * Uses llama_detokenize() for efficient batch conversion.
+   * Optimized for batch conversion of many tokens.
    * For single-token conversion during generation, use tokenToText().
    *
    * Cost: ~1ms per 100 tokens
@@ -522,7 +543,7 @@ export interface SessionContext {
   /**
    * Atomic clear+reseed operation
    *
-   * Implements the StreamingLLM pattern:
+   * Implements a KV cache compression strategy:
    * 1. Clear entire KV cache
    * 2. Re-decode original sinks (first N tokens from conversation start)
    * 3. Re-decode tail (last M recent tokens)
@@ -691,16 +712,15 @@ export interface SessionContext {
    * Duplicates the KV cache state from source to destination sequence.
    * After copying, both sequences can continue independently.
    *
-   * NOTE: llama.cpp only supports full sequence copies.
-   * p0/p1 parameters are for API compatibility but partial
-   * ranges will trigger an assertion failure in llama.cpp.
+   * NOTE: Only full sequence copies are currently supported.
+   * The p0/p1 parameters must use default values (0 and -1).
    *
    * Cost: ~1-5ms depending on sequence length
    *
    * @param srcSeqId Source sequence to copy from
    * @param dstSeqId Destination sequence to copy to
-   * @param p0 Start position (default: 0, must be 0 for llama.cpp)
-   * @param p1 End position (default: -1 = end, must be -1 for llama.cpp)
+   * @param p0 Start position (must be 0, default: 0)
+   * @param p1 End position (must be -1 for full copy, default: -1)
    * @example
    * ```typescript
    * // Decode initial prompt to seq 0
@@ -719,10 +739,9 @@ export interface SessionContext {
   /**
    * Keep only specified sequence, remove all others
    *
-   * NOTE: After kvSeqCopy, cells may be shared across sequences.
-   * kvSeqKeep removes sequence associations but pos_max may
-   * still return positions. For complete removal, use
-   * kvCacheRemove(seqId, 0, -1) for each unwanted sequence.
+   * Removes all sequences except the one specified.
+   * For complete cleanup of unwanted sequences, consider using
+   * kvCacheRemove(seqId, 0, -1) on each sequence instead.
    *
    * @param seqId Sequence ID to keep
    */
@@ -847,20 +866,22 @@ export interface SessionContext {
    * - Low surprisal: Model expected this token (high probability)
    * - High surprisal: Model didn't expect this token (low probability)
    *
+   * Call after decode() to compute surprisal for any token based on
+   * the current logits distribution.
+   *
    * @param pickedTokenId - Token ID to compute surprisal for
    * @param base - Logarithm base: "nats" (default) or "bits"
    * @returns Surprisal value in specified base
    *
    * @example
    * ```typescript
-   * // After decode with logits=true
-   * const token = ctx.sampleNextToken();
+   * await ctx.decode(tokens, position);
+   * const token = ctx.sample();
    * const surprisal = ctx.modelSurprisal(token, "bits");
    * console.log(`Model surprise: ${surprisal.toFixed(2)} bits`);
    * ```
    *
    * COST: O(1) - direct probability lookup from logits
-   * REQUIRES: decode() called with logits=true
    */
   modelSurprisal(pickedTokenId: number, base?: 'nats' | 'bits'): number;
 
@@ -871,12 +892,14 @@ export interface SessionContext {
    * - Low entropy: Model is confident (peaked distribution)
    * - High entropy: Model is uncertain (flat distribution)
    *
+   * Call after decode() to analyze the current prediction distribution.
+   *
    * @param base - Logarithm base: "nats" (default), "bits", or "base10"
    * @returns Entropy value in specified base
    *
    * @example
    * ```typescript
-   * // Check model confidence before sampling
+   * await ctx.decode(tokens, position);
    * const entropy = ctx.modelEntropy("bits");
    * if (entropy > 5.0) {
    *   console.log("Model is very uncertain - consider adjusting parameters");
@@ -884,8 +907,6 @@ export interface SessionContext {
    * ```
    *
    * COST: O(n_vocab) - must sum over all token probabilities
-   * REQUIRES: decode() called with logits=true
-   * ALGORITHM: Numerically stable log-sum-exp (metrics.hpp:73-81)
    */
   modelEntropy(base?: 'nats' | 'bits'): number;
 
@@ -1009,9 +1030,8 @@ export interface SessionContext {
   /**
    * Decode tokens and capture logits atomically
    *
-   * Mutex-protected operation that decodes tokens and immediately
-   * copies logits to the destination buffer before releasing the lock.
-   * Prevents race conditions in concurrent decode scenarios.
+   * Performs decode and logits capture as a single atomic operation,
+   * ensuring the captured logits correspond exactly to the decoded tokens.
    *
    * Use this instead of separate decode() + getLogits() calls when
    * you need guaranteed consistency between decode and logits capture.
@@ -1231,25 +1251,25 @@ export interface SessionContext {
    */
   hasPooling(): boolean;
 
-  // ===== NATIVE REFERENCE IMPLEMENTATIONS (for testing) =====
+  // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
 
   /**
-   * Compute entropy of current logits distribution (native reference)
+   * Compute entropy of current logits distribution
    *
-   * Uses numerically stable log-sum-exp implementation.
-   * Useful for validating TS sampler implementations.
+   * Alternative entropy computation using native implementation.
+   * Equivalent to modelEntropy("nats") but may be faster.
    *
    * @returns Entropy in nats
    */
   computeEntropy(): number;
 
   /**
-   * Sample greedily from current logits (native reference)
+   * Sample greedily from current logits
    *
-   * Selects token with highest logit value.
-   * Useful for validating TS sampler implementations.
+   * Selects token with highest logit value (deterministic).
+   * Equivalent to sample() with temperature=0.
    *
-   * @returns Token ID
+   * @returns Token ID with highest probability
    */
   greedySample(): number;
 
@@ -1306,7 +1326,7 @@ export interface SessionContext {
 export function createContext(options: ContextOptions): Promise<SessionContext>;
 
 /**
- * Safe logits access with Runtime Borrow Checker pattern
+ * Safe logits access with automatic lifetime management
  *
  * Ensures logits are only accessed synchronously within the callback.
  * The callback MUST NOT:
@@ -1314,12 +1334,12 @@ export function createContext(options: ContextOptions): Promise<SessionContext>;
  * - Return a Promise (will throw)
  * - Call decode() (would invalidate logits)
  *
- * This is a "runtime borrow checker" - it prevents async mutations
- * while you're working with borrowed logits.
+ * This prevents common bugs where logits become invalid due to
+ * async operations between access and usage.
  *
- * Pattern: "Memoized Step-Scoped Views with Explicit Revocation"
- * - Memoization: If getLogits() called twice in same step, returns same buffer
- * - Revocation: On decode(), the previous buffer is detached
+ * How it works:
+ * - Memoization: Multiple getLogits() calls in same step return same buffer
+ * - Revocation: Next decode() invalidates previous buffer
  *
  * @template T Return type of the callback
  * @param ctx The session context
