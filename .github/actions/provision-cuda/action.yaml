@@ -19,28 +19,14 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # Windows: Install via Chocolatey
+    # Windows: Use Jimver/cuda-toolkit action
     - name: Install CUDA (Windows)
       if: runner.os == 'Windows'
-      shell: pwsh
-      env:
-        VERSION: ${{ inputs.version }}
-      run: |
-        $version = $env:VERSION
-        $version_major_minor = $version.Split('.')[0..1] -join '.'
-        $version_slug = $version_major_minor.Replace('.', '_')
-        $cuda_path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${version_major_minor}"
-
-        Write-Host "Installing CUDA ${version} via Chocolatey..."
-        choco install cuda --version=${version} -y --no-progress
-
-        # Set environment variables
-        Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH=${cuda_path}"
-        Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH_V${version_slug}=${cuda_path}"
-        Add-Content -Path $env:GITHUB_PATH -Value "${cuda_path}\bin"
-        Add-Content -Path $env:GITHUB_PATH -Value "${cuda_path}\libnvvp"
-
-        Write-Host "CUDA installed at: ${cuda_path}"
+      uses: Jimver/cuda-toolkit@v0.2.21
+      with:
+        cuda: ${{ inputs.version }}
+        method: 'network'
+        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
 
     # Linux x64: Install from NVIDIA repos
     - name: Install CUDA (Linux x64)

@@ -1,5 +1,5 @@
 {
-  "vendoredAt": "2026-01-23T04:38:31.451Z",
+  "vendoredAt": "2026-01-24T04:36:45.762Z",
   "vendors": {
     "liblloyal": {
       "commit": "0c5f79d590a3594edad763bea7782f8eaf522e43",
@@ -10,8 +10,8 @@
     "llama.cpp": {
       "commit": "338074c383c81366320d176d83b94b0a567ee0c2",
       "commitShort": "338074c",
-      "fileCount": 170,
-      "vendoredAt": "2026-01-23T04:38:31.667Z"
+      "fileCount": 634,
+      "vendoredAt": "2026-01-24T04:36:46.065Z"
     }
   }
 }

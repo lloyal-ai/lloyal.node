@@ -82,6 +82,16 @@ const VENDORS = {
       'ggml/src/ggml-blas/*.cpp',
       'ggml/src/ggml-blas/CMakeLists.txt',
 
+      // ggml-cuda backend (NVIDIA GPUs)
+      'ggml/src/ggml-cuda/*.{cu,cuh,cpp,h}',
+      'ggml/src/ggml-cuda/**/*.{cu,cuh,cpp,h}',
+      'ggml/src/ggml-cuda/CMakeLists.txt',
+
+      // ggml-vulkan backend (AMD/Intel GPUs, cross-platform)
+      'ggml/src/ggml-vulkan/*.{cpp,h}',
+      'ggml/src/ggml-vulkan/**/*.{comp,h,cpp}',
+      'ggml/src/ggml-vulkan/CMakeLists.txt',
+
       'LICENSE'
     ]
   }
