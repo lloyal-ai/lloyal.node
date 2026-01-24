@@ -1,6 +1,6 @@
 {
   "name": "lloyal.node",
-  "version": "0.1.0",
+  "version": "1.0.0-alpha",
   "description": "N-API client for liblloyal+llama.cpp",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -50,19 +50,19 @@
     "typedoc": "^0.27.5"
   },
   "optionalDependencies": {
-    "@lloyal-labs/lloyal.node-darwin-arm64": "0.1.0",
-    "@lloyal-labs/lloyal.node-darwin-x64": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-x64": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-x64-cuda": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-arm64": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "0.1.0",
-    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "0.1.0",
-    "@lloyal-labs/lloyal.node-win32-x64": "0.1.0",
-    "@lloyal-labs/lloyal.node-win32-x64-cuda": "0.1.0",
-    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "0.1.0",
-    "@lloyal-labs/lloyal.node-win32-arm64": "0.1.0",
-    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "0.1.0"
+    "@lloyal-labs/lloyal.node-darwin-arm64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-darwin-x64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-arm64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-x64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-x64-cuda": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-arm64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "1.0.0-alpha"
   },
   "engines": {
     "node": ">=22.0.0"

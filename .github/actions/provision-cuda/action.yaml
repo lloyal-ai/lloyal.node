@@ -26,7 +26,7 @@ runs:
       with:
         cuda: ${{ inputs.version }}
         method: 'network'
-        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
+        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
 
     # Linux x64: Install from NVIDIA repos
     - name: Install CUDA (Linux x64)

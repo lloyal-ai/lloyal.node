@@ -89,8 +89,10 @@ const VENDORS = {
 
       // ggml-vulkan backend (AMD/Intel GPUs, cross-platform)
       'ggml/src/ggml-vulkan/*.{cpp,h}',
-      'ggml/src/ggml-vulkan/**/*.{comp,h,cpp}',
       'ggml/src/ggml-vulkan/CMakeLists.txt',
+      'ggml/src/ggml-vulkan/cmake/**/*.{cmake,in}',
+      'ggml/src/ggml-vulkan/vulkan-shaders/*.{comp,glsl,h}',
+      'ggml/src/ggml-vulkan/vulkan-shaders/CMakeLists.txt',
 
       'LICENSE'
     ]
