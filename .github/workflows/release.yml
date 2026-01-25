@@ -149,7 +149,7 @@ jobs:
 
       # Build
       - name: Install npm dependencies
-        run: npm install
+        run: npm install --ignore-scripts
 
       - name: Build native module (Native builds)
         if: matrix.cross_compile != true
