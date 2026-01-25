@@ -69,6 +69,13 @@ message(STATUS "lloyal.node: Using liblloyal from ${LIBLLOYAL_DIR}")
 #   --CDGGML_CUDA=ON    - NVIDIA CUDA
 #   --CDGGML_VULKAN=ON  - AMD/Intel Vulkan
 #   --CDGGML_METAL=ON   - Apple Metal
+
+# Windows: Force static library build to avoid DLL initialization issues and CRT
+# heap mismatches that cause silent crashes. This matches the llama.node reference.
+if(WIN32)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+endif()
+
 add_subdirectory(${LLAMA_CPP_DIR} llama.cpp)
 
 # MSVC C++20 char8_t workaround: llama.cpp uses u8"" literals which MSVC treats
@@ -188,71 +195,74 @@ endif()
 # =============================================================================
 # Copy llama.cpp shared libraries to the same directory as the .node file
 # This is required because RPATH is set to @loader_path (same directory)
+# Note: On Windows with static libs (BUILD_SHARED_LIBS=OFF), no copies needed
 
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:llama>
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying libllama to output directory"
-)
-
-# Copy ggml shared libraries
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:ggml>
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying libggml to output directory"
-)
-
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:ggml-base>
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying libggml-base to output directory"
-)
-
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:ggml-cpu>
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying libggml-cpu to output directory"
-)
-
-# Copy GPU backend libraries if built
-if(TARGET ggml-metal)
+if(BUILD_SHARED_LIBS)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-metal>
+            $<TARGET_FILE:llama>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-metal to output directory"
+        COMMENT "Copying libllama to output directory"
     )
-endif()
 
-if(TARGET ggml-cuda)
+    # Copy ggml shared libraries
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-cuda>
+            $<TARGET_FILE:ggml>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-cuda to output directory"
+        COMMENT "Copying libggml to output directory"
     )
-endif()
 
-if(TARGET ggml-vulkan)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-vulkan>
+            $<TARGET_FILE:ggml-base>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-vulkan to output directory"
+        COMMENT "Copying libggml-base to output directory"
     )
-endif()
 
-if(TARGET ggml-blas)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-blas>
+            $<TARGET_FILE:ggml-cpu>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-blas to output directory"
+        COMMENT "Copying libggml-cpu to output directory"
     )
+
+    # Copy GPU backend libraries if built
+    if(TARGET ggml-metal)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:ggml-metal>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMENT "Copying libggml-metal to output directory"
+        )
+    endif()
+
+    if(TARGET ggml-cuda)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:ggml-cuda>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMENT "Copying libggml-cuda to output directory"
+        )
+    endif()
+
+    if(TARGET ggml-vulkan)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:ggml-vulkan>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMENT "Copying libggml-vulkan to output directory"
+        )
+    endif()
+
+    if(TARGET ggml-blas)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:ggml-blas>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMENT "Copying libggml-blas to output directory"
+        )
+    endif()
 endif()
 
 # =============================================================================
