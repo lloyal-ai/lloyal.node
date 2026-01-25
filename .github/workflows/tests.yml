@@ -144,7 +144,7 @@ jobs:
 
       - name: Extract and verify tarball
         run: |
-          tar -tzf lloyal.node-*.tgz > package-contents.txt
+          tar -tzf lloyal-labs-lloyal.node-*.tgz > package-contents.txt
           echo "📦 Package contents:"
           cat package-contents.txt
 
@@ -183,7 +183,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: npm-package
-          path: lloyal.node-*.tgz
+          path: lloyal-labs-lloyal.node-*.tgz
           retention-days: 7
 
   test-summary:
