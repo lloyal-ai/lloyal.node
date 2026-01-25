@@ -6,7 +6,6 @@
   "types": "lib/index.d.ts",
   "gypfile": false,
   "scripts": {
-    "update-vendors": "node scripts/update-vendors.js",
     "download-models": "bash scripts/download-test-models.sh",
     "install": "node scripts/install.js",
     "build": "node scripts/build.js",

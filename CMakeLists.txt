@@ -47,21 +47,22 @@ string(REPLACE "\"" "" NODE_ADDON_API_DIR ${NODE_ADDON_API_DIR})
 message(STATUS "lloyal.node: node-addon-api include: ${NODE_ADDON_API_DIR}")
 
 # =============================================================================
-# Vendor Dependencies
+# Dependencies (Git Submodules)
 # =============================================================================
 
-# Determine whether to use submodules (development) or vendor/ (npm install)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp/CMakeLists.txt")
-    set(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp")
-    set(LIBLLOYAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/liblloyal")
-    message(STATUS "lloyal.node: Using vendored dependencies")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/CMakeLists.txt")
-    set(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp")
-    set(LIBLLOYAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/liblloyal")
-    message(STATUS "lloyal.node: Using submodule dependencies")
-else()
-    message(FATAL_ERROR "lloyal.node: No llama.cpp found. Run 'git submodule update --init' or 'npm run update-vendors'")
+set(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp")
+set(LIBLLOYAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/liblloyal")
+
+if(NOT EXISTS "${LLAMA_CPP_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "lloyal.node: llama.cpp submodule not found. Run 'git submodule update --init --recursive'")
 endif()
+
+if(NOT EXISTS "${LIBLLOYAL_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "lloyal.node: liblloyal submodule not found. Run 'git submodule update --init --recursive'")
+endif()
+
+message(STATUS "lloyal.node: Using llama.cpp from ${LLAMA_CPP_DIR}")
+message(STATUS "lloyal.node: Using liblloyal from ${LIBLLOYAL_DIR}")
 
 # Build llama.cpp (creates llama, ggml targets with GPU support if enabled)
 # GPU backends are controlled via cmake-js flags:

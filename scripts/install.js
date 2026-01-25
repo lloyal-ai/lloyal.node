@@ -5,14 +5,13 @@
  * Strategy:
  * 1. Check if prebuilt binary exists for this platform
  * 2. If yes, copy to build/Release/ and exit
- * 3. If no, fall back to building from source
+ * 3. If no, show helpful error with build-from-source instructions
  *
  * Respects LLOYAL_GPU environment variable for GPU variant selection
  */
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const PLATFORM = process.platform;
 const ARCH = process.arch;
@@ -72,49 +71,6 @@ function installPrebuilt(binDir, packageName) {
 }
 
 /**
- * Build from source using cmake-js
- */
-function buildFromSource() {
-  log('⚙️  Building from source...');
-  log('This will take 5-15 minutes. Grab a coffee! ☕');
-
-  // Determine GPU backend from environment variable
-  const gpuBackend = process.env.LLOYAL_GPU?.toLowerCase();
-  const cmakeFlags = [];
-
-  if (gpuBackend === 'cuda') {
-    cmakeFlags.push('--CDGGML_CUDA=ON');
-    log('  → GPU backend: CUDA');
-  } else if (gpuBackend === 'vulkan') {
-    cmakeFlags.push('--CDGGML_VULKAN=ON');
-    log('  → GPU backend: Vulkan');
-  } else if (gpuBackend === 'metal' || PLATFORM === 'darwin') {
-    // Metal is auto-enabled on macOS, but we can be explicit
-    if (PLATFORM === 'darwin') {
-      log('  → GPU backend: Metal (auto-enabled on macOS)');
-    }
-  } else {
-    log('  → GPU backend: CPU only');
-  }
-
-  const buildCmd = `npx cmake-js rebuild ${cmakeFlags.join(' ')}`.trim();
-  log(`  → Running: ${buildCmd}`);
-
-  try {
-    execSync(buildCmd, {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('✅ Build successful!');
-  } catch (e) {
-    error('Build failed');
-    error(e.message);
-    process.exit(1);
-  }
-}
-
-/**
  * Main installation logic
  */
 function main() {
@@ -158,15 +114,24 @@ function main() {
     return; // exit(0) called in installPrebuilt
   }
 
-  // 4. No prebuilt found - build from source
-  log('ℹ️  No prebuilt binary found for your platform');
+  // 4. No prebuilt found - error with helpful message
   log('');
-  log('Building from vendored sources...');
-  log('Requirements: C++20 compiler, CMake 3.18+');
-  log('Troubleshooting: https://github.com/lloyal-ai/lloyal.node#building');
+  error('No prebuilt binary found for your platform');
   log('');
-
-  buildFromSource();
+  log(`  Platform: ${PLATFORM}-${ARCH}`);
+  log('');
+  log('  Options:');
+  log('  1. Install a platform-specific package:');
+  log(`     npm install @lloyal-labs/lloyal.node-${PLATFORM}-${ARCH}`);
+  log('');
+  log('  2. Build from source (requires C++20, CMake 3.18+):');
+  log('     git clone --recursive https://github.com/lloyal-ai/lloyal.node.git');
+  log('     cd lloyal.node && npm run build');
+  log('');
+  log('  See: https://github.com/lloyal-ai/lloyal.node#building');
+  log('');
+  
+  process.exit(1);
 }
 
 // Run installer
