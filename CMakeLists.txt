@@ -141,6 +141,11 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 # =============================================================================
 
 if(APPLE)
+    # macOS: Allow undefined symbols (N-API) to be resolved at runtime by Node.js
+    # cmake-js sets CMAKE_SHARED_LINKER_FLAGS, but MODULE libraries need this in
+    # CMAKE_MODULE_LINKER_FLAGS or directly on the target
+    target_link_options(${PROJECT_NAME} PRIVATE -undefined dynamic_lookup)
+    
     # macOS frameworks
     target_link_libraries(${PROJECT_NAME} PRIVATE
         "-framework Foundation"
