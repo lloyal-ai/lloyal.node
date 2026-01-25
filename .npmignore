@@ -1,17 +1,20 @@
 # Build artifacts (generated during install)
 build/
-include/
 *.node
 *.dylib
 *.so
 *.dll
 
-# llama.cpp build directories
-llama.cpp/build-*
-vendor/llama.cpp/build-*
-liblloyal/build/
+# Submodules (too large for npm - prebuilt binaries are distributed separately)
+llama.cpp/
+liblloyal/
 
-# Git metadata (vendored sources used instead of submodules)
+# CMake build files (not needed in npm package)
+CMakeLists.txt
+CMakeCache.txt
+CMakeFiles/
+
+# Git metadata
 .git
 .gitmodules
 .gitignore
@@ -30,6 +33,9 @@ tests/
 *.test.js
 examples/
 docs/
+
+# C++ source files (users get prebuilt binaries, not source)
+src/
 
 # Test models (too large for npm)
 models/

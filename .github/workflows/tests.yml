@@ -7,7 +7,7 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test-vendored-sources:
+  test-build:
     name: Test on ${{ matrix.os }} (Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
 
@@ -20,7 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        # NO submodules - we're testing vendor/ sources
+        with:
+          submodules: recursive
 
       - name: Cache test models
         uses: actions/cache@v4
@@ -47,7 +48,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           # Xcode command line tools already installed on GitHub runners
-          brew install cmake
+          brew install cmake ninja
 
       - name: Install build dependencies (Windows)
         if: runner.os == 'Windows'
@@ -55,19 +56,19 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           # MSVC already available on GitHub runners
 
-      - name: Verify vendor/ sources exist
+      - name: Verify submodules exist
         run: |
-          node -e "const fs = require('fs'); if (!fs.existsSync('vendor/VERSIONS.json')) throw new Error('vendor/ sources missing! Run npm run update-vendors'); console.log('✓ Vendor sources found');"
+          node -e "const fs = require('fs'); if (!fs.existsSync('llama.cpp/CMakeLists.txt')) throw new Error('llama.cpp submodule missing! Run: git submodule update --init --recursive'); console.log('✓ Submodules found');"
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Build from vendored sources
-        run: npm install
-        # This runs the install script which:
-        # 1. Builds llama.cpp from vendor/llama.cpp
-        # 2. Sets up headers from vendor/liblloyal
-        # 3. Builds N-API module with node-gyp
+      - name: Build from submodules
+        run: npm run build
+        # This runs scripts/build.js which:
+        # 1. Builds llama.cpp from llama.cpp/
+        # 2. Builds liblloyal from liblloyal/
+        # 3. Builds N-API addon with cmake-js
 
       - name: Verify build outputs
         run: |
@@ -108,11 +109,9 @@ jobs:
           echo "Node: ${{ matrix.node }}"
           echo "Platform: $(node -p 'process.platform')"
           echo "Arch: $(node -p 'process.arch')"
-          echo "Built from vendored sources: YES"
-          if [ -f vendor/VERSIONS.json ]; then
-            echo "Vendored versions:"
-            cat vendor/VERSIONS.json
-          fi
+          echo "Build system: cmake-js"
+          echo "llama.cpp: $(cd llama.cpp && git rev-parse --short HEAD)"
+          echo "liblloyal: $(cd liblloyal && git rev-parse --short HEAD)"
         shell: bash
 
       - name: Upload build artifacts (failures only)
@@ -122,8 +121,8 @@ jobs:
           name: build-failure-${{ matrix.os }}-node${{ matrix.node }}
           path: |
             build/
-            vendor/llama.cpp/build-*/CMakeCache.txt
-            vendor/llama.cpp/build-*/CMakeFiles/CMakeError.log
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeError.log
           retention-days: 7
 
   verify-npm-package:
@@ -133,6 +132,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        # No submodules needed - npm package doesn't include sources
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -148,31 +148,34 @@ jobs:
           echo "📦 Package contents:"
           cat package-contents.txt
 
-          # Verify vendor/ is included
-          if ! grep -q "package/vendor/VERSIONS.json" package-contents.txt; then
-            echo "❌ ERROR: vendor/VERSIONS.json not in package!"
+          # Verify lib/ JavaScript is included
+          if ! grep -q "package/lib/index.js" package-contents.txt; then
+            echo "❌ ERROR: lib/index.js not in package!"
             exit 1
           fi
 
-          # Verify vendor/liblloyal/include/ is included
-          if ! grep -q "package/vendor/liblloyal/include" package-contents.txt; then
-            echo "❌ ERROR: vendor/liblloyal/include/ not in package!"
+          # Verify scripts/install.js is included
+          if ! grep -q "package/scripts/install.js" package-contents.txt; then
+            echo "❌ ERROR: scripts/install.js not in package!"
             exit 1
           fi
 
-          # Verify vendor/llama.cpp sources are included
-          if ! grep -q "package/vendor/llama.cpp/src" package-contents.txt; then
-            echo "❌ ERROR: vendor/llama.cpp/src not in package!"
+          # Verify submodules are NOT included (they're huge)
+          if grep -q "package/llama.cpp/" package-contents.txt; then
+            echo "❌ ERROR: llama.cpp/ should not be in package!"
+            exit 1
+          fi
+
+          if grep -q "package/liblloyal/" package-contents.txt; then
+            echo "❌ ERROR: liblloyal/ should not be in package!"
             exit 1
           fi
 
           # Verify build artifacts are NOT included
-          if grep -q "package/vendor/llama.cpp/build-apple" package-contents.txt; then
-            echo "❌ ERROR: build-apple/ should not be in package!"
+          if grep -q "package/build/" package-contents.txt; then
+            echo "❌ ERROR: build/ should not be in package!"
             exit 1
           fi
-
-          # Note: vendor/liblloyal/tests/ is no longer vendored (only headers needed)
 
           echo "✅ Package contents verified!"
 
@@ -186,7 +189,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [test-vendored-sources, verify-npm-package]
+    needs: [test-build, verify-npm-package]
     if: always()
 
     steps:
@@ -201,4 +204,4 @@ jobs:
           echo "✓ API tests passed (11 tests)"
           echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
           echo ""
-          echo "Build & Test Status: ${{ needs.test-vendored-sources.result }}"
+          echo "Build & Test Status: ${{ needs.test-build.result }}"
