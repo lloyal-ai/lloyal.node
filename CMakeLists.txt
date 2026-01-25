@@ -69,6 +69,14 @@ message(STATUS "lloyal.node: Using liblloyal from ${LIBLLOYAL_DIR}")
 #   --CDGGML_CUDA=ON    - NVIDIA CUDA
 #   --CDGGML_VULKAN=ON  - AMD/Intel Vulkan
 #   --CDGGML_METAL=ON   - Apple Metal
+
+# MSVC C++20 char8_t workaround: llama.cpp uses u8"" literals which MSVC treats
+# as char8_t[] in C++20, but then passes to functions expecting const char*.
+# This flag disables the char8_t type, making u8"" return char[] like in C++17.
+if(MSVC)
+    add_compile_options(/Zc:char8_t-)
+endif()
+
 add_subdirectory(${LLAMA_CPP_DIR} llama.cpp)
 
 # Build liblloyal (INTERFACE library, links llama transitively)
