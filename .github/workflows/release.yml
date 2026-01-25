@@ -181,7 +181,18 @@ jobs:
       # Publish
       - name: Publish platform package
         working-directory: packages/${{ matrix.package }}
-        run: npm publish --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-alpha* ]]; then
+            npm publish --access public --tag alpha
+          elif [[ "$VERSION" == *-beta* ]]; then
+            npm publish --access public --tag beta
+          elif [[ "$VERSION" == *-rc* ]]; then
+            npm publish --access public --tag rc
+          else
+            npm publish --access public
+          fi
+        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -204,6 +215,17 @@ jobs:
         run: node scripts/sync-versions.js
 
       - name: Publish main package
-        run: npm publish
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-alpha* ]]; then
+            npm publish --tag alpha
+          elif [[ "$VERSION" == *-beta* ]]; then
+            npm publish --tag beta
+          elif [[ "$VERSION" == *-rc* ]]; then
+            npm publish --tag rc
+          else
+            npm publish
+          fi
+        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
