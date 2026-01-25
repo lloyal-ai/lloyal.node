@@ -36,6 +36,8 @@ const VENDORS = {
       // - tests/fixtures/ test models (80MB+)
       // lloyal.node only needs headers for N-API compilation
       'CMakeLists.txt',
+      'cmake/**/*.cmake',
+      'cmake/**/*.cmake.in',
       'README.md',
       'LICENSE'
     ]
@@ -91,7 +93,7 @@ const VENDORS = {
       'ggml/src/ggml-vulkan/*.{cpp,h}',
       'ggml/src/ggml-vulkan/CMakeLists.txt',
       'ggml/src/ggml-vulkan/cmake/**/*.{cmake,in}',
-      'ggml/src/ggml-vulkan/vulkan-shaders/*.{comp,glsl,h}',
+      'ggml/src/ggml-vulkan/vulkan-shaders/*.{comp,glsl,h,cpp}',
       'ggml/src/ggml-vulkan/vulkan-shaders/CMakeLists.txt',
 
       'LICENSE'

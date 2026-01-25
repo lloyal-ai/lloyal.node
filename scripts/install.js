@@ -72,28 +72,36 @@ function installPrebuilt(binDir, packageName) {
 }
 
 /**
- * Build from source
+ * Build from source using cmake-js
  */
 function buildFromSource() {
   log('⚙️  Building from source...');
   log('This will take 5-15 minutes. Grab a coffee! ☕');
 
+  // Determine GPU backend from environment variable
+  const gpuBackend = process.env.LLOYAL_GPU?.toLowerCase();
+  const cmakeFlags = [];
+
+  if (gpuBackend === 'cuda') {
+    cmakeFlags.push('--CDGGML_CUDA=ON');
+    log('  → GPU backend: CUDA');
+  } else if (gpuBackend === 'vulkan') {
+    cmakeFlags.push('--CDGGML_VULKAN=ON');
+    log('  → GPU backend: Vulkan');
+  } else if (gpuBackend === 'metal' || PLATFORM === 'darwin') {
+    // Metal is auto-enabled on macOS, but we can be explicit
+    if (PLATFORM === 'darwin') {
+      log('  → GPU backend: Metal (auto-enabled on macOS)');
+    }
+  } else {
+    log('  → GPU backend: CPU only');
+  }
+
+  const buildCmd = `npx cmake-js rebuild ${cmakeFlags.join(' ')}`.trim();
+  log(`  → Running: ${buildCmd}`);
+
   try {
-    // Run build sequence
-    log('  → Running build-llama.sh...');
-    execSync('bash scripts/build-llama.sh', {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('  → Setting up headers...');
-    execSync('node scripts/setup-headers.js', {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('  → Running node-gyp...');
-    execSync('node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build', {
+    execSync(buildCmd, {
       cwd: ROOT,
       stdio: 'inherit'
     });
@@ -154,7 +162,7 @@ function main() {
   log('ℹ️  No prebuilt binary found for your platform');
   log('');
   log('Building from vendored sources...');
-  log('Requirements: C++20 compiler, CMake, node-gyp');
+  log('Requirements: C++20 compiler, CMake 3.18+');
   log('Troubleshooting: https://github.com/lloyal-ai/lloyal.node#building');
   log('');
 

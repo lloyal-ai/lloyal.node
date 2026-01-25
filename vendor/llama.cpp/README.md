@@ -4,7 +4,7 @@ This directory contains vendored sources from the llama.cpp project.
 
 **Source:** llama.cpp/ git submodule
 **Commit:** 338074c383c81366320d176d83b94b0a567ee0c2
-**Vendored:** 2026-01-24T05:20:08.922Z
+**Vendored:** 2026-01-24T15:37:26.065Z
 
 **DO NOT EDIT:** Files in this directory are copied from git submodules.
 To update, run: npm run update-vendors
