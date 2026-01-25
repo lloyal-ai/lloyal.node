@@ -108,7 +108,7 @@ set(ADDON_SOURCES
 # Create N-API Addon Module
 # =============================================================================
 
-add_library(${PROJECT_NAME} SHARED ${ADDON_SOURCES} ${CMAKE_JS_SRC})
+add_library(${PROJECT_NAME} MODULE ${ADDON_SOURCES} ${CMAKE_JS_SRC})
 
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -134,7 +134,6 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     PREFIX ""
     SUFFIX ".node"
     OUTPUT_NAME "lloyal"
-    CXX_STANDARD 20
 )
 
 # =============================================================================
@@ -167,9 +166,15 @@ elseif(UNIX)
     )
     
 elseif(MSVC)
-    # Windows: ensure DLLs are in same directory as .node
+    # Windows: ensure .node (MODULE) and DLLs (RUNTIME) are in correct directory
+    # Disable per-config subdirectories to avoid build/Release/Release nesting
     set_target_properties(${PROJECT_NAME} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Release
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/Debug
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Release
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/Debug
     )
 endif()
 
