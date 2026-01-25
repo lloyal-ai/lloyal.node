@@ -5,14 +5,13 @@
  * Strategy:
  * 1. Check if prebuilt binary exists for this platform
  * 2. If yes, copy to build/Release/ and exit
- * 3. If no, fall back to building from source
+ * 3. If no, show helpful error with build-from-source instructions
  *
  * Respects LLOYAL_GPU environment variable for GPU variant selection
  */
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const PLATFORM = process.platform;
 const ARCH = process.arch;
@@ -72,41 +71,6 @@ function installPrebuilt(binDir, packageName) {
 }
 
 /**
- * Build from source
- */
-function buildFromSource() {
-  log('⚙️  Building from source...');
-  log('This will take 5-15 minutes. Grab a coffee! ☕');
-
-  try {
-    // Run build sequence
-    log('  → Running build-llama.sh...');
-    execSync('bash scripts/build-llama.sh', {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('  → Setting up headers...');
-    execSync('node scripts/setup-headers.js', {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('  → Running node-gyp...');
-    execSync('node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build', {
-      cwd: ROOT,
-      stdio: 'inherit'
-    });
-
-    log('✅ Build successful!');
-  } catch (e) {
-    error('Build failed');
-    error(e.message);
-    process.exit(1);
-  }
-}
-
-/**
  * Main installation logic
  */
 function main() {
@@ -150,15 +114,24 @@ function main() {
     return; // exit(0) called in installPrebuilt
   }
 
-  // 4. No prebuilt found - build from source
-  log('ℹ️  No prebuilt binary found for your platform');
+  // 4. No prebuilt found - error with helpful message
   log('');
-  log('Building from vendored sources...');
-  log('Requirements: C++20 compiler, CMake, node-gyp');
-  log('Troubleshooting: https://github.com/lloyal-ai/lloyal.node#building');
+  error('No prebuilt binary found for your platform');
   log('');
-
-  buildFromSource();
+  log(`  Platform: ${PLATFORM}-${ARCH}`);
+  log('');
+  log('  Options:');
+  log('  1. Install a platform-specific package:');
+  log(`     npm install @lloyal-labs/lloyal.node-${PLATFORM}-${ARCH}`);
+  log('');
+  log('  2. Build from source (requires C++20, CMake 3.18+):');
+  log('     git clone --recursive https://github.com/lloyal-ai/lloyal.node.git');
+  log('     cd lloyal.node && npm run build');
+  log('');
+  log('  See: https://github.com/lloyal-ai/lloyal.node#building');
+  log('');
+  
+  process.exit(1);
 }
 
 // Run installer

@@ -4,15 +4,14 @@
   "description": "N-API client for liblloyal+llama.cpp",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
-  "gypfile": true,
+  "gypfile": false,
   "scripts": {
-    "update-vendors": "node scripts/update-vendors.js",
     "download-models": "bash scripts/download-test-models.sh",
-    "prepare": "bash scripts/build-llama.sh",
     "install": "node scripts/install.js",
-    "build": "bash scripts/build-llama.sh && node scripts/setup-headers.js && node-gyp clean && node-gyp configure && bash scripts/copy-dylib.sh && node-gyp build",
-    "build:debug": "node-gyp rebuild --debug",
-    "clean": "node-gyp clean && rm -rf include/ llama.cpp/build-linux llama.cpp/build-apple vendor/llama.cpp/build-linux vendor/llama.cpp/build-apple",
+    "build": "node scripts/build.js",
+    "build:debug": "cmake-js compile --debug",
+    "rebuild": "cmake-js rebuild",
+    "clean": "cmake-js clean && rm -rf build_test/",
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
     "test": "npm run test:api && npm run test:e2e",
@@ -45,33 +44,30 @@
     "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
+    "cmake-js": "^7.4.0",
     "glob": "^11.0.0",
-    "node-gyp": "^10.2.0",
     "typedoc": "^0.27.5"
   },
   "optionalDependencies": {
     "@lloyal-labs/lloyal.node-darwin-arm64": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-darwin-x64": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-linux-x64": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-linux-x64-cuda": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-linux-arm64": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-linux-arm64-cuda": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-arm64": "1.0.0-alpha",
+    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-win32-x64": "1.0.0-alpha",
     "@lloyal-labs/lloyal.node-win32-x64-cuda": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-win32-arm64": "1.0.0-alpha",
-    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "1.0.0-alpha"
+    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "1.0.0-alpha"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "files": [
     "lib/",
-    "src/",
-    "scripts/",
-    "binding.gyp",
-    "vendor/"
+    "scripts/"
   ]
 }

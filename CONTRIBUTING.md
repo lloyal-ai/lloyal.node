@@ -36,9 +36,34 @@ npm test
 ```
 
 This builds:
-1. llama.cpp (via `scripts/build-llama.sh`)
-2. Native Node.js addon (via node-gyp)
+1. llama.cpp + ggml (via cmake-js)
+2. Native Node.js addon (via cmake-js)
 3. Runs the test suite
+
+### GPU Support
+
+Build with GPU acceleration using the `LLOYAL_GPU` environment variable:
+
+```bash
+# CPU only (default on Linux/Windows)
+npm run build
+
+# NVIDIA CUDA
+LLOYAL_GPU=cuda npm run build
+
+# AMD/Intel Vulkan
+LLOYAL_GPU=vulkan npm run build
+
+# Apple Metal (macOS only, auto-enabled)
+LLOYAL_GPU=metal npm run build
+```
+
+**Requirements:**
+| Backend | SDK Required |
+|---------|--------------|
+| CUDA | NVIDIA CUDA Toolkit 12.2+ |
+| Vulkan | LunarG Vulkan SDK 1.4.313+ |
+| Metal | Xcode Command Line Tools (macOS) |
 
 ## Testing
 

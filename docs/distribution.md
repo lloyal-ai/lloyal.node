@@ -71,7 +71,6 @@ If no prebuilt binary matches your platform, lloyal.node builds from vendored so
 **Requirements:**
 - C++20 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.18+
-- node-gyp
 
 **Build time:** 5-15 minutes (one-time)
 
