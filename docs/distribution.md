@@ -40,7 +40,7 @@ lloyal.node ships prebuilt binaries for the following platforms:
 npm automatically selects the correct prebuilt package for your platform:
 
 ```bash
-npm install lloyal.node
+npm install @lloyal-labs/lloyal.node
 ```
 
 If a prebuilt binary is available, installation completes in seconds. Otherwise, lloyal.node builds from source automatically (requires C++ compiler and CMake).
@@ -61,23 +61,31 @@ Or set an environment variable before installation:
 
 ```bash
 export LLOYAL_GPU=cuda
-npm install lloyal.node
+npm install @lloyal-labs/lloyal.node
 ```
 
 ### Build from Source
 
-If no prebuilt binary matches your platform, lloyal.node builds from vendored sources automatically.
+If no prebuilt binary matches your platform, lloyal.node builds from source using cmake-js.
 
 **Requirements:**
+- Node.js 22+ (LTS)
 - C++20 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.18+
 
-**Build time:** 5-15 minutes (one-time)
+**Build commands:**
 
-**Supported platforms not covered by prebuilts:**
-- Older or niche platforms
-- Custom CPU optimizations
-- Development and testing
+```bash
+# CPU-only build
+npm run build
+
+# GPU builds (set LLOYAL_GPU environment variable)
+LLOYAL_GPU=cuda npm run build     # NVIDIA CUDA
+LLOYAL_GPU=vulkan npm run build   # Vulkan (AMD/Intel/NVIDIA)
+LLOYAL_GPU=metal npm run build    # Metal (macOS only)
+```
+
+**Build time:** 5-15 minutes (one-time)
 
 ---
 
@@ -88,10 +96,10 @@ If no prebuilt binary matches your platform, lloyal.node builds from vendored so
 Enabled automatically on Apple Silicon. No additional setup required.
 
 ```javascript
-const { loadModel } = require('lloyal.node');
-const model = await loadModel({
+const { createContext } = require('@lloyal-labs/lloyal.node');
+const ctx = await createContext({
   modelPath: './model.gguf',
-  gpuLayers: 32  // Offload layers to GPU
+  // Metal GPU acceleration used automatically on Apple Silicon
 });
 ```
 
@@ -141,7 +149,7 @@ npm install @lloyal-labs/lloyal.node-win32-x64    # Windows x64
 
 ```json
 {
-  "name": "lloyal.node",
+  "name": "@lloyal-labs/lloyal.node",
   "optionalDependencies": {
     "@lloyal-labs/lloyal.node-darwin-arm64": "1.0.0",
     "@lloyal-labs/lloyal.node-linux-x64-cuda": "1.0.0",
@@ -155,9 +163,11 @@ npm installs only the package matching your platform. Unsupported platforms fall
 ### Platform Packages
 
 Each platform package contains:
-- Prebuilt native addon (`*.node`)
-- Platform-specific shared libraries (`*.dylib`, `*.so`, `*.dll`)
+- Prebuilt native addon (`lloyal.node`)
+- Platform-specific shared libraries (macOS/Linux only: `*.dylib`, `*.so`)
 - Minimal dependencies (no build tools required)
+
+**Note:** Windows uses static linking, so only the `.node` file is included.
 
 **Package naming:** `@lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]`
 
@@ -168,63 +178,55 @@ Examples:
 
 ---
 
-## Comparison to llama.node
-
-| Metric | llama.node | lloyal.node |
-|--------|------------|-------------|
-| Total packages | 14 | 13 |
-| Platform parity | 100% | 93% |
-| x64 coverage | Full | Full |
-| ARM64 coverage | Full | Full |
-| CUDA version | 12.6 | 12.6 |
-| Vulkan support | Full | Full |
-| Windows ARM64 | ✅ | ✅ |
-| Snapdragon optimization | ✅ Hexagon DSP | ⏸️ Roadmap |
-
-**Missing:** Snapdragon Hexagon DSP optimization (niche edge AI use case). Standard ARM64 packages work on Snapdragon hardware without DSP acceleration.
-
----
-
 ## Technical Details
 
 ### Dependency Chain
 
 ```
-lloyal.node (N-API binding)
+lloyal.node (N-API binding via cmake-js)
     ↓ includes
-liblloyal (header-only C++ library)
+liblloyal (header-only C++ library, git submodule)
     ↓ links
-llama.cpp (inference engine)
+llama.cpp (inference engine, git submodule)
     ↓ compiles to
 Platform-specific binaries:
-  macOS:   libllama.dylib + Metal support
-  Linux:   libllama.so + OpenMP
-  Windows: llama.dll + ggml*.dll
+  macOS:   lloyal.node + libllama.dylib + Metal
+  Linux:   lloyal.node + libllama.so + OpenMP
+  Windows: lloyal.node (static, all-in-one)
 ```
 
-### Vendoring Strategy
+### Build System
 
-lloyal.node vendors `liblloyal` and `llama.cpp` sources to avoid git submodule issues with npm:
-
-- **Published packages** include vendored sources in `vendor/` directory
-- **Git repository** uses submodules for development
-- **Version tracking** via `vendor/VERSIONS.json`
-
-To update vendored dependencies:
+lloyal.node uses **cmake-js** to build the native addon:
 
 ```bash
-git submodule update --remote
-npm run update-vendors
+# Development build
+npm run build
+
+# The build script (scripts/build.js) invokes:
+npx cmake-js compile --CDGGML_METAL=ON  # macOS
+npx cmake-js compile                      # Linux/Windows CPU
+npx cmake-js compile --CDGGML_CUDA=ON    # CUDA
+npx cmake-js compile --CDGGML_VULKAN=ON  # Vulkan
 ```
 
-See [VENDORING.md](../VENDORING.md) for details.
+**Submodule Structure:**
+- `llama.cpp/` - llama.cpp inference engine
+- `liblloyal/` - Header-only C++ abstraction layer
+
+To update submodules:
+
+```bash
+git submodule update --init --recursive
+git submodule update --remote  # Pull latest
+```
 
 ### CI/CD Pipeline
 
 GitHub Actions builds all 13 platform packages on release:
 
 **Native runners:**
-- macOS: `macos-14` (arm64), `macos-13` (x64)
+- macOS: `macos-14` (arm64), `macos-15-intel` (x64)
 - Linux x64: `ubuntu-22.04`
 - Linux ARM64: `ubuntu-22.04-arm` (native, no emulation)
 - Windows: `windows-2022`
@@ -253,13 +255,10 @@ GitHub Actions builds all 13 platform packages on release:
 # Update submodules to desired versions
 git submodule update --remote
 
-# Vendor the dependencies
-npm run update-vendors
+# Update version (updates all platform packages too)
+npm version minor  # or major/patch/prerelease
 
-# Update version
-npm version minor  # or major/patch
-
-# Commit changes
+# Commit and push
 git add .
 git commit -m "chore: prepare v1.0.0 release"
 git push
@@ -277,25 +276,37 @@ git push origin v1.0.0
 GitHub Actions automatically:
 - Builds all 13 platform packages
 - Publishes to npm registry (`@lloyal-labs/lloyal.node-*`)
-- Publishes main package (`lloyal.node`)
+- Publishes main package (`@lloyal-labs/lloyal.node`)
+- Uses `--tag alpha` for prerelease versions (`*-alpha`, `*-beta`, `*-rc`)
 
 **4. Verify release:**
 
 ```bash
-npm info lloyal.node
+npm info @lloyal-labs/lloyal.node
 npm info @lloyal-labs/lloyal.node-linux-x64-cuda
 ```
 
 ### Version Management
 
-All packages use synchronized versioning:
+All packages use synchronized versioning. The `scripts/sync-versions.js` script updates all platform package versions to match the main package.
 
-```bash
-# Sync platform package versions with main package
-npm run version
-```
+---
 
-This automatically updates `optionalDependencies` in `package.json` and `version` fields in all platform packages.
+## Comparison to llama.node
+
+| Metric | llama.node | lloyal.node |
+|--------|------------|-------------|
+| Total packages | 14 | 13 |
+| Platform parity | 100% | 93% |
+| x64 coverage | Full | Full |
+| ARM64 coverage | Full | Full |
+| CUDA version | 12.6 | 12.6 |
+| Vulkan support | Full | Full |
+| Windows ARM64 | ✅ | ✅ |
+| Windows linking | Shared DLLs | Static |
+| Snapdragon DSP | ✅ Hexagon | ⏸️ Roadmap |
+
+**Key difference:** Windows uses static linking for reliability (avoids DLL initialization crashes).
 
 ---
 
