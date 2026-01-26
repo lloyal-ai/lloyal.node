@@ -184,7 +184,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --access public --tag alpha
+            npm publish --access public --tag latest  # TODO: revert to --tag alpha once released
           elif [[ "$VERSION" == *-beta* ]]; then
             npm publish --access public --tag beta
           elif [[ "$VERSION" == *-rc* ]]; then
@@ -218,7 +218,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --tag alpha --access public
+            npm publish --tag latest --access public  # TODO: revert to --tag alpha once released
           elif [[ "$VERSION" == *-beta* ]]; then
             npm publish --tag beta --access public
           elif [[ "$VERSION" == *-rc* ]]; then

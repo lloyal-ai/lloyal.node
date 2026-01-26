@@ -76,6 +76,17 @@ if(WIN32)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 endif()
 
+# Set RPATH globally BEFORE adding llama.cpp subdirectory
+# This ensures ALL shared libraries (llama, ggml, ggml-*, gpu backends, etc.)
+# inherit these settings automatically - no need to hardcode target names
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path" CACHE STRING "RPATH for macOS" FORCE)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE CACHE BOOL "Use install RPATH during build" FORCE)
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN" CACHE STRING "RPATH for Linux" FORCE)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE CACHE BOOL "Use install RPATH during build" FORCE)
+endif()
+
 add_subdirectory(${LLAMA_CPP_DIR} llama.cpp)
 
 # MSVC C++20 char8_t workaround: llama.cpp uses u8"" literals which MSVC treats
