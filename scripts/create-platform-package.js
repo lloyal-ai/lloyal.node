@@ -58,21 +58,36 @@ fs.copyFileSync(nodeBinary, path.join(BIN_DIR, 'lloyal.node'));
 console.log(`  ✓ Copied lloyal.node`);
 
 // Shared libraries (platform-specific)
+// Shared libraries (platform-specific)
 if (osName === 'darwin') {
-  const dylib = path.join(BUILD_DIR, 'libllama.dylib');
-  if (fs.existsSync(dylib)) {
-    fs.copyFileSync(dylib, path.join(BIN_DIR, 'libllama.dylib'));
-    console.log(`  ✓ Copied libllama.dylib`);
+  // Copy all .dylib files (libllama, libggml, libggml-metal, etc.)
+  const dylibs = fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.dylib'));
+  if (dylibs.length > 0) {
+    dylibs.forEach(dylib => {
+      fs.copyFileSync(path.join(BUILD_DIR, dylib), path.join(BIN_DIR, dylib));
+      console.log(`  ✓ Copied ${dylib}`);
+    });
   } else {
-    console.warn(`  ⚠️  libllama.dylib not found (optional)`);
+    console.warn(`  ⚠️  No .dylib files found in build/Release`);
   }
+
+  // Copy Metal shaders if present
+  const metalFiles = fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.metallib') || f.endsWith('.metal'));
+  metalFiles.forEach(f => {
+    fs.copyFileSync(path.join(BUILD_DIR, f), path.join(BIN_DIR, f));
+    console.log(`  ✓ Copied ${f}`);
+  });
+
 } else if (osName === 'linux') {
-  const so = path.join(BUILD_DIR, 'libllama.so');
-  if (fs.existsSync(so)) {
-    fs.copyFileSync(so, path.join(BIN_DIR, 'libllama.so'));
-    console.log(`  ✓ Copied libllama.so`);
+  // Copy all .so files
+  const sos = fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.so'));
+  if (sos.length > 0) {
+    sos.forEach(so => {
+      fs.copyFileSync(path.join(BUILD_DIR, so), path.join(BIN_DIR, so));
+      console.log(`  ✓ Copied ${so}`);
+    });
   } else {
-    console.warn(`  ⚠️  libllama.so not found (optional)`);
+     console.warn(`  ⚠️  No .so files found in build/Release`);
   }
 } else if (osName === 'win32') {
   // Copy all DLLs
