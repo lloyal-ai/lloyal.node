@@ -218,13 +218,13 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --tag alpha
+            npm publish --tag alpha --access public
           elif [[ "$VERSION" == *-beta* ]]; then
-            npm publish --tag beta
+            npm publish --tag beta --access public
           elif [[ "$VERSION" == *-rc* ]]; then
-            npm publish --tag rc
+            npm publish --tag rc --access public
           else
-            npm publish
+            npm publish --access public
           fi
         shell: bash
         env:
