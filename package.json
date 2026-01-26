@@ -5,6 +5,9 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "gypfile": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "download-models": "bash scripts/download-test-models.sh",
     "install": "node scripts/install.js",
