@@ -937,15 +937,28 @@ Napi::Value SessionContext::modelSurprisal(const Napi::CallbackInfo& info) {
 
   lloyal::metrics::Base base = parseBase(baseStr);
 
-  // Get logits pointer (zero-copy)
+  // Get logits - either from provided Float32Array or from current context
   float* logits;
-  try {
-    logits = lloyal::logits::get(_context, -1);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
-  }
+  int n_vocab;
 
-  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+  if (info.Length() >= 3 && info[2].IsTypedArray()) {
+    // Use provided logits (for captured/arbitrary logits)
+    auto arr = info[2].As<Napi::TypedArray>();
+    if (arr.TypedArrayType() != napi_float32_array) {
+      throw Napi::TypeError::New(env, "Expected Float32Array for logits parameter");
+    }
+    auto float32Arr = info[2].As<Napi::Float32Array>();
+    logits = float32Arr.Data();
+    n_vocab = static_cast<int>(float32Arr.ElementLength());
+  } else {
+    // Use current context logits (default behavior)
+    try {
+      logits = lloyal::logits::get(_context, -1);
+    } catch (const std::exception& e) {
+      throw Napi::Error::New(env, e.what());
+    }
+    n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+  }
 
   // Compute surprisal
   float surprisal = lloyal::metrics::model_surprisal(logits, n_vocab, pickedTokenId, base);
@@ -965,17 +978,30 @@ Napi::Value SessionContext::modelEntropy(const Napi::CallbackInfo& info) {
 
   lloyal::metrics::Base base = parseBase(baseStr);
 
-  // Get logits pointer (zero-copy)
+  // Get logits - either from provided Float32Array or from current context
   float* logits;
-  try {
-    logits = lloyal::logits::get(_context, -1);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
+  int n_vocab;
+
+  if (info.Length() >= 2 && info[1].IsTypedArray()) {
+    // Use provided logits (for captured/arbitrary logits)
+    auto arr = info[1].As<Napi::TypedArray>();
+    if (arr.TypedArrayType() != napi_float32_array) {
+      throw Napi::TypeError::New(env, "Expected Float32Array for logits parameter");
+    }
+    auto float32Arr = info[1].As<Napi::Float32Array>();
+    logits = float32Arr.Data();
+    n_vocab = static_cast<int>(float32Arr.ElementLength());
+  } else {
+    // Use current context logits (default behavior)
+    try {
+      logits = lloyal::logits::get(_context, -1);
+    } catch (const std::exception& e) {
+      throw Napi::Error::New(env, e.what());
+    }
+    n_vocab = lloyal::tokenizer::vocab_size(_model.get());
   }
 
-  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Compute entropy using metrics.hpp (replaces manual log-sum-exp)
+  // Compute entropy using metrics.hpp
   float entropy = lloyal::metrics::model_entropy(logits, n_vocab, base);
 
   return Napi::Number::New(env, static_cast<double>(entropy));

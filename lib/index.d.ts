@@ -909,13 +909,15 @@ export interface SessionContext {
    * - High surprisal: Model didn't expect this token (low probability)
    *
    * Call after decode() to compute surprisal for any token based on
-   * the current logits distribution.
+   * the current logits distribution, or pass captured logits for
+   * offline computation (e.g., best-of-n scoring from prefill logits).
    *
    * @param pickedTokenId - Token ID to compute surprisal for
    * @param base - Logarithm base: "nats" (default) or "bits"
+   * @param logits - Optional Float32Array of logits (uses current context logits if omitted)
    * @returns Surprisal value in specified base
    *
-   * @example
+   * @example Current context logits (default)
    * ```typescript
    * await ctx.decode(tokens, position);
    * const token = ctx.sample();
@@ -923,9 +925,18 @@ export interface SessionContext {
    * console.log(`Model surprise: ${surprisal.toFixed(2)} bits`);
    * ```
    *
-   * COST: O(1) - direct probability lookup from logits
+   * @example Captured/arbitrary logits (for best-of-n, verification, etc.)
+   * ```typescript
+   * // Capture logits after prefill
+   * const capturedLogits = new Float32Array(ctx.getLogits());
+   *
+   * // Later: compute surprisal from captured logits
+   * const surprisal = ctx.modelSurprisal(token, "nats", capturedLogits);
+   * ```
+   *
+   * COST: O(n_vocab) - softmax normalization required
    */
-  modelSurprisal(pickedTokenId: number, base?: 'nats' | 'bits'): number;
+  modelSurprisal(pickedTokenId: number, base?: 'nats' | 'bits', logits?: Float32Array): number;
 
   /**
    * Compute entropy of the entire logits distribution.
@@ -934,12 +945,14 @@ export interface SessionContext {
    * - Low entropy: Model is confident (peaked distribution)
    * - High entropy: Model is uncertain (flat distribution)
    *
-   * Call after decode() to analyze the current prediction distribution.
+   * Call after decode() to analyze the current prediction distribution,
+   * or pass captured logits for offline analysis.
    *
    * @param base - Logarithm base: "nats" (default), "bits", or "base10"
+   * @param logits - Optional Float32Array of logits (uses current context logits if omitted)
    * @returns Entropy value in specified base
    *
-   * @example
+   * @example Current context logits (default)
    * ```typescript
    * await ctx.decode(tokens, position);
    * const entropy = ctx.modelEntropy("bits");
@@ -948,9 +961,15 @@ export interface SessionContext {
    * }
    * ```
    *
+   * @example Captured/arbitrary logits
+   * ```typescript
+   * const capturedLogits = new Float32Array(ctx.getLogits());
+   * const entropy = ctx.modelEntropy("nats", capturedLogits);
+   * ```
+   *
    * COST: O(n_vocab) - must sum over all token probabilities
    */
-  modelEntropy(base?: 'nats' | 'bits'): number;
+  modelEntropy(base?: 'nats' | 'bits', logits?: Float32Array): number;
 
   /**
    * Create a new perplexity tracker.
