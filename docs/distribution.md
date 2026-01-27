@@ -205,6 +205,21 @@ const ctx = await createContext(
 );
 ```
 
+**Strict GPU Loading (No Fallback)**
+
+For production or CI environments where you want to fail fast if the requested GPU variant is unavailable:
+
+```bash
+export LLOYAL_NO_FALLBACK=1
+export LLOYAL_GPU=cuda
+node app.js  # Throws error if CUDA unavailable instead of falling back to CPU
+```
+
+This is useful for:
+- CI pipelines testing specific GPU variants
+- Production deployments where GPU acceleration is required
+- Debugging GPU loading issues
+
 ---
 
 ## Technical Details
@@ -266,6 +281,13 @@ GitHub Actions builds all 13 platform packages on release:
 **Custom actions:**
 - `.github/actions/provision-cuda`: Unified CUDA 12.6 installation
 - Uses `jakoch/install-vulkan-sdk-action` for Vulkan SDK
+
+**Testing in CI:**
+- CPU, Metal, and Vulkan packages: Fully tested (build + verify + API/E2E tests)
+- CUDA packages: Build-only (no GPU hardware in CI runners)
+- Cross-compiled packages (win32-arm64): Build-only (can't run ARM64 on x64)
+
+CUDA packages are verified to link correctly, but runtime testing requires actual NVIDIA GPU hardware.
 
 **Build time:**
 - x64 platforms: ~10-15 minutes per package
