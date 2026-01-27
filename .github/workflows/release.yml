@@ -217,8 +217,22 @@ jobs:
           # Add package bin to PATH for DLL discovery
           $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
           $env:PATH = "$pkgBin;$env:PATH"
+
+          # Add Vulkan SDK runtime to PATH if available
+          if ($env:VULKAN_SDK) {
+            $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
+            Write-Host "Added Vulkan SDK Bin to PATH: $env:VULKAN_SDK\Bin"
+          }
+
+          # Add CUDA runtime to PATH if available
+          if ($env:CUDA_PATH) {
+            $env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
+            Write-Host "Added CUDA bin to PATH: $env:CUDA_PATH\bin"
+          }
+
           Write-Host "Package bin: $pkgBin"
           Write-Host "VULKAN_SDK: $env:VULKAN_SDK"
+          Write-Host "CUDA_PATH: $env:CUDA_PATH"
           node -e "
             const { loadBinary } = require('./lib');
             const addon = loadBinary();
@@ -235,6 +249,8 @@ jobs:
         run: |
           $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
           $env:PATH = "$pkgBin;$env:PATH"
+          if ($env:VULKAN_SDK) { $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH" }
+          if ($env:CUDA_PATH) { $env:PATH = "$env:CUDA_PATH\bin;$env:PATH" }
           npm run test:api
         timeout-minutes: 5
         env:
@@ -256,6 +272,8 @@ jobs:
         run: |
           $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
           $env:PATH = "$pkgBin;$env:PATH"
+          if ($env:VULKAN_SDK) { $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH" }
+          if ($env:CUDA_PATH) { $env:PATH = "$env:CUDA_PATH\bin;$env:PATH" }
           npm run test:e2e
         timeout-minutes: 5
         env:
