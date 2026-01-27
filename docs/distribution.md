@@ -176,6 +176,35 @@ Examples:
 - `@lloyal-labs/lloyal.node-linux-x64-cuda` (Linux x64 with CUDA 12.6)
 - `@lloyal-labs/lloyal.node-win32-arm64-vulkan` (Windows ARM64 with Vulkan)
 
+### Runtime Loading
+
+lloyal.node uses **runtime dynamic loading** with automatic fallback:
+
+1. **npm install** downloads platform packages matching your OS/CPU via `optionalDependencies`
+2. **At runtime**, when you call `createContext()`:
+   - If `gpuVariant` option or `LLOYAL_GPU` env var is set, tries that variant first
+   - If GPU variant fails (missing runtime libs like `libcudart.so`), falls back to CPU
+   - If no prebuilt available, tries local `build/Release/` (development)
+
+This pattern ensures:
+- **Graceful degradation**: GPU unavailable? Falls back to CPU automatically
+- **No install-time decisions**: Works correctly in Docker multi-stage builds
+- **Explicit control**: Use `gpuVariant` option for deterministic loading
+
+**Example:**
+```javascript
+const { createContext } = require('@lloyal-labs/lloyal.node');
+
+// Automatic: uses LLOYAL_GPU env var or CPU
+const ctx = await createContext({ modelPath: './model.gguf' });
+
+// Explicit: request CUDA with fallback to CPU
+const ctx = await createContext(
+  { modelPath: './model.gguf' },
+  { gpuVariant: 'cuda' }
+);
+```
+
 ---
 
 ## Technical Details

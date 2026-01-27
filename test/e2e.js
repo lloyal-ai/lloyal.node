@@ -29,8 +29,9 @@ if (!fs.existsSync(MODEL_PATH)) {
 console.log('=== Model Validation Test ===\n');
 console.log(`Model: ${path.basename(MODEL_PATH)}\n`);
 
-// Load addon
-const addon = require('../build/Release/lloyal.node');
+// Load addon via lib (uses runtime loading with fallback)
+const { loadBinary } = require('..');
+const addon = loadBinary();
 
 /**
  * Test case definition

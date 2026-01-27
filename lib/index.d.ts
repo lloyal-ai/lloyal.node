@@ -5,6 +5,48 @@
  */
 
 /**
+ * GPU variant for binary loading
+ *
+ * Specifies which GPU-accelerated binary to load:
+ * - 'default': CPU-only (works everywhere)
+ * - 'cuda': NVIDIA CUDA (requires libcudart.so/cudart64.dll)
+ * - 'vulkan': Vulkan (AMD/Intel/NVIDIA, requires Vulkan runtime)
+ *
+ * If the requested variant is unavailable (package not installed or
+ * runtime libraries missing), loading automatically falls back to CPU.
+ */
+export type GpuVariant = 'default' | 'cuda' | 'vulkan';
+
+/**
+ * Options for binary loading
+ *
+ * Controls which native binary variant is loaded when creating a context.
+ * Use this for explicit GPU variant selection with automatic fallback.
+ */
+export interface LoadOptions {
+  /**
+   * GPU variant to use
+   *
+   * - 'cuda': NVIDIA CUDA (requires libcudart.so)
+   * - 'vulkan': Vulkan (AMD/Intel/NVIDIA)
+   * - 'default' or undefined: CPU only
+   *
+   * If the requested variant is unavailable (missing runtime libraries),
+   * automatically falls back to CPU with a console warning.
+   *
+   * @example
+   * ```typescript
+   * // Request CUDA with automatic fallback to CPU
+   * const ctx = await createContext(
+   *   { modelPath: './model.gguf' },
+   *   { gpuVariant: 'cuda' }
+   * );
+   * ```
+   */
+  gpuVariant?: GpuVariant;
+}
+
+/**
  * Pooling type for embedding extraction
  */
 export enum PoolingType {
@@ -1304,9 +1346,14 @@ export interface SessionContext {
 /**
  * Create a new inference context
  *
+ * Loads the appropriate native binary (with automatic GPU fallback) and
+ * creates an inference context for the specified model.
+ *
  * @param options Context creation options
+ * @param loadOptions Optional binary loading options (GPU variant selection)
  * @returns Promise resolving to SessionContext instance
- * @example
+ *
+ * @example Basic usage
  * ```typescript
  * const ctx = await createContext({
  *   modelPath: './model.gguf',
@@ -1322,8 +1369,58 @@ export interface SessionContext {
  *   ctx.dispose();
  * }
  * ```
+ *
+ * @example With GPU variant selection
+ * ```typescript
+ * // Request CUDA - falls back to CPU if unavailable
+ * const ctx = await createContext(
+ *   { modelPath: './model.gguf', nCtx: 4096 },
+ *   { gpuVariant: 'cuda' }
+ * );
+ * ```
+ *
+ * @example Using environment variable
+ * ```typescript
+ * // Set LLOYAL_GPU=cuda before running
+ * // createContext will automatically use CUDA if available
+ * const ctx = await createContext({ modelPath: './model.gguf' });
+ * ```
  */
-export function createContext(options: ContextOptions): Promise<SessionContext>;
+export function createContext(
+  options: ContextOptions,
+  loadOptions?: LoadOptions
+): Promise<SessionContext>;
+
+/**
+ * Load native binary for a specific GPU variant
+ *
+ * Loads the appropriate platform-specific binary with automatic fallback:
+ * 1. Try requested GPU variant (if specified)
+ * 2. Fall back to default (CPU) platform package
+ * 3. Fall back to local build (development: build/Release/lloyal.node)
+ *
+ * Use this for advanced scenarios where you need direct binary access
+ * or want to check variant availability before creating a context.
+ *
+ * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
+ * @returns Native binary module with createContext method
+ * @throws Error if no binary available for the current platform
+ *
+ * @example
+ * ```typescript
+ * // Load default (CPU) binary
+ * const binary = loadBinary();
+ *
+ * // Load CUDA binary (falls back to CPU if unavailable)
+ * const binary = loadBinary('cuda');
+ *
+ * // Create context from loaded binary
+ * const ctx = await binary.createContext({ modelPath: './model.gguf' });
+ * ```
+ */
+export function loadBinary(variant?: GpuVariant): {
+  createContext(options: ContextOptions): Promise<SessionContext>;
+};
 
 /**
  * Safe logits access with automatic lifetime management
