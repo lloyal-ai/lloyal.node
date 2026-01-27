@@ -189,11 +189,17 @@ jobs:
         run: |
           npm install ./packages/${{ matrix.package }}
           rm -rf build/Release
+          echo "Installed package contents:"
+          ls -la node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin/ || echo "Package not found in node_modules"
 
-      - name: Verify platform package loading
-        if: matrix.cross_compile != true
+      - name: Verify platform package loading (Unix)
+        if: runner.os != 'Windows' && matrix.cross_compile != true
         shell: bash
         run: |
+          # Set LD_LIBRARY_PATH to find sibling .so files (Linux CUDA/Vulkan)
+          PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
+          export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
           node -e "
             const { loadBinary } = require('./lib');
             const addon = loadBinary();
@@ -202,18 +208,44 @@ jobs:
           "
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
+          LLOYAL_NO_FALLBACK: '1'
+
+      - name: Verify platform package loading (Windows)
+        if: runner.os == 'Windows' && matrix.cross_compile != true
+        shell: pwsh
+        run: |
+          # Add package bin to PATH for DLL discovery
+          $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
+          $env:PATH = "$pkgBin;$env:PATH"
+          Write-Host "Package bin: $pkgBin"
+          Write-Host "VULKAN_SDK: $env:VULKAN_SDK"
+          node -e "
+            const { loadBinary } = require('./lib');
+            const addon = loadBinary();
+            console.log('✓ Platform package loaded successfully');
+            console.log('  Exports:', Object.keys(addon));
+          "
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
+          LLOYAL_NO_FALLBACK: '1'
 
       - name: Run API tests (Windows)
         if: runner.os == 'Windows' && matrix.cross_compile != true
         shell: pwsh
-        run: npm run test:api
+        run: |
+          $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
+          $env:PATH = "$pkgBin;$env:PATH"
+          npm run test:api
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run API tests (Unix)
         if: runner.os != 'Windows' && matrix.cross_compile != true
-        run: npm run test:api
+        run: |
+          PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
+          export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
+          npm run test:api
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
@@ -221,14 +253,20 @@ jobs:
       - name: Run E2E tests (Windows)
         if: runner.os == 'Windows' && matrix.cross_compile != true
         shell: pwsh
-        run: npm run test:e2e
+        run: |
+          $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
+          $env:PATH = "$pkgBin;$env:PATH"
+          npm run test:e2e
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run E2E tests (Unix)
         if: runner.os != 'Windows' && matrix.cross_compile != true
-        run: npm run test:e2e
+        run: |
+          PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
+          export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
+          npm run test:e2e
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
