@@ -1,6 +1,6 @@
 # lloyal.node
 
-**Research-grade edge inference for Node.js**
+**Advanced edge inference for Node.js**
 
 Inference with forkable state — KV cache, grammar, metrics all clone atomically. Entropy and surprisal mid-generation. Multi-sequence parallel exploration. The control surface llama.cpp exposes, in TypeScript.
 
@@ -19,7 +19,7 @@ Prebuilt binaries for 13 platforms:
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-GPU selection happens at runtime, not install time. See [DISTRIBUTION.md](./docs/DISTRIBUTION.md) for details.
+GPU selection happens at runtime, not install time. See [distribution.md](docs/distribution.md) for details.
 
 ---
 
@@ -27,15 +27,15 @@ GPU selection happens at runtime, not install time. See [DISTRIBUTION.md](./docs
 
 Working examples demonstrate each capability:
 
-| Example | What It Demonstrates |
-|---------|----------------------|
-| [`best-of-n/`](./examples/best-of-n/) | Multi-sequence generation, PPL selection, captured logits for fair comparison |
-| [`speculative/`](./examples/speculative/) | KV forking, draft/verify/accept/reject, `kvCacheRemove` for rejected tokens |
-| [`entropy/`](./examples/entropy/) | Entropy Decision Tree — `modelEntropy()` mid-generation as control signal |
-| [`grammar/`](./examples/grammar/) | Pull loop with generators, JSON schema constraints, KV + grammar branching |
-| [`streaming/`](./examples/streaming/) | Infinite context via BlinkKV, `clearAndReseed`, perplexity tracking |
-| [`chat/`](./examples/chat/) | Interactive streaming chat |
-| [`embed/`](./examples/embed/) | Text embeddings extraction |
+| Example                                   | What It Demonstrates                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------- |
+| [`best-of-n/`](./examples/best-of-n/)     | Multi-sequence generation, PPL selection, captured logits for fair comparison |
+| [`speculative/`](./examples/speculative/) | KV forking, draft/verify/accept/reject, `kvCacheRemove` for rejected tokens   |
+| [`entropy/`](./examples/entropy/)         | Entropy Decision Tree — `modelEntropy()` mid-generation as control signal     |
+| [`grammar/`](./examples/grammar/)         | Pull loop with generators, JSON schema constraints, KV + grammar branching    |
+| [`streaming/`](./examples/streaming/)     | Infinite context via BlinkKV, `clearAndReseed`, perplexity tracking           |
+| [`chat/`](./examples/chat/)               | Interactive streaming chat                                                    |
+| [`embed/`](./examples/embed/)             | Text embeddings extraction                                                    |
 
 ```bash
 node examples/best-of-n/best-of-n.mjs
@@ -56,23 +56,23 @@ KV cache, grammar parser, and perplexity trackers all live behind handles. Handl
 
 **Two forking strategies:**
 
-| Approach | Method | Use Case |
-|----------|--------|----------|
-| **Tag copy** | `kvSeqCopy(src, dst)` | Parallel branches with different seqIds |
+| Approach             | Method                            | Use Case                                     |
+| -------------------- | --------------------------------- | -------------------------------------------- |
+| **Tag copy**         | `kvSeqCopy(src, dst)`             | Parallel branches with different seqIds      |
 | **Snapshot/restore** | `kvCacheSave()` / `kvCacheLoad()` | Sequential exploration, return to checkpoint |
 
 [`examples/best-of-n/`](./examples/best-of-n/) uses tag copy — each candidate gets its own seqId, branches run in parallel:
 
 ```javascript
-ctx.kvSeqCopy(0, seqId);  // O(1) tag copy, branch diverges on seqId
+ctx.kvSeqCopy(0, seqId); // O(1) tag copy, branch diverges on seqId
 ```
 
 [`examples/grammar/`](./examples/grammar/) uses snapshot/restore — save state, explore branches sequentially, restore between each:
 
 ```javascript
-const snapshot = await ctx.kvCacheSave(0);  // Save checkpoint
+const snapshot = await ctx.kvCacheSave(0); // Save checkpoint
 // ... explore branch ...
-await ctx.kvCacheLoad(0, snapshot);         // Return to checkpoint
+await ctx.kvCacheLoad(0, snapshot); // Return to checkpoint
 ```
 
 Both approaches also fork grammar state with `cloneSampler()` when grammar constraints are involved.
@@ -127,7 +127,7 @@ function* tokenGenerator(ctx, grammarHandle) {
 
 // Consumer controls pace — stop at branch point
 for (const { token, text } of gen) {
-  if (accumulated.includes('"city"')) break;  // Pause here, branch
+  if (accumulated.includes('"city"')) break; // Pause here, branch
 }
 ```
 
@@ -152,15 +152,15 @@ const ctx = await createContext({
 
 ### Core Methods
 
-| Method                        | Returns             | Description                       |
-| ----------------------------- | ------------------- | --------------------------------- |
-| `tokenize(text)`              | `Promise<number[]>` | Text → token IDs                  |
-| `detokenize(tokens)`          | `Promise<string>`   | Token IDs → text                  |
-| `tokenToText(token)`          | `string`            | Single token → text (streaming)   |
-| `decode(tokens, pos, seqId?)` | `Promise<void>`     | Forward pass, updates KV cache    |
-| `sample(params?)`             | `number`            | Sample next token                 |
-| `isStopToken(token)`          | `boolean`           | Check for EOS token               |
-| `getLogits()`                 | `Float32Array`      | Raw logits (zero-copy view)       |
+| Method                        | Returns             | Description                     |
+| ----------------------------- | ------------------- | ------------------------------- |
+| `tokenize(text)`              | `Promise<number[]>` | Text → token IDs                |
+| `detokenize(tokens)`          | `Promise<string>`   | Token IDs → text                |
+| `tokenToText(token)`          | `string`            | Single token → text (streaming) |
+| `decode(tokens, pos, seqId?)` | `Promise<void>`     | Forward pass, updates KV cache  |
+| `sample(params?)`             | `number`            | Sample next token               |
+| `isStopToken(token)`          | `boolean`           | Check for EOS token             |
+| `getLogits()`                 | `Float32Array`      | Raw logits (zero-copy view)     |
 
 ### KV Cache
 
@@ -177,26 +177,26 @@ const ctx = await createContext({
 
 ### Grammar (Handle-Based)
 
-| Method                           | Returns  | Description                  |
-| -------------------------------- | -------- | ---------------------------- |
-| `jsonSchemaToGrammar(schema)`    | `string` | Schema → GBNF                |
-| `createSampler(grammarStr)`      | `number` | Create grammar handle        |
-| `cloneSampler(handle)`           | `number` | Clone grammar state          |
-| `applySampler(handle, logits)`   | `void`   | Apply constraints to logits  |
-| `acceptSamplerToken(handle, id)` | `void`   | Advance parser state         |
-| `freeSamplerHandle(handle)`      | `void`   | Release grammar handle       |
+| Method                           | Returns  | Description                 |
+| -------------------------------- | -------- | --------------------------- |
+| `jsonSchemaToGrammar(schema)`    | `string` | Schema → GBNF               |
+| `createSampler(grammarStr)`      | `number` | Create grammar handle       |
+| `cloneSampler(handle)`           | `number` | Clone grammar state         |
+| `applySampler(handle, logits)`   | `void`   | Apply constraints to logits |
+| `acceptSamplerToken(handle, id)` | `void`   | Advance parser state        |
+| `freeSamplerHandle(handle)`      | `void`   | Release grammar handle      |
 
 ### Metrics
 
-| Method                             | Returns         | Description                              |
-| ---------------------------------- | --------------- | ---------------------------------------- |
-| `modelEntropy(base?, logits?)`     | `number`        | Distribution entropy (bits/nats)         |
-| `modelSurprisal(token, base?, logits?)` | `number`   | Token surprisal (supports captured logits) |
-| `createPerplexityTracker()`        | `TrackerHandle` | Create tracker (forkable)                |
-| `clonePerplexityTracker(handle)`   | `TrackerHandle` | Clone tracker state                      |
-| `addSurprisal(handle, value)`      | `void`          | Add to tracker                           |
-| `getPerplexity(handle)`            | `number`        | Get current PPL                          |
-| `freePerplexityTracker(handle)`    | `void`          | Release tracker                          |
+| Method                                  | Returns         | Description                                |
+| --------------------------------------- | --------------- | ------------------------------------------ |
+| `modelEntropy(base?, logits?)`          | `number`        | Distribution entropy (bits/nats)           |
+| `modelSurprisal(token, base?, logits?)` | `number`        | Token surprisal (supports captured logits) |
+| `createPerplexityTracker()`             | `TrackerHandle` | Create tracker (forkable)                  |
+| `clonePerplexityTracker(handle)`        | `TrackerHandle` | Clone tracker state                        |
+| `addSurprisal(handle, value)`           | `void`          | Add to tracker                             |
+| `getPerplexity(handle)`                 | `number`        | Get current PPL                            |
+| `freePerplexityTracker(handle)`         | `void`          | Release tracker                            |
 
 ### Embeddings
 
