@@ -200,28 +200,38 @@ jobs:
             console.log('✓ Platform package loaded successfully');
             console.log('  Exports:', Object.keys(addon));
           "
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run API tests (Windows)
         if: runner.os == 'Windows' && matrix.cross_compile != true
         shell: pwsh
         run: npm run test:api
         timeout-minutes: 5
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run API tests (Unix)
         if: runner.os != 'Windows' && matrix.cross_compile != true
         run: npm run test:api
         timeout-minutes: 5
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run E2E tests (Windows)
         if: runner.os == 'Windows' && matrix.cross_compile != true
         shell: pwsh
         run: npm run test:e2e
         timeout-minutes: 5
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
 
       - name: Run E2E tests (Unix)
         if: runner.os != 'Windows' && matrix.cross_compile != true
         run: npm run test:e2e
         timeout-minutes: 5
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
 
       # Upload package artifact for publish job
       - name: Upload platform package artifact
@@ -237,6 +247,9 @@ jobs:
     runs-on: ubuntu-latest
     # Only run if ALL build-and-test jobs succeeded
     if: success()
+    permissions:
+      contents: read
+      id-token: write  # Required for npm provenance
 
     steps:
       - name: Checkout code
@@ -290,7 +303,7 @@ jobs:
             echo ""
             echo "Publishing @lloyal-labs/lloyal.node-${pkg_name}..."
             cd "$pkg_dir"
-            npm publish --access public --tag "$NPM_TAG"
+            npm publish --access public --tag "$NPM_TAG" --provenance
             cd - > /dev/null
           done
         env:
@@ -305,13 +318,13 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --tag latest --access public  # TODO: revert to "alpha" once released
+            npm publish --tag latest --access public --provenance  # TODO: revert to "alpha" once released
           elif [[ "$VERSION" == *-beta* ]]; then
-            npm publish --tag beta --access public
+            npm publish --tag beta --access public --provenance
           elif [[ "$VERSION" == *-rc* ]]; then
-            npm publish --tag rc --access public
+            npm publish --tag rc --access public --provenance
           else
-            npm publish --access public
+            npm publish --access public --provenance
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
