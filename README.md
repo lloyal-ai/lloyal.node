@@ -1,11 +1,11 @@
 # lloyal.node
 
-Node.js bindings for [liblloyal](https://github.com/lloyal-ai/liblloyal)—the inference kernel that orchestrates llama.cpp in-process for agentic inference patterns.
+**Research-grade edge inference for Node.js**
 
-## Installation
+Inference with forkable state — KV cache, grammar, metrics all clone atomically. Entropy and surprisal mid-generation. Multi-sequence parallel exploration. The control surface llama.cpp exposes, in TypeScript.
 
 ```bash
-npm install lloyal.node
+npm install @lloyal-labs/lloyal.node
 ```
 
 Prebuilt binaries for 13 platforms:
@@ -19,291 +19,332 @@ Prebuilt binaries for 13 platforms:
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-Falls back to source build if your platform isn't covered.
+GPU selection happens at runtime, not install time. See [DISTRIBUTION.md](./docs/DISTRIBUTION.md) for details.
 
-### GPU Acceleration
+---
 
-GPU selection happens at **runtime**, not install time. This ensures automatic fallback if GPU drivers are unavailable:
+## Forkable Inference
 
-```javascript
-// Option 1: Environment variable
-// Set LLOYAL_GPU=cuda before running your app
+KV cache, grammar parser, and perplexity trackers all live behind handles. Handles clone atomically. This is the primitive that makes branching possible.
 
-// Option 2: Per-context selection (recommended)
-const ctx = await createContext(
-  { modelPath: './model.gguf', nCtx: 4096 },
-  { gpuVariant: 'cuda' }  // Falls back to CPU if CUDA unavailable
-);
-```
-
-Available variants: `'cuda'` (NVIDIA), `'vulkan'` (AMD/Intel/NVIDIA), or omit for CPU.
-
-See [DISTRIBUTION.md](./docs/DISTRIBUTION.md) for package details.
-
-## Quick Start
-
-Complete example with greedy sampling:
+Consider speculative decoding. You draft tokens speculatively, then need to fork at the draft boundary to explore continuations. Each fork carries independent state. When branches collapse, the rejected ones disappear cleanly.
 
 ```typescript
-import { createContext } from 'lloyal.node';
+import { createContext } from '@lloyal-labs/lloyal.node';
 
-async function generate(prompt: string, maxTokens = 100): Promise<string> {
-  const ctx = await createContext({
-    modelPath: './model.gguf',
-    nCtx: 2048,
-    nThreads: 4,
-  });
+const ctx = await createContext({ modelPath, nCtx: 4096, nSeqMax: 4 });
 
-  try {
-    const tokens = await ctx.tokenize(prompt);
-    await ctx.decode(tokens, 0);
+// Prefill prompt on seq 0
+const prompt = await ctx.tokenize(text);
+await ctx.decode(prompt, 0, 0);
 
-    const output: number[] = [];
-    let pos = tokens.length;
+// Draft 4 speculative tokens
+const drafts: number[] = [];
+let pos = prompt.length;
 
-    for (let i = 0; i < maxTokens; i++) {
-      const token = ctx.greedySample();
-      if (token < 0) break; // EOS
+for (let i = 0; i < 4; i++) {
+  const token = ctx.sample({ temperature: 0.0 });
+  drafts.push(token);
+  await ctx.decode([token], pos++, 0);
+}
 
-      output.push(token);
-      await ctx.decode([token], pos++);
+// Fork to seq 1 for main model pass
+ctx.kvSeqCopy(0, 1);
+
+// ... run main model on seq 1, find accepted prefix length ...
+
+// Collapse: keep seq 1, discard seq 0's speculative tail
+ctx.kvSeqKeep(1);
+```
+
+No state leaks. No manual cleanup. Fork, explore, collapse.
+
+---
+
+## Best-of-N Sampling
+
+Generate multiple completions. Pick the best. Simple strategy, surprisingly effective — but only if each completion is truly independent.
+
+Multi-sequence support lets you run N completions in parallel, each with its own KV cache state. Perplexity trackers clone atomically, so each branch accumulates its own quality score.
+
+```typescript
+const ctx = await createContext({ modelPath, nCtx: 4096, nSeqMax: 8 });
+
+const prompt = await ctx.tokenize(text);
+await ctx.decode(prompt, 0, 0);
+
+// Generate N independent completions
+const N = 4;
+const completions = await Promise.all(
+  Array.from({ length: N }, async (_, i) => {
+    const seqId = i + 1;
+    ctx.kvSeqCopy(0, seqId);  // Fork KV cache
+
+    const tracker = ctx.createPerplexityTracker();
+    const tokens: number[] = [];
+    let pos = prompt.length;
+
+    while (tokens.length < 100) {
+      const token = ctx.sample({ temperature: 0.9 });
+      if (ctx.isStopToken(token)) break;
+
+      const surprisal = ctx.modelSurprisal(token);
+      ctx.addSurprisal(tracker, surprisal);
+
+      tokens.push(token);
+      await ctx.decode([token], pos++, seqId);
     }
 
-    return ctx.detokenize(output);
-  } finally {
-    ctx.dispose();
+    const ppl = ctx.getPerplexity(tracker);
+    ctx.freePerplexityTracker(tracker);
+
+    return { seqId, tokens, ppl };
+  })
+);
+
+// Pick lowest perplexity
+const best = completions.reduce((a, b) => (a.ppl < b.ppl ? a : b));
+ctx.kvSeqKeep(best.seqId);
+
+console.log(`Best (PPL ${best.ppl.toFixed(2)}):`, await ctx.detokenize(best.tokens));
+```
+
+Four completions. Four independent KV states. Four independent perplexity scores. One winner.
+
+---
+
+## Context Window Dynamics
+
+Context windows have limits. Documents don't. `clearAndReseed()` enables infinite streaming via BlinkKV — clear the cache, re-decode sinks and tail at contiguous positions, continue. No attention surgery required.
+
+Perplexity tracking lets you measure quality as you stream. Does your eviction strategy degrade output? The instrumentation tells you.
+
+```typescript
+const nCtx = 512;
+const ctx = await createContext({ modelPath, nCtx });
+
+const allTokens = await ctx.tokenize(longDocument);
+const sinks = allTokens.slice(0, 4);  // First 4 tokens of document
+const tailSize = nCtx - sinks.length - 8;  // Leave headroom
+
+const tracker = ctx.createPerplexityTracker();
+let cachePos = 0;
+
+for (let t = 0; t < allTokens.length; t++) {
+  const token = allTokens[t];
+
+  // Measure surprisal before decoding
+  if (cachePos > 0) {
+    const surprisal = ctx.modelSurprisal(token);
+    ctx.addSurprisal(tracker, surprisal);
+  }
+
+  await ctx.decode([token], cachePos++, 0);
+
+  // Cache full? Reseed at boundary
+  if (cachePos >= nCtx) {
+    const tail = allTokens.slice(t - tailSize + 1, t + 1);
+    await ctx.clearAndReseed(sinks, tail);
+    cachePos = sinks.length + tail.length;
+
+    console.log(`Reseeded at token ${t}. PPL so far: ${ctx.getPerplexity(tracker)}`);
   }
 }
 
-const response = await generate('The capital of France is');
-console.log(response);
+console.log(`Final perplexity: ${ctx.getPerplexity(tracker)}`);
+ctx.freePerplexityTracker(tracker);
 ```
 
-## Test-Time Alignment
+This is how BlinkKV measured that position contiguity matters more than attention sinks — PPL 9.7 with proper reseeding vs 280 with naive eviction. The same primitives enable whatever you want to study.
 
-TTA is token-level test-time alignment by exposing logits so TypeScript can apply stateful policies/constraints to the full next-token distribution before sampling—no retraining. Enabling fusion of application state with sampling strategy at every token step. Instead of generating text and validating after, you enforce constraints _during_ generation.
+---
 
-This requires two things:
+## Uncertainty as Control Flow
 
-1. **Raw logits** — the probability distribution over all possible next tokens
-2. **TypeScript sampling** — so your app logic can modify probabilities before selection
+The model knows when it's guessing. Entropy measures how flat the distribution is. High entropy means the model sees many plausible continuations — it's uncertain. Low entropy means one token dominates — it's confident.
 
-lloyal.node provides the logits. [tsampler](https://github.com/lloyal-ai/tsampler) provides the sampling:
+Use this mid-generation to change behavior:
 
 ```typescript
-import { createContext } from 'lloyal.node';
-import {
-  sampleWithStrategy,
-  computeModelEntropy,
-  TokenHistoryTracker,
-  SamplerWorkspace,
-  Xoroshiro128Plus,
-} from '@lloyal/tsampler';
+const ctx = await createContext({ modelPath, nCtx: 4096 });
 
-const ctx = await createContext({ modelPath: './model.gguf' });
-const prng = new Xoroshiro128Plus(42); // Deterministic PRNG
-const tokenHistory = new TokenHistoryTracker(64); // For repetition penalties
-const workspace = new SamplerWorkspace(256); // Pre-allocated, zero-alloc hot path
+const prompt = await ctx.tokenize(text);
+await ctx.decode(prompt, 0, 0);
 
-const tokens = await ctx.tokenize(prompt);
-await ctx.decode(tokens, 0);
-
-let pos = tokens.length;
+let pos = prompt.length;
 const output: number[] = [];
 
-while (output.length < maxTokens) {
-  const logits = ctx.getLogits();
+while (output.length < 200) {
+  const entropy = ctx.modelEntropy('bits');
 
-  // === YOUR STEERING LOGIC HERE ===
-
-  // Enforce domain rules
-  if (currency === 'JPY') {
-    logits[DECIMAL_TOKEN] = -Infinity; // JPY has no decimal subdivision
+  if (entropy > 6.0) {
+    // Model is guessing — inject retrieved context
+    const retrieved = await retrieveRelevant(ctx.detokenize(output.slice(-50)));
+    const retrievedTokens = await ctx.tokenize(`\n[Context: ${retrieved}]\n`);
+    await ctx.decode(retrievedTokens, pos, 0);
+    pos += retrievedTokens.length;
+    continue;
   }
 
-  // Adapt to model confidence
-  const entropy = computeModelEntropy(logits);
-  const params =
-    entropy < 2.0
-      ? { topK: 256, temperature: 1.5 } // Low confidence → explore more
-      : { topK: 40, temperature: 0.8 }; // High confidence → stay focused
+  if (entropy < 1.0) {
+    // Distribution collapsed — might be stuck in a loop
+    const token = ctx.sample({ temperature: 1.2 });
+    output.push(token);
+    await ctx.decode([token], pos++, 0);
+    continue;
+  }
 
-  // === END STEERING LOGIC ===
+  // Normal sampling
+  const token = ctx.sample({ temperature: 0.7 });
+  if (ctx.isStopToken(token)) break;
 
-  const token = sampleWithStrategy(logits, {
-    tokenHistory,
-    params,
-    workspace,
-    prng,
-  });
-
-  if (token < 0) break;
-
-  tokenHistory.accept(token);
   output.push(token);
-  await ctx.decode([token], pos++);
+  await ctx.decode([token], pos++, 0);
 }
 ```
 
-### Domain Constraints
+Entropy isn't just a metric — it's a control signal. Retrieval triggers, temperature adaptation, early stopping. The model tells you what it needs.
+
+---
+
+## Persistent Sampling State
+
+Repeat penalties need history. The sampler must know what tokens appeared earlier to penalize their recurrence. But when you reseed the KV cache during infinite streaming, that history could vanish.
+
+The sampler chain persists independently. It tracks all accepted tokens across the entire generation — before and after `clearAndReseed()`. Penalties stay coherent even as the KV cache resets.
 
 ```typescript
-// Financial: JPY has no decimal subdivision
-if (currency === 'JPY' && parsingAmount) {
-  logits[DECIMAL_TOKEN] = -Infinity;
-  DIGIT_TOKENS.forEach((id) => (logits[id] += 2.0));
-}
+const ctx = await createContext({ modelPath, nCtx: 2048 });
 
-// Legal: Boost required terminology
-if (contractType === 'NDA') {
-  CONFIDENTIALITY_TOKENS.forEach((id) => (logits[id] += 5.0));
-}
+const prompt = await ctx.tokenize(text);
+await ctx.decode(prompt, 0, 0);
 
-// Medical: Enforce terminology based on actual lab values
-if (glucoseLevel > normalMax) {
-  ELEVATED_TOKENS.forEach((id) => (logits[id] += 10.0));
-  NORMAL_TOKENS.forEach((id) => (logits[id] = -Infinity));
-}
-```
+// First generation phase
+let pos = prompt.length;
+const allTokens: number[] = [];
 
-### Quality Gates
-
-```typescript
-import { computeModelSurprisal, RollingPerplexity } from '@lloyal/tsampler';
-
-const ppl = new RollingPerplexity();
-
-while (generating) {
-  const logits = ctx.getLogits();
-  const token = sampleWithStrategy(logits, {
-    tokenHistory,
-    params,
-    workspace,
-    prng,
+while (allTokens.length < 500) {
+  // Sampler chain persists penalty history across all calls
+  const token = ctx.sample({
+    temperature: 0.8,
+    repeatPenalty: 1.1,
+    repeatLastN: 256,  // Look back 256 tokens in penalty history
   });
 
-  const surprisal = computeModelSurprisal(logits, token);
-  ppl.addSurprisal(surprisal);
+  if (ctx.isStopToken(token)) break;
+  allTokens.push(token);
+  await ctx.decode([token], pos++, 0);
 
-  if (ppl.ppl() > 50) {
-    // Generation quality degrading — options:
-    // 1. Trigger RAG retrieval for more context
-    // 2. Prune KV cache (evict stale context)
-    // 3. Early stop and retry with different prompt
+  // KV cache filled? Reseed.
+  if (pos >= 2000) {
+    const sinks = prompt.slice(0, 4);
+    const tail = allTokens.slice(-256);
+    await ctx.clearAndReseed(sinks, tail);
+    pos = sinks.length + tail.length;
+
+    // Penalty history survives — sampler still knows about
+    // ALL tokens generated, not just the 256 in the tail
+  }
+}
+```
+
+The penalty sampler accumulates history via `accept()` internally. Parameters rebuild the chain only when they change — same temperature and penalties reuse the existing state. Different parameters trigger a rebuild, but new chains inherit no history.
+
+This is why repetition penalties work across context boundaries. The KV cache knows attention. The sampler knows history. Both are necessary for quality.
+
+---
+
+## Grammar-Constrained Branching
+
+JSON schema constraints narrow the token space. But different valid continuations exist — `{"name":` could continue with any string. When you're exploring alternatives, the grammar state needs to fork with the KV cache.
+
+Handle-based grammar samplers make this possible:
+
+```typescript
+const ctx = await createContext({ modelPath, nCtx: 2048, nSeqMax: 4 });
+
+const schema = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    age: { type: 'number' },
+    city: { enum: ['NYC', 'LA', 'Chicago'] },
+  },
+  required: ['name', 'age', 'city'],
+};
+
+const grammar = ctx.jsonSchemaToGrammar(JSON.stringify(schema));
+const grammarHandle = ctx.createSampler(grammar);
+
+const prompt = await ctx.tokenize('Generate a person:\n');
+await ctx.decode(prompt, 0, 0);
+
+let pos = prompt.length;
+const partial: number[] = [];
+
+// Generate until we approach a choice point
+while (partial.length < 30) {
+  const buffer = ctx.getTokenScores();
+  ctx.applySampler(grammarHandle, buffer);
+
+  const token = ctx.sample({ temperature: 0.7 });
+  ctx.acceptSamplerToken(grammarHandle, token);
+  partial.push(token);
+  await ctx.decode([token], pos++, 0);
+
+  if (ctx.isStopToken(token)) break;
+}
+
+// Fork: save state and explore different continuations
+const kvSnapshot = await ctx.kvCacheSave(0);
+const grammarClone = ctx.cloneSampler(grammarHandle);
+
+for (const city of ['NYC', 'LA', 'Chicago']) {
+  // Restore to decision point
+  await ctx.kvCacheLoad(0, kvSnapshot);
+  const branchGrammar = ctx.cloneSampler(grammarClone);
+
+  const cityTokens = await ctx.tokenize(`"${city}"`);
+  let branchPos = pos;
+
+  for (const t of cityTokens) {
+    ctx.acceptSamplerToken(branchGrammar, t);
+    await ctx.decode([t], branchPos++, 0);
   }
 
-  // ...
-}
-```
+  const text = await ctx.detokenize([...partial, ...cityTokens]);
+  console.log(`Branch ${city}:`, text);
 
-### Entropy-Adaptive Retrieval
-
-```typescript
-import { computeModelEntropy } from '@lloyal/tsampler';
-
-while (generating) {
-  const logits = ctx.getLogits();
-  const entropy = computeModelEntropy(logits);
-
-  if (entropy > 5.0) {
-    // Model is uncertain — retrieve relevant context
-    const context = await rag.retrieve(currentQuery);
-    await injectContext(ctx, context);
-    continue; // Re-evaluate with new context
-  }
-
-  const token = sampleWithStrategy(logits, {
-    tokenHistory,
-    params,
-    workspace,
-    prng,
-  });
-  // ...
-}
-```
-
-## Why TypeScript Sampling?
-
-|                         | Native C++   | TypeScript (tsampler) |
-| ----------------------- | ------------ | --------------------- |
-| Speed                   | ~0.3ms/token | ~3-5ms/token          |
-| Overhead vs 50ms decode | —            | ~6-10%                |
-| Logit steering          | ❌           | ✅                    |
-| Adaptive strategies     | ❌           | ✅                    |
-| OTA updates             | Rebuild app  | Ship new JS           |
-| Debugging               | printf       | Full inspect          |
-
-The overhead is imperceptible. A 50ms decode dominates; 3ms sampling is noise.
-
-### tsampler Capabilities
-
-[tsampler](https://github.com/lloyal-ai/tsampler) provides llama.cpp sampling parity in pure TypeScript:
-
-**Sampling methods:** greedy, top-k, top-p, min-p, typical-p, top-n-sigma, temperature, mirostat v1/v2
-
-**Penalties:** repetition, frequency, presence (exact llama.cpp formulas)
-
-**Infrastructure:**
-
-- `Xoroshiro128Plus` — deterministic PRNG, reproducible generations
-- `TokenHistoryTracker` — sliding window for penalty calculations
-- `SamplerWorkspace` — pre-allocated buffers, zero-alloc hot path
-- `computeModelEntropy()` — Shannon entropy in nats
-- `computeModelSurprisal()` — per-token surprisal
-- `RollingPerplexity` — streaming perplexity tracking
-
-### Native References
-
-lloyal.node includes native C++ implementations for validation:
-
-```typescript
-// TypeScript implementation
-const tsEntropy = computeModelEntropy(logits);
-
-// Native reference (C++)
-const nativeEntropy = ctx.computeEntropy();
-
-// Should match within float precision
-console.assert(Math.abs(tsEntropy - nativeEntropy) < 1e-5);
-```
-
-Available references:
-
-- `ctx.computeEntropy()` — Shannon entropy in nats
-- `ctx.greedySample()` — argmax token ID
-
-Build with confidence. Validate against native. Deploy TypeScript.
-
-## Embeddings
-
-lloyal.node supports embedding extraction with configurable pooling:
-
-```typescript
-import { createContext } from 'lloyal.node';
-
-const ctx = await createContext({
-  modelPath: './nomic-embed-text.gguf',
-  embeddings: true,
-  poolingType: 1, // 0=NONE, 1=MEAN, 2=CLS, 3=LAST
-});
-
-async function embed(text: string): Promise<Float32Array> {
-  const tokens = await ctx.tokenize(text);
-  await ctx.encode(tokens);
-
-  const embedding = ctx.getEmbeddings(true); // L2-normalized
-  await ctx.kvCacheClear(); // Reset for next text
-
-  return embedding;
+  ctx.freeSamplerHandle(branchGrammar);
 }
 
-const vec = await embed('Document to embed');
-console.log(`Dimension: ${ctx.getEmbeddingDimension()}`); // e.g., 768
+ctx.freeSamplerHandle(grammarHandle);
+ctx.freeSamplerHandle(grammarClone);
 ```
+
+Grammar narrows the space. Forking explores within that space. Both states travel together.
+
+---
+
+## Who This Is For
+
+You're implementing speculative decoding and need to fork KV state at the draft boundary, run multiple continuations, then collapse to the accepted prefix.
+
+You're building best-of-N sampling and need independent perplexity tracking per completion — each branch accumulates its own quality score.
+
+You're studying what happens inside the context window — how attention patterns shift when you evict tokens, whether sinks matter, what position encodings actually do. `clearAndReseed()`, `kvCacheRemove()`, per-token surprisal. The instrumentation is here.
+
+You're adding entropy-triggered retrieval and need `modelEntropy()` mid-generation to detect when the model is guessing.
+
+You're constraining output to a JSON schema and need the grammar state to fork with KV — because each branch explores different valid completions.
+
+You're streaming beyond the context window with `clearAndReseed()` and need repeat penalties to remember what happened before the reseed — because the sampler maintains its own history.
+
+You need the decode loop, not a completion endpoint.
+
+---
 
 ## API Reference
-
-**📖 [Full API Documentation](https://lloyal-ai.github.io/lloyal.node)** - Complete reference with examples and type definitions
 
 ### Context Creation
 
@@ -312,55 +353,119 @@ const ctx = await createContext({
   modelPath: string,       // Path to .gguf file (required)
   nCtx?: number,           // Context size (default: 2048)
   nThreads?: number,       // CPU threads (default: 4)
-  nGpuLayers?: number,     // Layers to offload to GPU (default: 0)
   embeddings?: boolean,    // Enable embedding mode (default: false)
-  poolingType?: number     // 0=NONE, 1=MEAN, 2=CLS, 3=LAST (default: 0)
+  poolingType?: number,    // 0=NONE, 1=MEAN, 2=CLS, 3=LAST
+  nSeqMax?: number,        // Max parallel sequences (default: 1)
 });
 ```
 
-### Inference
+### Core Methods
 
-| Method                     | Returns             | Description                                           |
-| -------------------------- | ------------------- | ----------------------------------------------------- |
-| `tokenize(text)`           | `Promise<number[]>` | Text → token IDs                                      |
-| `detokenize(tokens)`       | `Promise<string>`   | Token IDs → text                                      |
-| `decode(tokens, position)` | `Promise<void>`     | Forward pass, populates KV cache                      |
-| `getLogits()`              | `Float32Array`      | Vocabulary-sized probability distribution (zero-copy) |
+| Method                        | Returns             | Description                       |
+| ----------------------------- | ------------------- | --------------------------------- |
+| `tokenize(text)`              | `Promise<number[]>` | Text → token IDs                  |
+| `detokenize(tokens)`          | `Promise<string>`   | Token IDs → text                  |
+| `tokenToText(token)`          | `string`            | Single token → text (streaming)   |
+| `decode(tokens, pos, seqId?)` | `Promise<void>`     | Forward pass, updates KV cache    |
+| `sample(params?)`             | `number`            | Sample next token                 |
+| `isStopToken(token)`          | `boolean`           | Check for EOS token               |
+| `getLogits()`                 | `Float32Array`      | Raw logits (zero-copy, read-only) |
+| `getTokenScores()`            | `Buffer`            | Token scores (zero-copy, mutable) |
 
-### Native References
+### KV Cache
 
-| Method             | Returns  | Description             |
-| ------------------ | -------- | ----------------------- |
-| `greedySample()`   | `number` | Argmax token ID         |
-| `computeEntropy()` | `number` | Shannon entropy in nats |
+| Method                             | Returns           | Description                    |
+| ---------------------------------- | ----------------- | ------------------------------ |
+| `kvCacheSize(seqId?)`              | `number`          | Tokens in cache                |
+| `kvCacheClear()`                   | `Promise<void>`   | Clear all sequences            |
+| `kvCacheRemove(seqId, start, end)` | `Promise<void>`   | Remove token range             |
+| `kvCacheSave(seqId?)`              | `Promise<Buffer>` | Snapshot state                 |
+| `kvCacheLoad(seqId, state)`        | `Promise<void>`   | Restore state                  |
+| `kvSeqCopy(src, dst)`              | `void`            | Copy sequence (tag copy, O(1)) |
+| `kvSeqKeep(seqId)`                 | `void`            | Keep only one sequence         |
+| `clearAndReseed(sinks, tail)`      | `Promise<void>`   | BlinkKV pattern                |
+
+### Grammar (Handle-Based, Forkable)
+
+| Method                           | Returns  | Description                  |
+| -------------------------------- | -------- | ---------------------------- |
+| `jsonSchemaToGrammar(schema)`    | `string` | Schema → GBNF                |
+| `createSampler(grammarStr)`      | `number` | Create grammar handle        |
+| `cloneSampler(handle)`           | `number` | Clone grammar state          |
+| `applySampler(handle, buffer)`   | `void`   | Apply constraints to logits  |
+| `acceptSamplerToken(handle, id)` | `void`   | Advance parser state         |
+| `freeSamplerHandle(handle)`      | `void`   | Release grammar handle       |
+
+### Grammar (Internal State)
+
+| Method                  | Returns | Description                     |
+| ----------------------- | ------- | ------------------------------- |
+| `initGrammar(gbnf)`     | `void`  | Initialize internal parser      |
+| `applyGrammar(buffer)`  | `void`  | Apply constraints to logits     |
+| `acceptToken(token)`    | `void`  | Advance internal parser         |
+| `resetGrammar()`        | `void`  | Reset to initial state          |
+| `freeGrammar()`         | `void`  | Release internal grammar        |
+
+### Metrics
+
+| Method                           | Returns         | Description                      |
+| -------------------------------- | --------------- | -------------------------------- |
+| `modelEntropy(base?)`            | `number`        | Distribution entropy (bits/nats) |
+| `modelSurprisal(token, base?)`   | `number`        | Token surprisal                  |
+| `createPerplexityTracker()`      | `TrackerHandle` | Create tracker (forkable)        |
+| `clonePerplexityTracker(handle)` | `TrackerHandle` | Clone tracker state              |
+| `addSurprisal(handle, value)`    | `void`          | Add to tracker                   |
+| `getPerplexity(handle)`          | `number`        | Get current PPL                  |
+| `freePerplexityTracker(handle)`  | `void`          | Release tracker                  |
 
 ### Embeddings
 
-| Method                      | Returns         | Description                                |
-| --------------------------- | --------------- | ------------------------------------------ |
-| `encode(tokens)`            | `Promise<void>` | Forward pass for embedding extraction      |
-| `getEmbeddings(normalize?)` | `Float32Array`  | Embedding vector, optionally L2-normalized |
-| `getEmbeddingDimension()`   | `number`        | Vector dimension                           |
-| `kvCacheClear()`            | `Promise<void>` | Clear KV cache between texts               |
+| Method                      | Returns         | Description                 |
+| --------------------------- | --------------- | --------------------------- |
+| `encode(tokens)`            | `Promise<void>` | Forward pass for embeddings |
+| `getEmbeddings(normalize?)` | `Float32Array`  | Extract embedding vector    |
+| `getEmbeddingDimension()`   | `number`        | Vector dimension            |
 
 ### Lifecycle
 
-| Method      | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| `dispose()` | Free native resources. **Required** — call when done. |
+| Method      | Description                          |
+| ----------- | ------------------------------------ |
+| `dispose()` | Free native resources (**required**) |
 
-## LLoyal Ecosystem
+---
 
-| Package                                                 | Language     | What it does                                                                                                                                                                                             |
-| ------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [liblloyal](https://github.com/lloyal-ai/liblloyal)     | C++          | Inference kernel. Orchestrates llama.cpp with composable primitives: tokenization, decoding, KV cache, sampling chains, metrics, embeddings. Plus `branch.hpp` / `lease.hpp` for state forking and SMMA. |
-| **lloyal.node**                                         | N-API        | Node.js bindings. Zero-copy logits, native references for validation.                                                                                                                                    |
-| [tsampler](https://github.com/lloyal-ai/tsampler)       | TypeScript   | Sampling library with llama.cpp parity. All filters, penalties, entropy metrics. Plugin for lloyal.node—consumes logits, returns tokens.                                                                 |
-| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native | Mobile bindings via Nitro Modules. Same liblloyal primitives on iOS/Android.                                                                                                                             |
+## Examples
+
+Working examples in [`examples/`](./examples/):
+
+| Example | Description |
+|---------|-------------|
+| [`chat/`](./examples/chat/) | Interactive chat with streaming output |
+| [`embed/`](./examples/embed/) | Text embeddings |
+| [`speculative/`](./examples/speculative/) | Forkable KV state for speculative decoding |
+| [`best-of-n/`](./examples/best-of-n/) | Parallel completions with perplexity selection |
+| [`streaming/`](./examples/streaming/) | Infinite context via BlinkKV |
+| [`entropy/`](./examples/entropy/) | Entropy-triggered control flow |
+| [`grammar/`](./examples/grammar/) | JSON schema constraints with forkable grammar state |
+
+```bash
+node examples/chat/chat.mjs /path/to/model.gguf
+```
+
+---
+
+## Ecosystem
+
+| Package                                                 | Runtime      | Description                       |
+| ------------------------------------------------------- | ------------ | --------------------------------- |
+| [liblloyal](https://github.com/lloyal-ai/liblloyal)     | C++          | Header-only inference kernel      |
+| **lloyal.node**                                         | Node.js      | This package                      |
+| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native | Mobile bindings via Nitro Modules |
+| [tsampler](https://github.com/lloyal-ai/tsampler)       | TypeScript   | Reference sampler implementation  |
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, build instructions, and release process.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and release process.
 
 ## License
 

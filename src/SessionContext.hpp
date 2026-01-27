@@ -6,11 +6,49 @@
 #include <llama/llama.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace liblloyal_node {
+
+/**
+ * Sampling parameters adapter for liblloyal compatibility
+ *
+ * liblloyal expects snake_case parameter names (top_k, penalty_repeat, etc.)
+ * This struct satisfies liblloyal's SamplingParamsLike concept.
+ */
+struct LloyalSamplingParams {
+  std::optional<float> temperature;
+  std::optional<int32_t> top_k;
+  std::optional<float> top_p;
+  std::optional<float> typical_p;
+  std::optional<float> min_p;
+  std::optional<float> penalty_repeat;
+  std::optional<float> penalty_freq;
+  std::optional<float> penalty_present;
+  std::optional<int32_t> penalty_last_n;
+  std::optional<uint32_t> seed;
+
+  // Equality operator for detecting param changes
+  bool operator==(const LloyalSamplingParams& other) const {
+    return temperature == other.temperature &&
+           top_k == other.top_k &&
+           top_p == other.top_p &&
+           typical_p == other.typical_p &&
+           min_p == other.min_p &&
+           penalty_repeat == other.penalty_repeat &&
+           penalty_freq == other.penalty_freq &&
+           penalty_present == other.penalty_present &&
+           penalty_last_n == other.penalty_last_n &&
+           seed == other.seed;
+  }
+
+  bool operator!=(const LloyalSamplingParams& other) const {
+    return !(*this == other);
+  }
+};
 
 /**
  * Thin N-API wrapper over liblloyal
@@ -338,6 +376,13 @@ private:
   // Pattern matches HybridSessionContext.hpp:197-200
   llama_sampler* _grammarSampler = nullptr;
   std::string _currentGrammar;  // Track current grammar string to avoid re-initialization
+
+  // Persistent sampling chain (for repeat penalty tracking across tokens)
+  // Pattern from branch.hpp: create once via sampler::create_chain(), reuse across samples.
+  // Penalty sampler's history is updated via sampler::accept() after each sample.
+  // This enables proper repeat penalty tracking across long generations and clearAndReseed().
+  llama_sampler* _samplerChain = nullptr;
+  LloyalSamplingParams _samplerParams;  // Track current params to detect changes
 
   // ===== HANDLE-BASED GRAMMAR =====
   std::unordered_map<int32_t, llama_sampler*> _samplerHandles;

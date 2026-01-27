@@ -18,24 +18,8 @@ namespace liblloyal_node {
 
 // ===== ADAPTER FOR LIBLLOYAL COMPATIBILITY =====
 //
-// liblloyal expects old snake_case parameter names (top_k, penalty_repeat, etc.)
-// but our new API uses camelCase and nested groups (topK, penalties.repeat, etc.)
-//
-// This adapter struct satisfies liblloyal's SamplingParamsLike concept
-// while allowing us to use the new developer-friendly API surface.
-// Pattern matches HybridSessionContext.cpp:18-65
-struct LloyalSamplingParams {
-  std::optional<float> temperature;
-  std::optional<int32_t> top_k;
-  std::optional<float> top_p;
-  std::optional<float> typical_p;
-  std::optional<float> min_p;
-  std::optional<float> penalty_repeat;
-  std::optional<float> penalty_freq;
-  std::optional<float> penalty_present;
-  std::optional<int32_t> penalty_last_n;
-  std::optional<uint32_t> seed;
-};
+// LloyalSamplingParams is now defined in SessionContext.hpp
+// This function converts JS object params to that structure.
 
 // Convert JS object params → liblloyal-compatible structure
 // Currently supports basic parameters (temperature, topK, topP, minP, seed)
@@ -687,6 +671,12 @@ SessionContext::~SessionContext() {
     }
     _perplexityHandles.clear();
 
+    // Free persistent sampler chain (pattern from branch.hpp)
+    if (_samplerChain) {
+      lloyal::sampler::free_chain(_samplerChain);
+      _samplerChain = nullptr;
+    }
+
     // Free legacy global grammar sampler (pattern matches HybridSessionContext.cpp:72)
     if (_grammarSampler) {
       llama_sampler_free(_grammarSampler);
@@ -1174,23 +1164,63 @@ Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
 
   llama_token next_token;
 
-  // Use greedy if no params, otherwise use full sampling from liblloyal
-  // Pattern matches HybridSessionContext.cpp:160-192
+  // Use greedy if no params, otherwise use persistent sampler chain
+  // Pattern from branch.hpp: create chain once, reuse across samples, call accept() after
   if (info.Length() == 0 || !info[0].IsObject()) {
-    // No params - use greedy sampling with model overload
+    // No params - use greedy sampling (stateless, no chain needed)
     next_token = lloyal::sampler::greedy(_context, _model.get());
   } else {
     // Use adapter to convert JS params → liblloyal-compatible structure
     LloyalSamplingParams params = adaptSamplingParamsFromJS(info[0].As<Napi::Object>());
 
-    // Use liblloyal sample_with_params with model overload
-    // Note: Advanced params (mirostat, dry, xtc) not yet supported in liblloyal
-    next_token = lloyal::sampler::sample_with_params(_context, _model.get(), params, _grammarSampler);
+    // Create or rebuild sampler chain if params changed
+    // Pattern from branch.hpp: persistent chain enables repeat penalty tracking
+    if (!_samplerChain || params != _samplerParams) {
+      if (_samplerChain) {
+        lloyal::sampler::free_chain(_samplerChain);
+      }
+      _samplerChain = lloyal::sampler::create_chain(params);
+      _samplerParams = params;
+    }
+
+    // Get logits and build candidate array (pattern from branch.hpp::sample)
+    const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
+    float* logits = lloyal::logits::get(_context, -1);
+
+    std::vector<llama_token_data> candidates(n_vocab);
+    for (int i = 0; i < n_vocab; i++) {
+      candidates[i] = llama_token_data{static_cast<llama_token>(i), logits[i], 0.0f};
+    }
+
+    llama_token_data_array cur_p = {
+      candidates.data(),
+      static_cast<size_t>(n_vocab),
+      -1,    // selected
+      false  // sorted
+    };
+
+    // Apply grammar first if present (pattern from branch.hpp)
+    if (_grammarSampler) {
+      llama_sampler_apply(_grammarSampler, &cur_p);
+    }
+
+    // Apply persistent sampler chain (includes penalties, filters, temp, dist)
+    lloyal::sampler::apply(_samplerChain, &cur_p);
+
+    if (cur_p.selected == -1) {
+      throw Napi::Error::New(env, "Sampling failed - no token selected");
+    }
+
+    next_token = cur_p.data[cur_p.selected].id;
+
+    // Update penalty history in persistent chain (KEY CHANGE from old stateless approach)
+    // This enables repeat penalty to track ALL tokens across the generation,
+    // not just what's visible in the current KV cache window after clearAndReseed()
+    lloyal::sampler::accept(_samplerChain, next_token);
   }
 
-  // NOTE: Auto-accept removed to support two-phase sampling
-  // Caller must explicitly call acceptToken() or acceptSamplerToken() after sampling
-  // This enables separation between token generation and grammar state updates
+  // NOTE: Grammar accept is still caller's responsibility via acceptToken()
+  // This enables separation between sampling and grammar state updates
 
   return Napi::Number::New(env, static_cast<double>(next_token));
 }
@@ -1215,6 +1245,12 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
       lloyal::metrics::free_perplexity(pplHandle);
     }
     _perplexityHandles.clear();
+
+    // Free persistent sampler chain (pattern from branch.hpp)
+    if (_samplerChain) {
+      lloyal::sampler::free_chain(_samplerChain);
+      _samplerChain = nullptr;
+    }
 
     // Free legacy global grammar sampler
     if (_grammarSampler) {
