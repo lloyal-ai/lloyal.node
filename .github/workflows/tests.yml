@@ -154,12 +154,6 @@ jobs:
             exit 1
           fi
 
-          # Verify scripts/install.js is included
-          if ! grep -q "package/scripts/install.js" package-contents.txt; then
-            echo "❌ ERROR: scripts/install.js not in package!"
-            exit 1
-          fi
-
           # Verify submodules are NOT included (they're huge)
           if grep -q "package/llama.cpp/" package-contents.txt; then
             echo "❌ ERROR: llama.cpp/ should not be in package!"

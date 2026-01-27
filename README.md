@@ -21,11 +21,22 @@ Prebuilt binaries for 13 platforms:
 
 Falls back to source build if your platform isn't covered.
 
-```bash
-LLOYAL_GPU=cuda npm install    # NVIDIA
-LLOYAL_GPU=vulkan npm install  # AMD/Intel
-LLOYAL_GPU=cpu npm install     # Force CPU
+### GPU Acceleration
+
+GPU selection happens at **runtime**, not install time. This ensures automatic fallback if GPU drivers are unavailable:
+
+```javascript
+// Option 1: Environment variable
+// Set LLOYAL_GPU=cuda before running your app
+
+// Option 2: Per-context selection (recommended)
+const ctx = await createContext(
+  { modelPath: './model.gguf', nCtx: 4096 },
+  { gpuVariant: 'cuda' }  // Falls back to CPU if CUDA unavailable
+);
 ```
+
+Available variants: `'cuda'` (NVIDIA), `'vulkan'` (AMD/Intel/NVIDIA), or omit for CPU.
 
 See [DISTRIBUTION.md](./docs/DISTRIBUTION.md) for package details.
 

@@ -21,8 +21,9 @@ console.log('=== liblloyal-node Integration Test ===\n');
 console.log(`Model: ${MODEL_PATH}`);
 console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(2)} MB\n`);
 
-// Load addon
-const addon = require('../build/Release/lloyal.node');
+// Load addon via lib (uses runtime loading with fallback)
+const { loadBinary } = require('..');
+const addon = loadBinary();
 
 async function runTests() {
   let ctx = null;

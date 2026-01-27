@@ -10,7 +10,6 @@
   },
   "scripts": {
     "download-models": "bash scripts/download-test-models.sh",
-    "install": "node scripts/install.js",
     "build": "node scripts/build.js",
     "build:debug": "cmake-js compile --debug",
     "rebuild": "cmake-js rebuild",
@@ -43,8 +42,7 @@
   },
   "homepage": "https://github.com/lloyal-ai/lloyal.node#readme",
   "dependencies": {
-    "node-addon-api": "^8.5.0",
-    "node-gyp-build": "^4.8.4"
+    "node-addon-api": "^8.5.0"
   },
   "devDependencies": {
     "cmake-js": "^7.4.0",

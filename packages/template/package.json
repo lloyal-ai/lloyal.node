@@ -2,7 +2,7 @@
   "name": "@lloyal-labs/lloyal.node-PLATFORM",
   "version": "0.0.0",
   "description": "Lloyal native binary for PLATFORM",
-  "main": "index.js",
+  "main": "bin/lloyal.node",
   "os": [
     "OS_NAME"
   ],
@@ -10,8 +10,7 @@
     "ARCH"
   ],
   "files": [
-    "bin/",
-    "index.js"
+    "bin/"
   ],
   "repository": {
     "type": "git",

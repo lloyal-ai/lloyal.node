@@ -108,52 +108,31 @@ if (osName === 'darwin') {
 // Create package.json from template
 console.log('\nGenerating package.json...');
 const mainPackageJson = require(path.join(ROOT, 'package.json'));
-const templatePath = path.join(ROOT, 'packages', 'template', 'package.json');
 
-let pkgJson;
-if (fs.existsSync(templatePath)) {
-  pkgJson = require(templatePath);
-} else {
-  // Fallback template if file doesn't exist yet
-  pkgJson = {
-    name: '@lloyal-labs/lloyal.node-PLATFORM',
-    version: '0.0.0',
-    description: 'Lloyal native binary for PLATFORM',
-    main: 'index.js',
-    files: ['bin/', 'index.js'],
-    repository: {
-      type: 'git',
-      url: 'git+https://github.com/lloyal-ai/lloyal.node.git'
-    },
-    license: 'Apache-2.0'
-  };
-}
-
-// Update with actual values
-pkgJson.name = `@lloyal-labs/lloyal.node-${packageName}`;
-pkgJson.version = mainPackageJson.version;
-pkgJson.description = `Lloyal native binary for ${packageName}`;
-pkgJson.os = [osName];
-pkgJson.cpu = [arch];
+// Platform package exports the binary directly (no index.js wrapper)
+// This enables runtime dynamic require with automatic fallback:
+//   require('@lloyal-labs/lloyal.node-linux-x64') → bin/lloyal.node
+const pkgJson = {
+  name: `@lloyal-labs/lloyal.node-${packageName}`,
+  version: mainPackageJson.version,
+  description: `Lloyal native binary for ${packageName}`,
+  main: 'bin/lloyal.node',
+  os: [osName],
+  cpu: [arch],
+  files: ['bin/'],
+  repository: {
+    type: 'git',
+    url: 'git+https://github.com/lloyal-ai/lloyal.node.git'
+  },
+  author: 'lloyal.ai',
+  license: 'Apache-2.0'
+};
 
 fs.writeFileSync(
   path.join(PKG_DIR, 'package.json'),
   JSON.stringify(pkgJson, null, 2) + '\n'
 );
-console.log(`  ✓ Created package.json`);
-
-// Create index.js
-console.log('\nGenerating index.js...');
-const indexJs = `// Platform-specific binary package for ${packageName}
-// This file resolves to the native binary in bin/
-
-const path = require('path');
-
-module.exports = path.join(__dirname, 'bin', 'lloyal.node');
-`;
-
-fs.writeFileSync(path.join(PKG_DIR, 'index.js'), indexJs);
-console.log(`  ✓ Created index.js`);
+console.log(`  ✓ Created package.json (main: bin/lloyal.node)`);
 
 // Summary
 console.log(`\n✅ Platform package created successfully!`);
