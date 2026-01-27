@@ -6,8 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build-natives:
-    name: Build ${{ matrix.package }}
+  build-and-test:
+    name: Build & Test ${{ matrix.package }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,7 +23,7 @@ jobs:
             gpu: cpu
             package: darwin-x64
 
-          # Linux
+          # Linux x64
           - os: ubuntu-22.04
             arch: x64
             gpu: cpu
@@ -36,6 +36,20 @@ jobs:
             arch: x64
             gpu: vulkan
             package: linux-x64-vulkan
+
+          # Linux ARM64 (native runners)
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: cpu
+            package: linux-arm64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: cuda
+            package: linux-arm64-cuda
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            gpu: vulkan
+            package: linux-arm64-vulkan
 
           # Windows x64
           - os: windows-2022
@@ -63,20 +77,6 @@ jobs:
             package: win32-arm64-vulkan
             cross_compile: true
 
-          # Linux ARM64 (native runners)
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            gpu: cpu
-            package: linux-arm64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            gpu: cuda
-            package: linux-arm64-cuda
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            gpu: vulkan
-            package: linux-arm64-vulkan
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      # Platform-specific dependencies
+      # Platform-specific build dependencies
       - name: Install build tools (Linux x64)
         if: runner.os == 'Linux' && matrix.arch == 'x64' && matrix.gpu == 'cpu'
         run: |
@@ -102,7 +102,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Provision CUDA toolkit
+      - name: Provision CUDA toolkit (Linux)
         if: matrix.gpu == 'cuda' && runner.os == 'Linux'
         uses: ./.github/actions/provision-cuda
         with:
@@ -119,7 +119,7 @@ jobs:
           cache: true
           stripdown: true
 
-      - name: Provision CUDA toolkit
+      - name: Provision CUDA toolkit (Windows)
         if: matrix.gpu == 'cuda' && runner.os == 'Windows'
         uses: ./.github/actions/provision-cuda
         with:
@@ -139,10 +139,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.cross_compile == true
         shell: pwsh
         run: |
-          # Install LLVM for cross-compilation
           choco install llvm ninja -y
-
-          # Set environment for clang cross-compilation
           echo "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -161,45 +158,85 @@ jobs:
         if: runner.os == 'Windows' && matrix.cross_compile == true
         shell: pwsh
         run: |
-          # Set up cross-compilation environment
           $env:CMAKE_GENERATOR = "Ninja"
           $env:CMAKE_TOOLCHAIN_FILE = "${{ github.workspace }}/cmake/arm64-cross.cmake"
-
-          # Build with cross-compilation
           npm run build
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
           ARCH: arm64
 
-      # Package
+      # Create platform package
       - name: Create platform package
         shell: bash
         run: |
-          PKG_NAME="${{ matrix.package }}"
-          node scripts/create-platform-package.js "$PKG_NAME" "${{ matrix.os }}" "${{ matrix.arch }}"
+          node scripts/create-platform-package.js "${{ matrix.package }}" "${{ matrix.os }}" "${{ matrix.arch }}"
 
-      # Publish
-      - name: Publish platform package
-        working-directory: packages/${{ matrix.package }}
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --access public --tag latest  # TODO: revert to --tag alpha once released
-          elif [[ "$VERSION" == *-beta* ]]; then
-            npm publish --access public --tag beta
-          elif [[ "$VERSION" == *-rc* ]]; then
-            npm publish --access public --tag rc
-          else
-            npm publish --access public
-          fi
+      # Test platform package (skip for cross-compiled packages - can't run ARM64 on x64)
+      - name: Cache test models
+        if: matrix.cross_compile != true
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: test-models-v1
+
+      - name: Download test models
+        if: matrix.cross_compile != true
+        run: bash scripts/download-test-models.sh
+
+      - name: Install platform package locally
+        if: matrix.cross_compile != true
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm install ./packages/${{ matrix.package }}
+          rm -rf build/Release
 
-  publish-main:
-    name: Publish main package
-    needs: build-natives
+      - name: Verify platform package loading
+        if: matrix.cross_compile != true
+        shell: bash
+        run: |
+          node -e "
+            const { loadBinary } = require('./lib');
+            const addon = loadBinary();
+            console.log('✓ Platform package loaded successfully');
+            console.log('  Exports:', Object.keys(addon));
+          "
+
+      - name: Run API tests (Windows)
+        if: runner.os == 'Windows' && matrix.cross_compile != true
+        shell: pwsh
+        run: npm run test:api
+        timeout-minutes: 5
+
+      - name: Run API tests (Unix)
+        if: runner.os != 'Windows' && matrix.cross_compile != true
+        run: npm run test:api
+        timeout-minutes: 5
+
+      - name: Run E2E tests (Windows)
+        if: runner.os == 'Windows' && matrix.cross_compile != true
+        shell: pwsh
+        run: npm run test:e2e
+        timeout-minutes: 5
+
+      - name: Run E2E tests (Unix)
+        if: runner.os != 'Windows' && matrix.cross_compile != true
+        run: npm run test:e2e
+        timeout-minutes: 5
+
+      # Upload package artifact for publish job
+      - name: Upload platform package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.package }}
+          path: packages/${{ matrix.package }}/
+          retention-days: 1
+
+  publish:
+    name: Publish all packages
+    needs: build-and-test
     runs-on: ubuntu-latest
+    # Only run if ALL build-and-test jobs succeeded
+    if: success()
 
     steps:
       - name: Checkout code
@@ -211,14 +248,64 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      # Download all platform package artifacts
+      - name: Download all platform packages
+        uses: actions/download-artifact@v4
+        with:
+          path: packages/
+          pattern: package-*
+          merge-multiple: false
+
+      - name: List downloaded packages
+        run: |
+          echo "Downloaded platform packages:"
+          ls -la packages/
+          for dir in packages/package-*/; do
+            echo "  - $(basename $dir): $(ls $dir)"
+          done
+
+      # Publish platform packages
+      - name: Publish platform packages
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "Publishing version: $VERSION"
+
+          # Determine npm tag based on version
+          if [[ "$VERSION" == *-alpha* ]]; then
+            NPM_TAG="latest"  # TODO: revert to "alpha" once released
+          elif [[ "$VERSION" == *-beta* ]]; then
+            NPM_TAG="beta"
+          elif [[ "$VERSION" == *-rc* ]]; then
+            NPM_TAG="rc"
+          else
+            NPM_TAG="latest"
+          fi
+
+          echo "Using npm tag: $NPM_TAG"
+
+          # Publish each platform package
+          for pkg_dir in packages/package-*/; do
+            pkg_name=$(basename "$pkg_dir" | sed 's/^package-//')
+            echo ""
+            echo "Publishing @lloyal-labs/lloyal.node-${pkg_name}..."
+            cd "$pkg_dir"
+            npm publish --access public --tag "$NPM_TAG"
+            cd - > /dev/null
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish main package
       - name: Sync package versions
         run: node scripts/sync-versions.js
 
       - name: Publish main package
+        shell: bash
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --tag latest --access public  # TODO: revert to --tag alpha once released
+            npm publish --tag latest --access public  # TODO: revert to "alpha" once released
           elif [[ "$VERSION" == *-beta* ]]; then
             npm publish --tag beta --access public
           elif [[ "$VERSION" == *-rc* ]]; then
@@ -226,6 +313,5 @@ jobs:
           else
             npm publish --access public
           fi
-        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
