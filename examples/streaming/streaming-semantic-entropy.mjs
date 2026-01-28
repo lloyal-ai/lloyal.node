@@ -18,6 +18,10 @@
  * 2. Cluster by semantic equivalence (bidirectional entailment)
  * 3. Compute entropy over cluster assignments
  * 4. Low entropy = semantic repetition = steer away
+ *
+ * Usage:
+ *   node streaming-semantic-entropy.mjs [model-path]          # Human-readable output
+ *   node streaming-semantic-entropy.mjs [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
@@ -36,6 +40,18 @@ const DEFAULT_MODEL = path.resolve(
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
 const NLI_MODEL = path.resolve(__dirname, '../../models/slim-nli.gguf');
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 /**
  * Semantic Entropy Calculator
@@ -229,8 +245,6 @@ async function generateKCandidates(ctx, K, maxTokens, prng, workspace) {
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
-
   // Parameters
   const nCtx = 2048;
   const K_SAMPLES = 4; // Number of candidate continuations to generate
@@ -238,18 +252,30 @@ async function main() {
   const CHECK_INTERVAL = 50; // Check semantic entropy every N tokens
   const ENTROPY_THRESHOLD = 0.5; // Below this = semantic repetition
 
-  console.log('='.repeat(60));
-  console.log('Semantic Entropy Repetition Detection');
-  console.log('='.repeat(60));
-  console.log(`Main model: ${path.basename(modelPath)}`);
-  console.log(`NLI sidecar: ${path.basename(NLI_MODEL)}`);
-  console.log(`K samples: ${K_SAMPLES}`);
-  console.log(`Check interval: ${CHECK_INTERVAL} tokens`);
-  console.log(`Entropy threshold: ${ENTROPY_THRESHOLD}`);
-  console.log('='.repeat(60));
+  if (!jsonlMode) {
+    console.log('='.repeat(60));
+    console.log('Semantic Entropy Repetition Detection');
+    console.log('='.repeat(60));
+    console.log(`Main model: ${path.basename(modelPath)}`);
+    console.log(`NLI sidecar: ${path.basename(NLI_MODEL)}`);
+    console.log(`K samples: ${K_SAMPLES}`);
+    console.log(`Check interval: ${CHECK_INTERVAL} tokens`);
+    console.log(`Entropy threshold: ${ENTROPY_THRESHOLD}`);
+    console.log('='.repeat(60));
+  }
+
+  emit('start', {
+    mainModel: path.basename(modelPath),
+    nliModel: path.basename(NLI_MODEL),
+    kSamples: K_SAMPLES,
+    checkInterval: CHECK_INTERVAL,
+    entropyThreshold: ENTROPY_THRESHOLD,
+  });
 
   // Load main generation context
-  console.log('\nLoading main model...');
+  if (!jsonlMode) {
+    console.log('\nLoading main model...');
+  }
   const mainCtx = await createContext({
     modelPath,
     nCtx: nCtx,
@@ -257,7 +283,9 @@ async function main() {
   });
 
   // Load NLI sidecar context
-  console.log('Loading NLI sidecar model...');
+  if (!jsonlMode) {
+    console.log('Loading NLI sidecar model...');
+  }
   const nliCtx = await createContext({
     modelPath: NLI_MODEL,
     contextSize: 512, // Small context for NLI queries
@@ -283,16 +311,19 @@ Begin:
 
 `;
 
-  console.log(`\nPrompt: "${prompt.slice(0, 80)}..."`);
+  if (!jsonlMode) {
+    console.log(`\nPrompt: "${prompt.slice(0, 80)}..."`);
+  }
 
   const promptTokens = await mainCtx.tokenize(prompt);
   await mainCtx.decode(promptTokens, 0, 0);
 
-  console.log(`\nPrompt tokens: ${promptTokens.length}`);
-  console.log('\nGenerating with semantic entropy monitoring...\n');
-  console.log('-'.repeat(60));
-
-  process.stdout.write(prompt);
+  if (!jsonlMode) {
+    console.log(`\nPrompt tokens: ${promptTokens.length}`);
+    console.log('\nGenerating with semantic entropy monitoring...\n');
+    console.log('-'.repeat(60));
+    process.stdout.write(prompt);
+  }
 
   let cachePos = promptTokens.length;
   let totalTokens = 0;
@@ -306,7 +337,9 @@ Begin:
     if (t > 0 && t % CHECK_INTERVAL === 0) {
       semanticChecks++;
 
-      console.log(`\n  [Semantic check ${semanticChecks} at token ${t}]`);
+      if (!jsonlMode) {
+        console.log(`\n  [Semantic check ${semanticChecks} at token ${t}]`);
+      }
 
       // Generate K candidate continuations
       const candidates = await generateKCandidates(
@@ -317,10 +350,12 @@ Begin:
         workspace
       );
 
-      console.log(`  Candidates:`);
-      for (let i = 0; i < candidates.length; i++) {
-        const preview = candidates[i].slice(0, 50).replace(/\n/g, ' ');
-        console.log(`    [${i}] "${preview}..."`);
+      if (!jsonlMode) {
+        console.log(`  Candidates:`);
+        for (let i = 0; i < candidates.length; i++) {
+          const preview = candidates[i].slice(0, 50).replace(/\n/g, ' ');
+          console.log(`    [${i}] "${preview}..."`);
+        }
       }
 
       // Cluster by semantic similarity
@@ -328,22 +363,35 @@ Begin:
       const { entropy, numClusters, clusterSizes } =
         semanticCalc.clusterAssignmentEntropy(semanticIds);
 
-      console.log(`  Semantic IDs: [${semanticIds.join(', ')}]`);
-      console.log(
-        `  Clusters: ${numClusters}, Entropy: ${entropy.toFixed(3)}`
-      );
-
-      if (entropy < ENTROPY_THRESHOLD) {
+      const isLowEntropy = entropy < ENTROPY_THRESHOLD;
+      if (isLowEntropy) {
         lowEntropyDetections++;
-        console.log(
-          `  ⚠️  LOW ENTROPY DETECTED - semantic repetition likely!`
-        );
-
-        // In a full implementation, we would steer toward underrepresented clusters
-        // For now, just log the detection
       }
 
-      console.log('');
+      emit('semantic_check', {
+        checkNumber: semanticChecks,
+        tokenIndex: t,
+        candidates: candidates.map(c => c.slice(0, 100)),
+        semanticIds,
+        numClusters,
+        entropy,
+        isLowEntropy,
+      });
+
+      if (!jsonlMode) {
+        console.log(`  Semantic IDs: [${semanticIds.join(', ')}]`);
+        console.log(
+          `  Clusters: ${numClusters}, Entropy: ${entropy.toFixed(3)}`
+        );
+
+        if (isLowEntropy) {
+          console.log(
+            `  ⚠️  LOW ENTROPY DETECTED - semantic repetition likely!`
+          );
+        }
+
+        console.log('');
+      }
     }
 
     // Normal token generation
@@ -356,20 +404,36 @@ Begin:
     });
 
     if (mainCtx.isStopToken(token)) {
-      console.log('\n[EOS token reached]');
+      if (!jsonlMode) {
+        console.log('\n[EOS token reached]');
+      }
+      emit('eos', { tokenIndex: t });
       break;
     }
 
-    process.stdout.write(mainCtx.tokenToText(token));
+    const text = mainCtx.tokenToText(token);
+    if (!jsonlMode) {
+      process.stdout.write(text);
+    }
+    emit('token', { index: t, token, text });
+
     await mainCtx.decode([token], cachePos++, 0);
     totalTokens++;
   }
 
-  console.log('\n\n' + '='.repeat(60));
-  console.log(`Generated: ${totalTokens} tokens`);
-  console.log(`Semantic checks: ${semanticChecks}`);
-  console.log(`Low entropy detections: ${lowEntropyDetections}`);
-  console.log('='.repeat(60));
+  emit('complete', {
+    totalTokens,
+    semanticChecks,
+    lowEntropyDetections,
+  });
+
+  if (!jsonlMode) {
+    console.log('\n\n' + '='.repeat(60));
+    console.log(`Generated: ${totalTokens} tokens`);
+    console.log(`Semantic checks: ${semanticChecks}`);
+    console.log(`Low entropy detections: ${lowEntropyDetections}`);
+    console.log('='.repeat(60));
+  }
 
   mainCtx.dispose();
   nliCtx.dispose();

@@ -3,8 +3,8 @@
  * Infinite context generation with BlinkKV
  *
  * Usage:
- *   node streaming.mjs /path/to/model.gguf
- *   node streaming.mjs  # uses default model path
+ *   node streaming.mjs [model-path]          # Human-readable output
+ *   node streaming.mjs [model-path] --jsonl  # JSONL output for testing
  *
  * This example demonstrates:
  * - Generating tokens beyond context window limit
@@ -24,16 +24,31 @@ const DEFAULT_MODEL = path.resolve(
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
 
-async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
 
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
+
+async function main() {
   // BlinkKV paper parameters: 2048 context, 4 sinks, 256 tail
   const nCtx = 2048;
   const SINK_COUNT = 4;
   const TAIL_SIZE = 256;
   const TARGET_TOKENS = 5000;
 
-  console.log(`Loading model: ${modelPath}`);
+  if (!jsonlMode) {
+    console.log(`Loading model: ${modelPath}`);
+  }
+
+  emit('start', { model: path.basename(modelPath), nCtx, sinkCount: SINK_COUNT, tailSize: TAIL_SIZE, targetTokens: TARGET_TOKENS });
+
   const ctx = await createContext({
     modelPath,
     contextSize: nCtx,
@@ -57,7 +72,9 @@ Begin:
 ## Chapter 1: Linear Regression
 
 `;
-  console.log(`\nPrompt: "${prompt.slice(0, 100)}..."`);
+  if (!jsonlMode) {
+    console.log(`\nPrompt: "${prompt.slice(0, 100)}..."`);
+  }
 
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
@@ -67,18 +84,19 @@ Begin:
   // Sink the entire prompt - it's the structural anchor
   const sinks = [...promptTokens];
 
-  console.log(`\nContext size: ${nCtx}`);
-  console.log(`Target tokens: ${TARGET_TOKENS}`);
-  console.log(`Sink tokens (prompt): ${sinks.length}`);
-  console.log(`Tail size: ${TAIL_SIZE}`);
-  console.log(`Cache size after reseed: ${sinks.length + TAIL_SIZE}`);
-  console.log(`\nGenerating...\n`);
+  if (!jsonlMode) {
+    console.log(`\nContext size: ${nCtx}`);
+    console.log(`Target tokens: ${TARGET_TOKENS}`);
+    console.log(`Sink tokens (prompt): ${sinks.length}`);
+    console.log(`Tail size: ${TAIL_SIZE}`);
+    console.log(`Cache size after reseed: ${sinks.length + TAIL_SIZE}`);
+    console.log(`\nGenerating...\n`);
+    process.stdout.write(prompt);
+  }
 
   const tracker = ctx.createPerplexityTracker();
   let cachePos = promptTokens.length;
   let reseedCount = 0;
-
-  process.stdout.write(prompt);
 
   for (let t = 0; t < TARGET_TOKENS; t++) {
     // Sample next token
@@ -92,7 +110,10 @@ Begin:
       topP: 0.9,
     });
     if (ctx.isStopToken(token)) {
-      console.log('\n[EOS token reached]');
+      if (!jsonlMode) {
+        console.log('\n[EOS token reached]');
+      }
+      emit('eos', { tokenIndex: t });
       break;
     }
 
@@ -101,7 +122,11 @@ Begin:
     ctx.addSurprisal(tracker, surprisal);
 
     // Output token
-    process.stdout.write(ctx.tokenToText(token));
+    const text = ctx.tokenToText(token);
+    if (!jsonlMode) {
+      process.stdout.write(text);
+    }
+    emit('token', { index: t, token, text, surprisal });
 
     // Store token and decode
     allTokens.push(token);
@@ -115,11 +140,15 @@ Begin:
       reseedCount++;
 
       const ppl = ctx.getPerplexity(tracker);
-      console.log(`\n  [Reseed ${reseedCount} at token ${t + 1}/${TARGET_TOKENS} | PPL: ${ppl.toFixed(2)}]`);
+      emit('reseed', { count: reseedCount, tokenIndex: t + 1, ppl });
+
+      if (!jsonlMode) {
+        console.log(`\n  [Reseed ${reseedCount} at token ${t + 1}/${TARGET_TOKENS} | PPL: ${ppl.toFixed(2)}]`);
+      }
     }
 
     // Progress indicator every 1000 tokens
-    if ((t + 1) % 1000 === 0 && reseedCount === 0) {
+    if ((t + 1) % 1000 === 0 && reseedCount === 0 && !jsonlMode) {
       console.log(`\n  [${t + 1}/${TARGET_TOKENS} tokens]`);
     }
   }
@@ -127,11 +156,16 @@ Begin:
   const finalPpl = ctx.getPerplexity(tracker);
   ctx.freePerplexityTracker(tracker);
 
-  console.log('\n\n' + '='.repeat(50));
-  console.log(`Generated: ${allTokens.length - promptTokens.length} tokens`);
-  console.log(`Reseeds: ${reseedCount}`);
-  console.log(`Final perplexity: ${finalPpl.toFixed(2)}`);
-  console.log('='.repeat(50));
+  const generatedTokens = allTokens.length - promptTokens.length;
+  emit('complete', { generatedTokens, reseeds: reseedCount, finalPpl });
+
+  if (!jsonlMode) {
+    console.log('\n\n' + '='.repeat(50));
+    console.log(`Generated: ${generatedTokens} tokens`);
+    console.log(`Reseeds: ${reseedCount}`);
+    console.log(`Final perplexity: ${finalPpl.toFixed(2)}`);
+    console.log('='.repeat(50));
+  }
 
   ctx.dispose();
 }

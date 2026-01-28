@@ -10,6 +10,10 @@
  *
  * The key insight: llama.cpp's token-level penalties degrade prose quality.
  * Instead, we track N-grams at the app level and steer away from repeats.
+ *
+ * Usage:
+ *   node streaming-tsampler.mjs [model-path]          # Human-readable output
+ *   node streaming-tsampler.mjs [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
@@ -29,6 +33,18 @@ const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 /**
  * N-gram tracker for sequence-level repetition detection (threshold-based)
@@ -112,8 +128,6 @@ class NgramTracker {
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
-
   // BlinkKV parameters
   const nCtx = 2048;
   const TAIL_SIZE = 256;
@@ -121,7 +135,12 @@ async function main() {
   const NGRAM_SIZE = 6; // Track 6-grams for sequence detection
   const BLOCK_THRESHOLD = 2; // Only block after seeing same pattern K times
 
-  console.log(`Loading model: ${modelPath}`);
+  if (!jsonlMode) {
+    console.log(`Loading model: ${modelPath}`);
+  }
+
+  emit('start', { model: path.basename(modelPath), nCtx, tailSize: TAIL_SIZE, targetTokens: TARGET_TOKENS, ngramSize: NGRAM_SIZE, blockThreshold: BLOCK_THRESHOLD });
+
   const ctx = await createContext({
     modelPath,
     contextSize: nCtx,
@@ -145,7 +164,9 @@ Begin:
 ## Chapter 1: Linear Regression
 
 `;
-  console.log(`\nPrompt: "${prompt.slice(0, 100)}..."`);
+  if (!jsonlMode) {
+    console.log(`\nPrompt: "${prompt.slice(0, 100)}..."`);
+  }
 
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
@@ -167,19 +188,20 @@ Begin:
     ngramTracker.accept(token);
   }
 
-  console.log(`\nContext size: ${nCtx}`);
-  console.log(`Target tokens: ${TARGET_TOKENS}`);
-  console.log(`Sink tokens (prompt): ${sinks.length}`);
-  console.log(`Tail size: ${TAIL_SIZE}`);
-  console.log(`N-gram size: ${NGRAM_SIZE}, block threshold: ${BLOCK_THRESHOLD}`);
-  console.log(`\nGenerating with tsampler + N-gram deduplication (threshold-based)...\n`);
+  if (!jsonlMode) {
+    console.log(`\nContext size: ${nCtx}`);
+    console.log(`Target tokens: ${TARGET_TOKENS}`);
+    console.log(`Sink tokens (prompt): ${sinks.length}`);
+    console.log(`Tail size: ${TAIL_SIZE}`);
+    console.log(`N-gram size: ${NGRAM_SIZE}, block threshold: ${BLOCK_THRESHOLD}`);
+    console.log(`\nGenerating with tsampler + N-gram deduplication (threshold-based)...\n`);
+    process.stdout.write(prompt);
+  }
 
   const tracker = ctx.createPerplexityTracker();
   let cachePos = promptTokens.length;
   let reseedCount = 0;
   let blockedCount = 0;
-
-  process.stdout.write(prompt);
 
   for (let t = 0; t < TARGET_TOKENS; t++) {
     // Get logits from native layer
@@ -188,7 +210,8 @@ Begin:
 
     // N-gram deduplication: Check if we're about to repeat a sequence
     const blockedToken = ngramTracker.getBlockedToken();
-    if (blockedToken !== null && blockedToken < logits.length) {
+    const wasBlocked = blockedToken !== null && blockedToken < logits.length;
+    if (wasBlocked) {
       // Steer away from the repeat by setting logit to -Infinity
       logits[blockedToken] = -Infinity;
       blockedCount++;
@@ -207,7 +230,10 @@ Begin:
 
     // Check for EOS
     if (ctx.isStopToken(token)) {
-      console.log('\n[EOS token reached]');
+      if (!jsonlMode) {
+        console.log('\n[EOS token reached]');
+      }
+      emit('eos', { tokenIndex: t });
       break;
     }
 
@@ -220,7 +246,11 @@ Begin:
     ctx.addSurprisal(tracker, surprisal);
 
     // Output token
-    process.stdout.write(ctx.tokenToText(token));
+    const text = ctx.tokenToText(token);
+    if (!jsonlMode) {
+      process.stdout.write(text);
+    }
+    emit('token', { index: t, token, text, surprisal, blocked: wasBlocked });
 
     // Store and decode
     allTokens.push(token);
@@ -235,11 +265,16 @@ Begin:
 
       const ppl = ctx.getPerplexity(tracker);
       const stats = ngramTracker.stats();
-      console.log(`\n  [Reseed ${reseedCount} at token ${t + 1}/${TARGET_TOKENS} | PPL: ${ppl.toFixed(2)} | Blocked: ${blockedCount} | Unique ${NGRAM_SIZE}-grams: ${stats.uniqueNgrams}]`);
+
+      emit('reseed', { count: reseedCount, tokenIndex: t + 1, ppl, blockedCount, uniqueNgrams: stats.uniqueNgrams });
+
+      if (!jsonlMode) {
+        console.log(`\n  [Reseed ${reseedCount} at token ${t + 1}/${TARGET_TOKENS} | PPL: ${ppl.toFixed(2)} | Blocked: ${blockedCount} | Unique ${NGRAM_SIZE}-grams: ${stats.uniqueNgrams}]`);
+      }
     }
 
     // Progress every 1000 tokens
-    if ((t + 1) % 1000 === 0 && cachePos < nCtx) {
+    if ((t + 1) % 1000 === 0 && cachePos < nCtx && !jsonlMode) {
       const stats = ngramTracker.stats();
       console.log(`\n  [${t + 1}/${TARGET_TOKENS} | Blocked repeats: ${blockedCount} | Unique ${NGRAM_SIZE}-grams: ${stats.uniqueNgrams}]`);
     }
@@ -249,13 +284,24 @@ Begin:
   const finalStats = ngramTracker.stats();
   ctx.freePerplexityTracker(tracker);
 
-  console.log('\n\n' + '='.repeat(60));
-  console.log(`Generated: ${allTokens.length - promptTokens.length} tokens`);
-  console.log(`Reseeds: ${reseedCount}`);
-  console.log(`Final perplexity: ${finalPpl.toFixed(2)}`);
-  console.log(`Sequence repeats blocked: ${blockedCount}`);
-  console.log(`Unique ${NGRAM_SIZE}-grams tracked: ${finalStats.uniqueNgrams}`);
-  console.log('='.repeat(60));
+  const generatedTokens = allTokens.length - promptTokens.length;
+  emit('complete', {
+    generatedTokens,
+    reseeds: reseedCount,
+    finalPpl,
+    blockedCount,
+    uniqueNgrams: finalStats.uniqueNgrams,
+  });
+
+  if (!jsonlMode) {
+    console.log('\n\n' + '='.repeat(60));
+    console.log(`Generated: ${generatedTokens} tokens`);
+    console.log(`Reseeds: ${reseedCount}`);
+    console.log(`Final perplexity: ${finalPpl.toFixed(2)}`);
+    console.log(`Sequence repeats blocked: ${blockedCount}`);
+    console.log(`Unique ${NGRAM_SIZE}-grams tracked: ${finalStats.uniqueNgrams}`);
+    console.log('='.repeat(60));
+  }
 
   ctx.dispose();
 }
