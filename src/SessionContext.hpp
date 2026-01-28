@@ -138,12 +138,6 @@ private:
   // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
 
   /**
-   * Native entropy computation (for validation)
-   * Returns: number (entropy in nats)
-   */
-  Napi::Value computeEntropy(const Napi::CallbackInfo& info);
-
-  /**
    * Native greedy sampling (for validation)
    * Returns: number (token ID)
    */
@@ -167,15 +161,6 @@ private:
 
   Napi::Value getVocabSize(const Napi::CallbackInfo& info);
   Napi::Value getMemorySize(const Napi::CallbackInfo& info);
-
-  // ===== GRAMMAR-CONSTRAINED GENERATION =====
-  // Legacy single-grammar API (deprecated, use handle-based API below)
-
-  Napi::Value initGrammar(const Napi::CallbackInfo& info);
-  Napi::Value applyGrammar(const Napi::CallbackInfo& info);
-  Napi::Value acceptToken(const Napi::CallbackInfo& info);
-  Napi::Value resetGrammar(const Napi::CallbackInfo& info);
-  Napi::Value freeGrammar(const Napi::CallbackInfo& info);
 
   // ===== KV CACHE MANAGEMENT =====
 
@@ -371,11 +356,6 @@ private:
   std::shared_ptr<llama_model> _model;
   llama_context* _context = nullptr;
   bool _disposed = false;
-
-  // Grammar sampler state (persistent across tokens within a generation)
-  // Pattern matches HybridSessionContext.hpp:197-200
-  llama_sampler* _grammarSampler = nullptr;
-  std::string _currentGrammar;  // Track current grammar string to avoid re-initialization
 
   // Persistent sampling chain (for repeat penalty tracking across tokens)
   // Pattern from branch.hpp: create once via sampler::create_chain(), reuse across samples.

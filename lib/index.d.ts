@@ -347,9 +347,11 @@ export interface SessionContext {
    * // Creative generation
    * const token = ctx.sample({ temperature: 0.9 });
    *
-   * // Constrained to valid JSON
-   * ctx.initGrammar(grammar);
+   * // Constrained to valid JSON (handle-based API)
+   * const grammarHandle = ctx.createSampler(grammar);
+   * ctx.applySampler(grammarHandle, ctx.getLogits());
    * const token = ctx.sample({ temperature: 0.7 });
+   * ctx.acceptSamplerToken(grammarHandle, token);
    * ```
    */
   sample(params?: SamplingParams): number;
@@ -608,144 +610,6 @@ export interface SessionContext {
    */
   clearAndReseed(sinks: number[], tail: number[]): Promise<void>;
 
-  // ===== GRAMMAR-CONSTRAINED GENERATION =====
-
-  /**
-   * Initialize grammar parser (once per generation session)
-   *
-   * Grammars constrain generation to valid formats (JSON, XML, etc.).
-   * Parser tracks state across tokens to enforce rules.
-   *
-   * Call once before starting constrained generation.
-   * Use resetGrammar() to reuse same grammar for new generation.
-   *
-   * Cost: ~0.1-1ms depending on grammar complexity
-   *
-   * @param grammarStr GBNF grammar string (EBNF-like syntax)
-   * @example
-   * ```typescript
-   * // Force valid JSON
-   * const grammar = ctx.jsonSchemaToGrammar(JSON.stringify({
-   *   type: "object",
-   *   properties: {
-   *     name: { type: "string" },
-   *     age: { type: "number" }
-   *   }
-   * }));
-   *
-   * ctx.initGrammar(grammar);
-   *
-   * // Now sample() will only generate valid JSON
-   * const token = ctx.sample({ temperature: 0.7 });
-   * ```
-   */
-  initGrammar(grammarStr: string): void;
-
-  /**
-   * Apply grammar constraints to token scores (modifies in-place)
-   *
-   * Masks invalid tokens with -Infinity based on parser state.
-   * Call after getTokenScores(), before custom sampling.
-   *
-   * Flow: getTokenScores() → applyGrammar() → sample() → acceptToken()
-   *
-   * Thread safety: This method is synchronous and modifies the buffer
-   * in-place on the JS thread. Safe because it's called sequentially
-   * in the generation loop before any async operations.
-   *
-   * Cost: ~0.1-1ms depending on grammar complexity
-   *
-   * @param scoresBuffer Buffer from getTokenScores() (modified in-place)
-   * @throws Error if grammar not initialized (call initGrammar first)
-   * @example
-   * ```typescript
-   * // Custom sampling with grammar
-   * const buffer = ctx.getTokenScores();
-   * const scores = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
-   *
-   * // Apply grammar constraints
-   * ctx.applyGrammar(buffer);
-   *
-   * // Now sample from constrained distribution
-   * const token = customSample(scores);
-   * ctx.acceptToken(token);
-   * ```
-   */
-  applyGrammar(scoresBuffer: Buffer): void;
-
-  /**
-   * Advance grammar parser with chosen token
-   *
-   * Updates parser state after sampling.
-   * MUST be called AFTER sampling, BEFORE next applyGrammar().
-   *
-   * This advances the stateful grammar parser through its rules.
-   * Without this, grammar constraints will be incorrect.
-   *
-   * Cost: <0.01ms
-   *
-   * @param tokenId Token that was sampled
-   * @example
-   * ```typescript
-   * const buffer = ctx.getTokenScores();
-   * ctx.applyGrammar(buffer);
-   *
-   * const scores = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
-   * const token = customSample(scores);
-   *
-   * // MUST call acceptToken to advance parser
-   * ctx.acceptToken(token);
-   *
-   * // Now parser is ready for next token
-   * ```
-   */
-  acceptToken(tokenId: number): void;
-
-  /**
-   * Reset grammar parser to initial state
-   *
-   * Call at start of each new generation with same grammar.
-   * Parser returns to root state, ready to validate from beginning.
-   *
-   * Cost: <0.01ms
-   *
-   * @example
-   * ```typescript
-   * ctx.initGrammar(jsonGrammar);
-   *
-   * // First generation
-   * while (!done) {
-   *   const token = ctx.sample();
-   *   // ... generate ...
-   * }
-   *
-   * // Second generation - reuse same grammar
-   * ctx.resetGrammar();
-   * while (!done) {
-   *   const token = ctx.sample();
-   *   // ... generate ...
-   * }
-   * ```
-   */
-  resetGrammar(): void;
-
-  /**
-   * Free grammar resources
-   *
-   * Call when done with constrained generation.
-   * Releases parser memory.
-   *
-   * Cost: <0.01ms
-   *
-   * @example
-   * ```typescript
-   * ctx.initGrammar(grammar);
-   * // ... do constrained generation ...
-   * ctx.freeGrammar();
-   * ```
-   */
-  freeGrammar(): void;
-
   // ===== KV SEQUENCE OPERATIONS =====
 
   /**
@@ -817,9 +681,7 @@ export interface SessionContext {
    * Create a new grammar sampler (returns handle)
    *
    * Creates an independent grammar sampler instance with its own state.
-   *
-   * Unlike initGrammar() which uses a single internal sampler, this returns
-   * a handle that can be used with applySampler/acceptSamplerToken.
+   * Returns a handle that can be used with applySampler/acceptSamplerToken.
    * Multiple handles can coexist with independent parser states.
    *
    * Cost: ~0.1-1ms depending on grammar complexity
@@ -859,7 +721,6 @@ export interface SessionContext {
    * Accept token to advance grammar parser state (handle-based)
    *
    * Must be called after sampling to advance the grammar parser.
-   * This is the handle-based equivalent of acceptToken().
    *
    * @param handle Sampler handle from createSampler()
    * @param tokenId Token that was sampled
@@ -1186,7 +1047,7 @@ export interface SessionContext {
    * Convert JSON schema to GBNF grammar
    *
    * Generates grammar string for constrained JSON generation.
-   * Use with initGrammar() or sample({ grammar }).
+   * Use with createSampler() for grammar-constrained generation.
    *
    * Cost: ~1-10ms depending on schema complexity
    *
@@ -1204,7 +1065,7 @@ export interface SessionContext {
    * };
    *
    * const grammar = ctx.jsonSchemaToGrammar(JSON.stringify(schema));
-   * ctx.initGrammar(grammar);
+   * const handle = ctx.createSampler(grammar);
    * ```
    */
   jsonSchemaToGrammar(schemaJson: string): string;
@@ -1313,16 +1174,6 @@ export interface SessionContext {
   hasPooling(): boolean;
 
   // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
-
-  /**
-   * Compute entropy of current logits distribution
-   *
-   * Alternative entropy computation using native implementation.
-   * Equivalent to modelEntropy("nats") but may be faster.
-   *
-   * @returns Entropy in nats
-   */
-  computeEntropy(): number;
 
   /**
    * Sample greedily from current logits

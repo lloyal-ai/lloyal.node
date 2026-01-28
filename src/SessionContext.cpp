@@ -582,13 +582,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvCacheWriteFile", &SessionContext::kvCacheWriteFile),
     InstanceMethod("kvCacheReadFile", &SessionContext::kvCacheReadFile),
 
-    // ===== GRAMMAR-CONSTRAINED GENERATION =====
-    InstanceMethod("initGrammar", &SessionContext::initGrammar),
-    InstanceMethod("applyGrammar", &SessionContext::applyGrammar),
-    InstanceMethod("acceptToken", &SessionContext::acceptToken),
-    InstanceMethod("resetGrammar", &SessionContext::resetGrammar),
-    InstanceMethod("freeGrammar", &SessionContext::freeGrammar),
-
     // ===== KV SEQUENCE OPERATIONS =====
     InstanceMethod("kvSeqCopy", &SessionContext::kvSeqCopy),
     InstanceMethod("kvSeqKeep", &SessionContext::kvSeqKeep),
@@ -627,7 +620,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("freePerplexityTracker", &SessionContext::freePerplexityTracker),
 
     // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
-    InstanceMethod("computeEntropy", &SessionContext::computeEntropy),
     InstanceMethod("greedySample", &SessionContext::greedySample),
 
     // ===== LIFECYCLE =====
@@ -675,12 +667,6 @@ SessionContext::~SessionContext() {
     if (_samplerChain) {
       lloyal::sampler::free_chain(_samplerChain);
       _samplerChain = nullptr;
-    }
-
-    // Free legacy global grammar sampler (pattern matches HybridSessionContext.cpp:72)
-    if (_grammarSampler) {
-      llama_sampler_free(_grammarSampler);
-      _grammarSampler = nullptr;
     }
 
     // Free context (depends on model)
@@ -856,64 +842,6 @@ Napi::Value SessionContext::detokenize(const Napi::CallbackInfo& info) {
   auto* worker = new DetokenizeWorker(env, _model, tokens);
   worker->Queue();
   return worker->GetPromise();
-}
-
-Napi::Value SessionContext::computeEntropy(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // Get logits via lloyal wrapper (handles null checks)
-  float* logits;
-  try {
-    logits = lloyal::logits::get(_context, -1);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
-  }
-
-  // Use model overload for vocab_size
-  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Compute entropy using log-sum-exp (numerically stable)
-  // This is the native reference implementation for testing
-
-  // Find max logit
-  double max_logit = logits[0];
-  for (int i = 1; i < n_vocab; ++i) {
-    if (std::isfinite(logits[i]) && logits[i] > max_logit) {
-      max_logit = logits[i];
-    }
-  }
-
-  // Compute sum of exp(logit - max)
-  double sum_exp = 0.0;
-  for (int i = 0; i < n_vocab; ++i) {
-    if (std::isfinite(logits[i])) {
-      sum_exp += std::exp(logits[i] - max_logit);
-    }
-  }
-
-  if (sum_exp == 0.0) {
-    return Napi::Number::New(env, INFINITY);
-  }
-
-  double log_sum = max_logit + std::log(sum_exp);
-
-  // H = -Σ p_i * log(p_i)
-  double entropy = 0.0;
-  for (int i = 0; i < n_vocab; ++i) {
-    if (std::isfinite(logits[i])) {
-      double p = std::exp(logits[i] - log_sum);
-      if (p > 0) {
-        entropy += -p * std::log(p);
-      }
-    }
-  }
-
-  return Napi::Number::New(env, entropy);
 }
 
 // ===== METRICS API =====
@@ -1225,11 +1153,6 @@ Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
       false  // sorted
     };
 
-    // Apply grammar first if present (pattern from branch.hpp)
-    if (_grammarSampler) {
-      llama_sampler_apply(_grammarSampler, &cur_p);
-    }
-
     // Apply persistent sampler chain (includes penalties, filters, temp, dist)
     lloyal::sampler::apply(_samplerChain, &cur_p);
 
@@ -1244,9 +1167,6 @@ Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
     // not just what's visible in the current KV cache window after clearAndReseed()
     lloyal::sampler::accept(_samplerChain, next_token);
   }
-
-  // NOTE: Grammar accept is still caller's responsibility via acceptToken()
-  // This enables separation between sampling and grammar state updates
 
   return Napi::Number::New(env, static_cast<double>(next_token));
 }
@@ -1278,12 +1198,6 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
       _samplerChain = nullptr;
     }
 
-    // Free legacy global grammar sampler
-    if (_grammarSampler) {
-      llama_sampler_free(_grammarSampler);
-      _grammarSampler = nullptr;
-    }
-
     // Free context
     if (_context) {
       llama_free(_context);
@@ -1304,163 +1218,6 @@ Napi::Value SessionContext::getVocabSize(const Napi::CallbackInfo& info) {
 
   // Use model overload
   return Napi::Number::New(env, static_cast<double>(lloyal::tokenizer::vocab_size(_model.get())));
-}
-
-// ===== GRAMMAR-CONSTRAINED GENERATION =====
-// Pattern matches HybridSessionContext.cpp:383-546
-// All methods are SYNC (no AsyncWorker) per SessionContext.nitro.ts
-
-Napi::Value SessionContext::initGrammar(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (grammarStr: string)");
-  }
-
-  std::string grammarStr = info[0].As<Napi::String>().Utf8Value();
-
-  ensureNotDisposed();
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // Reuse existing sampler if grammar unchanged (just reset parser state)
-  if (_grammarSampler && _currentGrammar == grammarStr) {
-    llama_sampler_reset(_grammarSampler);
-    return env.Undefined();
-  }
-
-  // Free old sampler if grammar changed
-  if (_grammarSampler) {
-    llama_sampler_free(_grammarSampler);
-    _grammarSampler = nullptr;
-  }
-
-  // Create new grammar sampler using liblloyal wrapper
-  _grammarSampler = lloyal::grammar::init_sampler(_model.get(), grammarStr);
-  if (!_grammarSampler) {
-    throw Napi::Error::New(env, "Failed to initialize grammar sampler - grammar may be invalid");
-  }
-
-  _currentGrammar = grammarStr;
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::applyGrammar(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::TypeError::New(env, "Expected (logits: ArrayBuffer | TypedArray | Buffer)");
-  }
-
-  if (!_grammarSampler) {
-    throw Napi::Error::New(env, "Grammar not initialized - call initGrammar() first");
-  }
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // Use model overload for vocab_size
-  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Get mutable access to logits - accept ArrayBuffer, TypedArray, or Buffer
-  float* logits = nullptr;
-
-  if (info[0].IsTypedArray()) {
-    // Float32Array from getLogits()
-    Napi::TypedArray ta = info[0].As<Napi::TypedArray>();
-    if (ta.TypedArrayType() != napi_float32_array) {
-      throw Napi::TypeError::New(env, "Expected Float32Array, got different TypedArray type");
-    }
-    Napi::Float32Array f32 = info[0].As<Napi::Float32Array>();
-    logits = f32.Data();
-  } else if (info[0].IsArrayBuffer()) {
-    // Raw ArrayBuffer
-    Napi::ArrayBuffer ab = info[0].As<Napi::ArrayBuffer>();
-    logits = static_cast<float*>(ab.Data());
-  } else if (info[0].IsBuffer()) {
-    // Legacy Buffer support
-    Napi::Buffer<float> buf = info[0].As<Napi::Buffer<float>>();
-    logits = buf.Data();
-  } else {
-    throw Napi::TypeError::New(env, "Expected (logits: ArrayBuffer | TypedArray | Buffer)");
-  }
-
-  if (!logits) {
-    throw Napi::Error::New(env, "Invalid logits buffer");
-  }
-
-  // Build token data array from logits
-  std::vector<llama_token_data> candidates(n_vocab);
-  for (int i = 0; i < n_vocab; i++) {
-    candidates[i] = llama_token_data{
-      static_cast<llama_token>(i),
-      logits[i],
-      0.0f
-    };
-  }
-
-  llama_token_data_array arr = {
-    candidates.data(),
-    static_cast<size_t>(n_vocab),
-    -1,  // sorted = -1 (unsorted)
-    false
-  };
-
-  // Apply grammar constraint (modifies candidates in-place)
-  llama_sampler_apply(_grammarSampler, &arr);
-
-  // Write modified logits back to buffer
-  for (int i = 0; i < n_vocab; i++) {
-    logits[i] = candidates[i].logit;
-  }
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::acceptToken(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected (tokenId: number)");
-  }
-
-  llama_token token = static_cast<llama_token>(info[0].As<Napi::Number>().Int32Value());
-
-  // Advance grammar parser state (if grammar active)
-  if (_grammarSampler) {
-    llama_sampler_accept(_grammarSampler, token);
-  }
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::resetGrammar(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (_grammarSampler) {
-    llama_sampler_reset(_grammarSampler);
-  }
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::freeGrammar(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (_grammarSampler) {
-    llama_sampler_free(_grammarSampler);
-    _grammarSampler = nullptr;
-    _currentGrammar.clear();
-  }
-
-  return env.Undefined();
 }
 
 // ===== KV SEQUENCE OPERATIONS =====
