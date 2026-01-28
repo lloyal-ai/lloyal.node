@@ -2,7 +2,7 @@
 
 **Advanced edge inference for Node.js**
 
-Inference with forkable state — KV cache, grammar, metrics all clone atomically. Entropy and surprisal mid-generation. Multi-sequence parallel exploration. The control surface llama.cpp exposes, in TypeScript.
+A llama.cpp control surface in TypeScript with atomic inference state forking. Real time rolling perplexity/entropy/surprisal and multi-sequence parallel exploration primitives.
 
 ```bash
 npm install @lloyal-labs/lloyal.node

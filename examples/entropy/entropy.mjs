@@ -10,6 +10,10 @@
  * - EDT formula: T = T₀ · N^(θ/Entropy)
  * - Side-by-side comparison with fixed temperature
  * - Different prompt types: factual, creative, mixed
+ *
+ * Usage:
+ *   node entropy.mjs [model-path]          # Human-readable output
+ *   node entropy.mjs [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
@@ -21,6 +25,18 @@ const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 // EDT parameters (Zhang et al. 2024)
 const T0 = 1.0;    // Max temperature bound
@@ -38,7 +54,7 @@ function edtTemperature(entropy) {
 /**
  * Generate with a specific sampling strategy
  */
-async function generate(ctx, prompt, strategy, maxTokens = 50) {
+async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
   const messages = [{ role: 'user', content: prompt }];
   const { prompt: formatted } = await ctx.formatChat(JSON.stringify(messages));
 
@@ -65,6 +81,9 @@ async function generate(ctx, prompt, strategy, maxTokens = 50) {
     const token = ctx.sample({ temperature: temp });
     if (ctx.isStopToken(token)) break;
 
+    const text = ctx.tokenToText(token);
+    emit('token', { strategy: strategyName, token, text, entropy, temp });
+
     output.push(token);
     await ctx.decode([token], pos++, 0);
   }
@@ -83,40 +102,63 @@ async function generate(ctx, prompt, strategy, maxTokens = 50) {
  * Run comparison for a single prompt
  */
 async function compareStrategies(ctx, prompt, label) {
-  console.log(`\n${'='.repeat(70)}`);
-  console.log(`${label}: "${prompt}"`);
-  console.log('='.repeat(70));
+  if (!jsonlMode) {
+    console.log(`\n${'='.repeat(70)}`);
+    console.log(`${label}: "${prompt}"`);
+    console.log('='.repeat(70));
+  }
 
   // Run with fixed temperature
-  const fixed = await generate(ctx, prompt, 0.7);
+  const fixed = await generate(ctx, prompt, 0.7, 'fixed');
 
   // Run with EDT
-  const edt = await generate(ctx, prompt, 'edt');
-
-  // Display results
-  console.log(`\n  Fixed (T=0.7):`);
-  console.log(`    Output: ${fixed.text.slice(0, 100)}${fixed.text.length > 100 ? '...' : ''}`);
-  console.log(`    Tokens: ${fixed.tokenCount} | Avg entropy: ${fixed.avgEntropy.toFixed(2)} nats`);
-
-  console.log(`\n  EDT (adaptive):`);
-  console.log(`    Output: ${edt.text.slice(0, 100)}${edt.text.length > 100 ? '...' : ''}`);
-  console.log(`    Tokens: ${edt.tokenCount} | Avg entropy: ${edt.avgEntropy.toFixed(2)} nats | Avg T: ${edt.avgTemp.toFixed(2)}`);
+  const edt = await generate(ctx, prompt, 'edt', 'edt');
 
   // Show temperature adaptation
   const lowEntropyTokens = edt.entropies.filter(e => e < 1.0).length;
   const highEntropyTokens = edt.entropies.filter(e => e > 3.5).length;
-  console.log(`    Adaptation: ${lowEntropyTokens} confident tokens (T↓), ${highEntropyTokens} uncertain tokens (T↑)`);
+
+  if (jsonlMode) {
+    emit('comparison', {
+      label,
+      prompt,
+      fixed: {
+        text: fixed.text,
+        tokenCount: fixed.tokenCount,
+        avgEntropy: fixed.avgEntropy,
+      },
+      edt: {
+        text: edt.text,
+        tokenCount: edt.tokenCount,
+        avgEntropy: edt.avgEntropy,
+        avgTemp: edt.avgTemp,
+        lowEntropyTokens,
+        highEntropyTokens,
+      },
+    });
+  } else {
+    console.log(`\n  Fixed (T=0.7):`);
+    console.log(`    Output: ${fixed.text.slice(0, 100)}${fixed.text.length > 100 ? '...' : ''}`);
+    console.log(`    Tokens: ${fixed.tokenCount} | Avg entropy: ${fixed.avgEntropy.toFixed(2)} nats`);
+
+    console.log(`\n  EDT (adaptive):`);
+    console.log(`    Output: ${edt.text.slice(0, 100)}${edt.text.length > 100 ? '...' : ''}`);
+    console.log(`    Tokens: ${edt.tokenCount} | Avg entropy: ${edt.avgEntropy.toFixed(2)} nats | Avg T: ${edt.avgTemp.toFixed(2)}`);
+    console.log(`    Adaptation: ${lowEntropyTokens} confident tokens (T↓), ${highEntropyTokens} uncertain tokens (T↑)`);
+  }
 
   return { fixed, edt };
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
+  if (!jsonlMode) {
+    console.log('EDT vs Fixed Temperature Comparison');
+    console.log('Based on Zhang et al. 2024: https://arxiv.org/abs/2403.14541\n');
+    console.log(`Formula: T = T₀ · N^(θ/Entropy)  where T₀=${T0}, N=${N}, θ=${THETA}`);
+    console.log(`Loading model: ${path.basename(modelPath)}`);
+  }
 
-  console.log('EDT vs Fixed Temperature Comparison');
-  console.log('Based on Zhang et al. 2024: https://arxiv.org/abs/2403.14541\n');
-  console.log(`Formula: T = T₀ · N^(θ/Entropy)  where T₀=${T0}, N=${N}, θ=${THETA}`);
-  console.log(`Loading model: ${path.basename(modelPath)}`);
+  emit('start', { model: path.basename(modelPath), T0, N, THETA });
 
   const ctx = await createContext({
     modelPath,
@@ -127,28 +169,30 @@ async function main() {
   await compareStrategies(
     ctx,
     'What is 2 + 2? Answer with just the number.',
-    'FACTUAL (expect low entropy → low temp)'
+    'FACTUAL'
   );
 
   // Test 2: Creative prompt (expect higher entropy, EDT should adapt)
   await compareStrategies(
     ctx,
     'Write one sentence starting a mystery story.',
-    'CREATIVE (expect variable entropy → adaptive temp)'
+    'CREATIVE'
   );
 
   // Test 3: Technical explanation (mixed - some certain, some uncertain)
   await compareStrategies(
     ctx,
     'Explain in one sentence why the sky is blue.',
-    'TECHNICAL (expect mixed entropy)'
+    'TECHNICAL'
   );
 
-  // Summary
-  console.log(`\n${'='.repeat(70)}`);
-  console.log('KEY INSIGHT');
-  console.log('='.repeat(70));
-  console.log(`
+  emit('complete', { comparisons: 3 });
+
+  if (!jsonlMode) {
+    console.log(`\n${'='.repeat(70)}`);
+    console.log('KEY INSIGHT');
+    console.log('='.repeat(70));
+    console.log(`
 EDT adapts temperature based on model confidence:
   • Low entropy (confident)  → Low temperature  → Trust the model
   • High entropy (uncertain) → High temperature → Explore options
@@ -156,6 +200,7 @@ EDT adapts temperature based on model confidence:
 This is the OPPOSITE of naive intuition. When the model knows the answer,
 don't add randomness - let it output what it knows.
 `);
+  }
 
   ctx.dispose();
 }

@@ -81,8 +81,8 @@ async function runTests() {
     }
 
     // ===== TEST 5: Native entropy computation =====
-    console.log('📊 Test 5: computeEntropy()');
-    const entropy = ctx.computeEntropy();
+    console.log('📊 Test 5: modelEntropy()');
+    const entropy = ctx.modelEntropy();
     console.log(`✓ Entropy: ${entropy.toFixed(4)} nats\n`);
 
     if (!isFinite(entropy) || entropy < 0) {
@@ -268,7 +268,7 @@ async function runTests() {
     // Warm up
     for (let i = 0; i < 10; i++) {
       ctx.greedySample();
-      ctx.computeEntropy();
+      ctx.modelEntropy();
       ctx.sample({ temperature: 0.8 });
     }
 
@@ -283,10 +283,10 @@ async function runTests() {
     // Benchmark native entropy
     const startEntropy = Date.now();
     for (let i = 0; i < iterations; i++) {
-      ctx.computeEntropy();
+      ctx.modelEntropy();
     }
     const entropyTime = Date.now() - startEntropy;
-    console.log(`✓ computeEntropy() x${iterations}: ${entropyTime}ms (${(entropyTime/iterations).toFixed(3)}ms avg)`);
+    console.log(`✓ modelEntropy() x${iterations}: ${entropyTime}ms (${(entropyTime/iterations).toFixed(3)}ms avg)`);
 
     // Benchmark native sample
     const startSample = Date.now();

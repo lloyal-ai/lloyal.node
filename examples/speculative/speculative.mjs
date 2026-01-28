@@ -13,6 +13,10 @@
  * References:
  * - Leviathan et al. 2023 "Fast Inference from Transformers via Speculative Decoding"
  * - Chen et al. 2023 "Accelerating Large Language Model Decoding with Speculative Sampling"
+ *
+ * Usage:
+ *   node speculative.mjs [model-path]          # Human-readable output
+ *   node speculative.mjs [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
@@ -24,6 +28,18 @@ const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 /**
  * Simulate speculative decoding verification
@@ -54,13 +70,16 @@ function simulateVerification(drafts, ctx) {
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
   const DRAFT_COUNT = 4;
   const GENERATION_LENGTH = 30;
 
-  console.log('Speculative Decoding Demo');
-  console.log('=========================\n');
-  console.log(`Loading model: ${path.basename(modelPath)}`);
+  if (!jsonlMode) {
+    console.log('Speculative Decoding Demo');
+    console.log('=========================\n');
+    console.log(`Loading model: ${path.basename(modelPath)}`);
+  }
+
+  emit('start', { model: path.basename(modelPath), draftCount: DRAFT_COUNT, generationLength: GENERATION_LENGTH });
 
   const ctx = await createContext({
     modelPath,
@@ -69,7 +88,9 @@ async function main() {
   });
 
   const prompt = 'The quick brown fox';
-  console.log(`\nPrompt: "${prompt}"`);
+  if (!jsonlMode) {
+    console.log(`\nPrompt: "${prompt}"`);
+  }
 
   // Prefill prompt on seq 0
   const promptTokens = await ctx.tokenize(prompt);
@@ -81,8 +102,10 @@ async function main() {
   let totalAccepted = 0;
   let iterations = 0;
 
-  console.log(`\nGenerating ${GENERATION_LENGTH} tokens with speculative decoding...\n`);
-  process.stdout.write(prompt);
+  if (!jsonlMode) {
+    console.log(`\nGenerating ${GENERATION_LENGTH} tokens with speculative decoding...\n`);
+    process.stdout.write(prompt);
+  }
 
   while (output.length < GENERATION_LENGTH) {
     iterations++;
@@ -125,7 +148,10 @@ async function main() {
 
     // Output accepted tokens
     for (const d of accepted) {
-      process.stdout.write(d.text);
+      if (!jsonlMode) {
+        process.stdout.write(d.text);
+      }
+      emit('token', { token: d.token, text: d.text, entropy: d.entropy, accepted: true });
       output.push(d.token);
     }
 
@@ -144,7 +170,11 @@ async function main() {
       const bonusToken = ctx.sample({ temperature: 0.7 });
 
       if (!ctx.isStopToken(bonusToken)) {
-        process.stdout.write(ctx.tokenToText(bonusToken));
+        const bonusText = ctx.tokenToText(bonusToken);
+        if (!jsonlMode) {
+          process.stdout.write(bonusText);
+        }
+        emit('token', { token: bonusToken, text: bonusText, bonus: true });
         output.push(bonusToken);
         await ctx.decode([bonusToken], rejectPos, 0);
         pos = rejectPos + 1;
@@ -155,6 +185,14 @@ async function main() {
       // All drafts accepted - pos is already correct
     }
 
+    emit('iteration', {
+      iteration: iterations,
+      drafted: drafts.length,
+      accepted: acceptedCount,
+      rejected: rejected.length,
+      hasBonus: rejected.length > 0,
+    });
+
     // Clean up verification sequence
     await ctx.kvCacheRemove(1, 0, -1);
 
@@ -164,23 +202,32 @@ async function main() {
     }
   }
 
-  console.log('\n');
-
   // Statistics
-  const acceptRate = totalDrafted > 0 ? (totalAccepted / totalDrafted * 100).toFixed(1) : 0;
-  console.log('='.repeat(50));
-  console.log('Statistics');
-  console.log('='.repeat(50));
-  console.log(`  Iterations: ${iterations}`);
-  console.log(`  Tokens drafted: ${totalDrafted}`);
-  console.log(`  Tokens accepted: ${totalAccepted}`);
-  console.log(`  Accept rate: ${acceptRate}%`);
-  console.log(`  Output tokens: ${output.length}`);
+  const acceptRate = totalDrafted > 0 ? totalAccepted / totalDrafted : 0;
 
-  console.log('\n' + '='.repeat(50));
-  console.log('How Speculative Decoding Works');
-  console.log('='.repeat(50));
-  console.log(`
+  emit('complete', {
+    iterations,
+    totalDrafted,
+    totalAccepted,
+    acceptRate,
+    outputTokens: output.length,
+  });
+
+  if (!jsonlMode) {
+    console.log('\n');
+    console.log('='.repeat(50));
+    console.log('Statistics');
+    console.log('='.repeat(50));
+    console.log(`  Iterations: ${iterations}`);
+    console.log(`  Tokens drafted: ${totalDrafted}`);
+    console.log(`  Tokens accepted: ${totalAccepted}`);
+    console.log(`  Accept rate: ${(acceptRate * 100).toFixed(1)}%`);
+    console.log(`  Output tokens: ${output.length}`);
+
+    console.log('\n' + '='.repeat(50));
+    console.log('How Speculative Decoding Works');
+    console.log('='.repeat(50));
+    console.log(`
   1. DRAFT: Generate N tokens quickly (greedy, small model)
   2. FORK:  Copy KV state for verification
   3. VERIFY: Run target model on all N tokens in one batch
@@ -193,6 +240,7 @@ async function main() {
   - Target verifies N tokens in ONE forward pass (batched)
   - Accept rate determines actual speedup: higher = better
 `);
+  }
 
   ctx.dispose();
 }

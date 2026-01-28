@@ -15,6 +15,10 @@
  * sequences, each candidate's FIRST token must be sampled from these captured
  * logits (not from whatever sequence was last decoded). This ensures all
  * candidates start from the same probability distribution.
+ *
+ * Usage:
+ *   node best-of-n.mjs [model-path]          # Human-readable output
+ *   node best-of-n.mjs [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
@@ -33,6 +37,18 @@ const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
 );
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 /**
  * Generate a single completion and track perplexity
@@ -128,19 +144,22 @@ async function generateOne(
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
   const N = 5;           // Number of candidates
   const MAX_TOKENS = 60;
   const HIGH_TEMP = 0.9; // High temp for diversity
   const LOW_TEMP = 0.3;  // Low temp for single baseline
 
-  console.log('Best-of-N Sampling Demo');
-  console.log('=======================\n');
-  console.log('Why best-of-n works:');
-  console.log('  1. Generate N candidates with HIGH temperature (diverse)');
-  console.log('  2. Score each by perplexity (model confidence)');
-  console.log('  3. Select LOWEST perplexity (most coherent)\n');
-  console.log(`Loading model: ${path.basename(modelPath)}`);
+  if (!jsonlMode) {
+    console.log('Best-of-N Sampling Demo');
+    console.log('=======================\n');
+    console.log('Why best-of-n works:');
+    console.log('  1. Generate N candidates with HIGH temperature (diverse)');
+    console.log('  2. Score each by perplexity (model confidence)');
+    console.log('  3. Select LOWEST perplexity (most coherent)\n');
+    console.log(`Loading model: ${path.basename(modelPath)}`);
+  }
+
+  emit('start', { model: path.basename(modelPath), n: N, maxTokens: MAX_TOKENS, highTemp: HIGH_TEMP, lowTemp: LOW_TEMP });
 
   const ctx = await createContext({
     modelPath,
@@ -153,7 +172,9 @@ async function main() {
   const messages = [{ role: 'user', content: userPrompt }];
   const { prompt } = await ctx.formatChat(JSON.stringify(messages));
 
-  console.log(`\nPrompt: "${userPrompt}"`);
+  if (!jsonlMode) {
+    console.log(`\nPrompt: "${userPrompt}"`);
+  }
 
   // Prefill prompt on seq 0
   const promptTokens = await ctx.tokenize(prompt);
@@ -163,7 +184,9 @@ async function main() {
   // CRITICAL: Copy the logits buffer because it becomes invalid after next decode()
   const capturedLogits = new Float32Array(ctx.getLogits());
 
-  console.log(`\nPrefill complete. Vocab size: ${capturedLogits.length}`);
+  if (!jsonlMode) {
+    console.log(`\nPrefill complete. Vocab size: ${capturedLogits.length}`);
+  }
 
   // tsampler setup - shared workspace, per-candidate PRNGs
   const workspace = new SamplerWorkspace(256);
@@ -173,9 +196,11 @@ async function main() {
   const lowTempParams = { temperature: LOW_TEMP, topP: 0.95 };
 
   // === Baseline: Single generation with low temperature ===
-  console.log('\n' + '='.repeat(70));
-  console.log('BASELINE: Single generation (T=0.3)');
-  console.log('='.repeat(70));
+  if (!jsonlMode) {
+    console.log('\n' + '='.repeat(70));
+    console.log('BASELINE: Single generation (T=0.3)');
+    console.log('='.repeat(70));
+  }
 
   const baselinePrng = new Xoroshiro128Plus(42);
   const baseline = await generateOne(
@@ -188,12 +213,19 @@ async function main() {
     promptTokens.length,
     MAX_TOKENS
   );
-  console.log(`  PPL: ${baseline.ppl.toFixed(2)} | "${baseline.text}"`);
+
+  emit('baseline', { ppl: baseline.ppl, text: baseline.text, tokenCount: baseline.tokenCount });
+
+  if (!jsonlMode) {
+    console.log(`  PPL: ${baseline.ppl.toFixed(2)} | "${baseline.text}"`);
+  }
 
   // === Best-of-N: Multiple candidates with high temperature ===
-  console.log('\n' + '='.repeat(70));
-  console.log(`BEST-OF-${N}: Generate ${N} candidates (T=${HIGH_TEMP}), select lowest PPL`);
-  console.log('='.repeat(70));
+  if (!jsonlMode) {
+    console.log('\n' + '='.repeat(70));
+    console.log(`BEST-OF-${N}: Generate ${N} candidates (T=${HIGH_TEMP}), select lowest PPL`);
+    console.log('='.repeat(70));
+  }
 
   const candidates = [];
   for (let i = 0; i < N; i++) {
@@ -212,10 +244,14 @@ async function main() {
     );
     candidates.push(result);
 
-    const truncated = result.text.length > 55
-      ? result.text.slice(0, 55) + '...'
-      : result.text;
-    console.log(`  [${i + 1}] PPL: ${result.ppl.toFixed(2).padStart(6)} | "${truncated}"`);
+    emit('candidate', { index: i + 1, ppl: result.ppl, text: result.text, tokenCount: result.tokenCount });
+
+    if (!jsonlMode) {
+      const truncated = result.text.length > 55
+        ? result.text.slice(0, 55) + '...'
+        : result.text;
+      console.log(`  [${i + 1}] PPL: ${result.ppl.toFixed(2).padStart(6)} | "${truncated}"`);
+    }
   }
 
   // Select best
@@ -223,33 +259,45 @@ async function main() {
   const worst = candidates.reduce((a, b) => (a.ppl > b.ppl ? a : b));
   const bestIdx = candidates.indexOf(best) + 1;
 
-  // === Results ===
-  console.log('\n' + '='.repeat(70));
-  console.log('RESULTS');
-  console.log('='.repeat(70));
-
-  console.log(`\n  Best candidate [${bestIdx}] (PPL ${best.ppl.toFixed(2)}):`);
-  console.log(`    "${best.text}"`);
-
-  console.log(`\n  Baseline (PPL ${baseline.ppl.toFixed(2)}):`);
-  console.log(`    "${baseline.text}"`);
-
   // Analysis
-  const improvement = ((baseline.ppl - best.ppl) / baseline.ppl * 100).toFixed(1);
-  const pplRange = (worst.ppl - best.ppl).toFixed(2);
+  const improvement = (baseline.ppl - best.ppl) / baseline.ppl;
+  const pplRange = worst.ppl - best.ppl;
 
-  console.log('\n  Analysis:');
-  console.log(`    - PPL range across candidates: ${best.ppl.toFixed(2)} - ${worst.ppl.toFixed(2)} (Δ${pplRange})`);
-  if (best.ppl < baseline.ppl) {
-    console.log(`    - Best-of-${N} beat baseline by ${improvement}% lower PPL`);
-  } else {
-    console.log(`    - Baseline was already good (low temp = focused)`);
-  }
+  emit('complete', {
+    bestIndex: bestIdx,
+    bestPpl: best.ppl,
+    bestText: best.text,
+    worstPpl: worst.ppl,
+    baselinePpl: baseline.ppl,
+    pplRange,
+    improvement,
+    bestBeatBaseline: best.ppl < baseline.ppl,
+  });
 
-  console.log('\n' + '='.repeat(70));
-  console.log('KEY INSIGHT');
-  console.log('='.repeat(70));
-  console.log(`
+  if (!jsonlMode) {
+    // === Results ===
+    console.log('\n' + '='.repeat(70));
+    console.log('RESULTS');
+    console.log('='.repeat(70));
+
+    console.log(`\n  Best candidate [${bestIdx}] (PPL ${best.ppl.toFixed(2)}):`);
+    console.log(`    "${best.text}"`);
+
+    console.log(`\n  Baseline (PPL ${baseline.ppl.toFixed(2)}):`);
+    console.log(`    "${baseline.text}"`);
+
+    console.log('\n  Analysis:');
+    console.log(`    - PPL range across candidates: ${best.ppl.toFixed(2)} - ${worst.ppl.toFixed(2)} (Δ${pplRange.toFixed(2)})`);
+    if (best.ppl < baseline.ppl) {
+      console.log(`    - Best-of-${N} beat baseline by ${(improvement * 100).toFixed(1)}% lower PPL`);
+    } else {
+      console.log(`    - Baseline was already good (low temp = focused)`);
+    }
+
+    console.log('\n' + '='.repeat(70));
+    console.log('KEY INSIGHT');
+    console.log('='.repeat(70));
+    console.log(`
   Perplexity = exp(average surprisal) = "how surprised is the model?"
 
   Lower PPL = model is confident in what it wrote = usually more coherent
@@ -266,6 +314,7 @@ async function main() {
     for fair comparison - otherwise later candidates would sample from
     earlier candidates' states!
 `);
+  }
 
   ctx.dispose();
 }
