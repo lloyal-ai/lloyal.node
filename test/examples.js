@@ -14,8 +14,7 @@ const path = require('path');
 const fs = require('fs');
 
 const MODEL_PATH = path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
-const NLI_MODEL_PATH = path.join(__dirname, '../models/slim-nli.gguf');
-
+const SUMMARY_MODEL_PATH = path.join(__dirname, '../models/slim-summarize.gguf');
 if (!fs.existsSync(MODEL_PATH)) {
   console.error('❌ Test model not found!');
   console.error(`   Expected: ${MODEL_PATH}`);
@@ -223,31 +222,59 @@ const EXAMPLES = {
     },
   },
 
-  'streaming-semantic-entropy': {
-    path: 'streaming/streaming-semantic-entropy.mjs',
+  'streaming-summary': {
+    path: 'streaming/streaming-summary.mjs',
     timeout: 600000,
-    skip: !fs.existsSync(NLI_MODEL_PATH),
-    skipReason: 'slim-nli.gguf not found',
+    skip: !fs.existsSync(SUMMARY_MODEL_PATH),
+    skipReason: 'slim-summarize.gguf not found',
     validate(events) {
       const start = events.find(e => e.event === 'start');
       assert(start, 'should have start event');
-      assert(start.kSamples > 0, 'should have kSamples');
+      assert(start.targetTokens === 5000, 'should target 5000 tokens');
 
-      const checks = events.filter(e => e.event === 'semantic_check');
-      assert(checks.length > 0, 'should have semantic checks');
+      const tokens = events.filter(e => e.event === 'token');
+      assert(tokens.length > 100, 'should generate many tokens');
 
-      for (const check of checks) {
-        assert(Array.isArray(check.semanticIds), 'check should have semanticIds');
-        assert(check.numClusters > 0, 'check should have clusters');
-        assert(typeof check.entropy === 'number', 'check should have entropy');
+      // Check for token source field
+      for (const t of tokens.slice(0, 10)) {
+        assert(t.source === 'main', 'token should have source=main');
+        assert(typeof t.surprisal === 'number', 'token should have surprisal');
+      }
+
+      // With 5000 target tokens and 2048 context, expect reseeds
+      const reseeds = events.filter(e => e.event === 'reseed');
+      assert(reseeds.length > 0, 'should have at least one reseed');
+
+      // Check reseed events have sink info
+      for (const r of reseeds) {
+        assert(r.sinkTokens > 0, 'reseed should have sinkTokens > 0');
+        assert(r.tailTokens > 0, 'reseed should have tailTokens > 0');
+      }
+
+      // If summary model was loaded, check summary events
+      const summaryLoaded = events.find(e => e.event === 'summary_loaded');
+      if (summaryLoaded) {
+        const summaryCompletes = events.filter(e => e.event === 'summary_complete');
+        assert(summaryCompletes.length > 0, 'should have summary_complete events');
+
+        for (const sc of summaryCompletes) {
+          assert(sc.summaryTokens > 0, 'summary should have tokens');
+          assert(sc.compressionRatio > 0, 'summary should have compression ratio');
+          assert(sc.durationMs > 0, 'summary should have duration');
+        }
+
+        const sinkUpdates = events.filter(e => e.event === 'sink_update');
+        assert(sinkUpdates.length > 0, 'should have sink_update events');
       }
 
       const complete = events.find(e => e.event === 'complete');
       assert(complete, 'should have complete event');
-      assert(complete.totalTokens > 0, 'should generate tokens');
-      assert(complete.semanticChecks > 0, 'should perform semantic checks');
+      assert(complete.generatedTokens > 0, 'should generate tokens');
+      assert(complete.reseeds > 0, 'should have reseeds > 0');
+      assert(complete.finalPpl > 0, 'should have finalPpl');
     },
   },
+
 };
 
 async function runTest(name, config) {

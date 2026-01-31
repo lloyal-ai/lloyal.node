@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Best-of-N Sampling with Perplexity Selection
+ * Best-of-N Sampling with Perplexity Selection (Parallel Streaming)
  *
  * Demonstrates why best-of-n beats single generation:
  * - Generate N candidates with high temperature (diverse)
@@ -11,9 +11,9 @@
  * See: Stiennon et al. 2020 "Learning to summarize from human feedback"
  *
  * KEY IMPLEMENTATION DETAIL:
- * After prefilling the prompt, we capture the logits. When forking to multiple
- * sequences, each candidate's FIRST token must be sampled from these captured
- * logits (not from whatever sequence was last decoded). This ensures all
+ * Uses the Branch API for parallel generation. After prefilling the prompt,
+ * we create a root branch and call captureLogits(). When forking to multiple
+ * candidates, each fork inherits the root's logits snapshot, ensuring all
  * candidates start from the same probability distribution.
  *
  * Usage:
@@ -23,14 +23,7 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
-
-// Import tsampler for sampling (metrics handled by native API)
-import {
-  sampleWithStrategy,
-  SamplerWorkspace,
-  Xoroshiro128Plus,
-} from '@lloyal-labs/tsampler';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -51,95 +44,30 @@ function emit(event, data) {
 }
 
 /**
- * Generate a single completion and track perplexity
+ * Generate a single completion using Branch API
  *
- * @param ctx - The inference context
- * @param capturedLogits - Logits captured after prefill (for first token)
- * @param seqId - Sequence ID to use for this candidate
- * @param samplerParams - tsampler parameters (temperature, topP, etc.)
- * @param workspace - Preallocated tsampler workspace
- * @param prng - PRNG instance for this candidate
- * @param promptLen - Length of the prompt in tokens
- * @param maxTokens - Maximum tokens to generate
+ * @param {Branch} branch - Branch to generate with
+ * @param {number} maxTokens - Maximum tokens to generate
+ * @param {object} ctx - Context for detokenization
+ * @returns {Promise<{ text: string, ppl: number, tokenCount: number }>}
  */
-async function generateOne(
-  ctx,
-  capturedLogits,
-  seqId,
-  samplerParams,
-  workspace,
-  prng,
-  promptLen,
-  maxTokens
-) {
-  // Clear any stale KV data for this sequence (defensive)
-  await ctx.kvCacheRemove(seqId, 0, -1);
+async function generateWithBranch(branch, maxTokens, ctx) {
+  const tokens = [];
 
-  // Fork KV state from seq 0 (prompt)
-  ctx.kvSeqCopy(0, seqId);
-
-  const tracker = ctx.createPerplexityTracker();
-  const output = [];
-  let pos = promptLen;
-
-  // First token: sample from captured prefill logits
-  // This ensures all candidates start from the same distribution
-  let token = sampleWithStrategy(capturedLogits, {
-    params: samplerParams,
-    workspace,
-    prng,
-  });
-
-  if (ctx.isStopToken(token)) {
-    ctx.freePerplexityTracker(tracker);
-    await ctx.kvCacheRemove(seqId, 0, -1);
-    return { text: '', ppl: 999, tokenCount: 0 };
+  for (let t = 0; t < maxTokens; t++) {
+    const { token, isStop } = branch.produce();
+    if (isStop) break;
+    tokens.push(token);
+    branch.commit(token);
   }
 
-  // Track surprisal for first token using captured logits (native API)
-  const firstSurprisal = ctx.modelSurprisal(token, 'nats', capturedLogits);
-  if (Number.isFinite(firstSurprisal)) {
-    ctx.addSurprisal(tracker, firstSurprisal);
-  }
-
-  output.push(token);
-  await ctx.decode([token], pos++, seqId);
-
-  // Subsequent tokens: sample from fresh logits (now specific to this sequence)
-  for (let t = 1; t < maxTokens; t++) {
-    // Get fresh logits for this sequence
-    const logits = new Float32Array(ctx.getLogits());
-
-    // Sample with tsampler
-    token = sampleWithStrategy(logits, {
-      params: samplerParams,
-      workspace,
-      prng,
-    });
-
-    if (ctx.isStopToken(token)) break;
-
-    // Track surprisal using context's method (reads current logits)
-    const surprisal = ctx.modelSurprisal(token);
-    if (Number.isFinite(surprisal)) {
-      ctx.addSurprisal(tracker, surprisal);
-    }
-
-    output.push(token);
-    await ctx.decode([token], pos++, seqId);
-  }
-
-  const ppl = ctx.getPerplexity(tracker);
-  const text = await ctx.detokenize(output);
-  ctx.freePerplexityTracker(tracker);
-
-  // Clean up this sequence
-  await ctx.kvCacheRemove(seqId, 0, -1);
+  const ppl = branch.perplexity;
+  const text = await ctx.detokenize(tokens);
 
   return {
     text,
     ppl: Number.isFinite(ppl) ? ppl : 999,
-    tokenCount: output.length,
+    tokenCount: tokens.length,
   };
 }
 
@@ -150,8 +78,8 @@ async function main() {
   const LOW_TEMP = 0.3;  // Low temp for single baseline
 
   if (!jsonlMode) {
-    console.log('Best-of-N Sampling Demo');
-    console.log('=======================\n');
+    console.log('Best-of-N Sampling Demo (Parallel Streaming)');
+    console.log('=============================================\n');
     console.log('Why best-of-n works:');
     console.log('  1. Generate N candidates with HIGH temperature (diverse)');
     console.log('  2. Score each by perplexity (model confidence)');
@@ -180,20 +108,17 @@ async function main() {
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
 
-  // Capture logits after prefill - these will be used for ALL candidates' first token
-  // CRITICAL: Copy the logits buffer because it becomes invalid after next decode()
-  const capturedLogits = new Float32Array(ctx.getLogits());
-
   if (!jsonlMode) {
-    console.log(`\nPrefill complete. Vocab size: ${capturedLogits.length}`);
+    console.log(`\nPrefill complete. Prompt length: ${promptTokens.length} tokens`);
   }
 
-  // tsampler setup - shared workspace, per-candidate PRNGs
-  const workspace = new SamplerWorkspace(256);
-
-  // Sampling params
-  const highTempParams = { temperature: HIGH_TEMP, topP: 0.95 };
-  const lowTempParams = { temperature: LOW_TEMP, topP: 0.95 };
+  // CRITICAL: Create root branch IMMEDIATELY after prefill to capture logits
+  // The root branch stores a snapshot of the logits for fork operations
+  const root = Branch.create(ctx, 0, promptTokens.length, {
+    temperature: HIGH_TEMP,
+    topP: 0.95,
+  });
+  root.captureLogits();
 
   // === Baseline: Single generation with low temperature ===
   if (!jsonlMode) {
@@ -202,17 +127,18 @@ async function main() {
     console.log('='.repeat(70));
   }
 
-  const baselinePrng = new Xoroshiro128Plus(42);
-  const baseline = await generateOne(
-    ctx,
-    capturedLogits,
-    1,
-    lowTempParams,
-    workspace,
-    baselinePrng,
-    promptTokens.length,
-    MAX_TOKENS
-  );
+  // Create baseline branch on seq 1 with LOW temperature
+  // We capture logits now (they're still the prefill logits in context)
+  const baselineBranch = Branch.create(ctx, 1, promptTokens.length, {
+    temperature: LOW_TEMP,
+    topP: 0.95,
+  });
+  baselineBranch.captureLogits();
+
+  // Copy KV cache from seq 0 (prompt) to seq 1 (baseline)
+  ctx.kvSeqCopy(0, 1);
+
+  const baseline = await generateWithBranch(baselineBranch, MAX_TOKENS, ctx);
 
   emit('baseline', { ppl: baseline.ppl, text: baseline.text, tokenCount: baseline.tokenCount });
 
@@ -220,39 +146,75 @@ async function main() {
     console.log(`  PPL: ${baseline.ppl.toFixed(2)} | "${baseline.text}"`);
   }
 
-  // === Best-of-N: Multiple candidates with high temperature ===
+  baselineBranch.prune();
+
+  // === Best-of-N: Parallel candidates with high temperature ===
   if (!jsonlMode) {
     console.log('\n' + '='.repeat(70));
-    console.log(`BEST-OF-${N}: Generate ${N} candidates (T=${HIGH_TEMP}), select lowest PPL`);
+    console.log(`BEST-OF-${N}: Generate ${N} candidates in parallel (T=${HIGH_TEMP})`);
     console.log('='.repeat(70));
   }
 
+  // Fork N candidate branches from root
+  // Each fork gets: copied logits snapshot + copied KV cache + copied sampler
+  // CRITICAL: Reseed each branch's sampler for diversity (otherwise all produce identical output)
+  const branches = [];
+  for (let i = 0; i < N; i++) {
+    const seqId = i + 2;  // seqIds: 2, 3, 4, 5, 6 (baseline used 1)
+    const branch = root.fork(seqId);
+    branch.reseedSampler(1000 + i);  // Unique seed per branch
+    branches.push(branch);
+  }
+
+  // Parallel generation loop - interleaved round-robin
+  const results = branches.map(() => ({ tokens: [], done: false }));
+
+  for (let t = 0; t < MAX_TOKENS; t++) {
+    let anyActive = false;
+
+    for (let i = 0; i < N; i++) {
+      if (results[i].done) continue;
+      anyActive = true;
+
+      const { token, text, isStop } = branches[i].produce();
+
+      if (isStop) {
+        results[i].done = true;
+        continue;
+      }
+
+      results[i].tokens.push(token);
+      branches[i].commit(token);
+
+      emit('token', { candidateIndex: i, text, index: t });
+    }
+
+    if (!anyActive) break;
+  }
+
+  // Finalize results - get perplexity and detokenize
   const candidates = [];
   for (let i = 0; i < N; i++) {
-    // Each candidate gets its own PRNG for reproducibility
-    const prng = new Xoroshiro128Plus(1000 + i);
+    const ppl = branches[i].perplexity;
+    const text = await ctx.detokenize(results[i].tokens);
+    const tokenCount = results[i].tokens.length;
 
-    const result = await generateOne(
-      ctx,
-      capturedLogits,
-      i + 2,  // seqId: 2, 3, 4, 5, 6 (baseline uses 1)
-      highTempParams,
-      workspace,
-      prng,
-      promptTokens.length,
-      MAX_TOKENS
-    );
-    candidates.push(result);
+    candidates.push({
+      text,
+      ppl: Number.isFinite(ppl) ? ppl : 999,
+      tokenCount,
+    });
 
-    emit('candidate', { index: i + 1, ppl: result.ppl, text: result.text, tokenCount: result.tokenCount });
+    emit('candidate', { index: i + 1, ppl: candidates[i].ppl, text, tokenCount });
 
     if (!jsonlMode) {
-      const truncated = result.text.length > 55
-        ? result.text.slice(0, 55) + '...'
-        : result.text;
-      console.log(`  [${i + 1}] PPL: ${result.ppl.toFixed(2).padStart(6)} | "${truncated}"`);
+      const truncated = text.length > 55 ? text.slice(0, 55) + '...' : text;
+      console.log(`  [${i + 1}] PPL: ${candidates[i].ppl.toFixed(2).padStart(6)} | "${truncated}"`);
     }
+
+    branches[i].prune();
   }
+  root.prune();
 
   // Select best
   const best = candidates.reduce((a, b) => (a.ppl < b.ppl ? a : b));
@@ -308,11 +270,12 @@ async function main() {
     - PPL filtering selects the coherent ones (exploit quality)
 
   Implementation note:
-    After prefilling the prompt, we capture the logits. All N candidates
-    sample their FIRST token from these same captured logits, ensuring
-    they all start from the same probability distribution. This is critical
-    for fair comparison - otherwise later candidates would sample from
-    earlier candidates' states!
+    Uses the Branch API for parallel generation. After prefilling the
+    prompt, we create a root branch and capture its logits. When forking
+    to N candidates, each fork inherits the root's logits snapshot,
+    ensuring all candidates start from the same probability distribution.
+    Generation happens in round-robin fashion, interleaving tokens across
+    all candidates.
 `);
   }
 

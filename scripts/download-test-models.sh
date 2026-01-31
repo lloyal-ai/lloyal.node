@@ -26,5 +26,15 @@ else
   echo "  ✓ nomic-embed-text already exists"
 fi
 
+# slim-summary-tool (1.7GB) - Summary sidecar for dynamic sinks
+if [ ! -f "slim-summarize.gguf" ]; then
+  echo "  → Downloading slim-summarize.gguf..."
+  curl -L -o "slim-summarize.gguf" \
+    "https://huggingface.co/llmware/slim-summary-tool/resolve/main/slim-summary-tool.gguf"
+  echo "  ✓ Downloaded slim-summarize"
+else
+  echo "  ✓ slim-summarize already exists"
+fi
+
 echo ""
 echo "✅ All test models ready"

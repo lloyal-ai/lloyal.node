@@ -8,7 +8,7 @@ Advanced streaming patterns for long-form generation with quality preservation.
 |---------|---------|-------------|
 | `streaming.mjs` | Infinite context generation | BlinkKV reseeding |
 | `streaming-tsampler.mjs` | TypeScript sampling with N-gram tracking | TTA (Test-Time Alignment) |
-| `streaming-semantic-entropy.mjs` | Semantic repetition detection | Sidecar NLI model |
+| `streaming-summary.mjs` | Dynamic summary sinks | BlinkKV + summary sidecar |
 
 ---
 
@@ -134,149 +134,84 @@ const token = sampleWithStrategy(logits, {
 
 ---
 
-## streaming-semantic-entropy.mjs - Semantic Repetition Detection
+## streaming-summary.mjs - Dynamic Summary Sinks
 
-Detects **semantic repetition** (same meaning, different words) using a sidecar NLI model and entropy measurement.
+Extends BlinkKV with a slim-summary sidecar that generates cumulative summaries of evicted content. Summaries become sink tokens on reseed, giving the model compressed semantic memory of what it generated beyond the visible tail.
 
-### Research Foundation
+### Usage
 
-Based on:
-- **Farquhar et al. 2024** - "Detecting Hallucinations in Large Language Models Using Semantic Entropy" ([Nature](https://www.nature.com/articles/s41586-024-07421-0))
-- **Quevedo et al. 2024** - "Detecting Hallucinations in Large Language Model Generation: A Token Probability Approach" ([arXiv](https://arxiv.org/abs/2405.19648))
-
-### Key Insight
-
-N-gram blocking catches **token-level** repetition but misses **semantic** repetition:
-
+```bash
+node streaming-summary.mjs /path/to/model.gguf
+node streaming-summary.mjs /path/to/model.gguf --jsonl
 ```
-"The guide should include a comprehensive list of references..."
-"The guide should include detailed explanations of the formulas..."
-"The guide should include code examples for each technique..."
-```
-
-These sentences are semantically equivalent (meta-descriptions about the guide) but vary at the token level, evading N-gram detection.
-
-Semantic entropy clusters responses by **meaning** using bidirectional entailment, then measures entropy over clusters. Low entropy = semantic repetition.
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Main Context (SmolLM/Llama)                            │
-│  - Generation via tsampler                              │
-│  - KV forking for K candidate samples                   │
-│  - nSeqMax > 1 enables multi-sequence                   │
+│  Main Context (llama.cpp)                                │
+│  - KV cache management + BlinkKV reseeding               │
+│  - Token generation loop                                 │
+│  - clearAndReseed(sinks, tail) with dynamic sinks        │
 └─────────────────────────────────────────────────────────┘
-                    │ K generated candidates
-                    ▼
-┌─────────────────────────────────────────────────────────┐
-│  Sidecar Context (slim-nli.gguf)                        │
-│  - Pairwise entailment: O(K²) checks                    │
-│  - Input: "Evidence: A, Conclusion: B"                  │
-│  - Output: {"evidence": ["entails"|"neutral"|...]}      │
-└─────────────────────────────────────────────────────────┘
-                    │ entailment results
-                    ▼
-┌─────────────────────────────────────────────────────────┐
-│  Semantic Clustering                                    │
-│  - Bidirectional entailment check (A→B and B→A)         │
-│  - Equivalent if: no contradiction, not both neutral    │
-│  - Union-find clustering by equivalence                 │
-└─────────────────────────────────────────────────────────┘
-                    │ semantic_ids
-                    ▼
-┌─────────────────────────────────────────────────────────┐
-│  Entropy Computation                                    │
-│  - H = -Σ p(cluster) × log(p(cluster))                  │
-│  - High entropy = diverse meanings (good)               │
-│  - Low entropy = semantic repetition (bad)              │
-└─────────────────────────────────────────────────────────┘
+           │ evicted text                    │ reseed
+           ▼                                 ▲ sink tokens
+┌─────────────────────────────────┐          │
+│  Summary Sidecar (slim-summary)  │──────────┘
+│  - slim-summarize.gguf (1.7GB)  │
+│  - Prompt: <human>/<summarize>  │
+│  - Output: Python-style list    │
+└─────────────────────────────────┘
+
+After reseed, KV cache layout:
+┌──────────┬─────────────┬───────────────┐
+│  anchor  │   summary   │     tail      │
+│ (prompt) │ (evicted→)  │ (256 recent)  │
+└──────────┴─────────────┴───────────────┘
 ```
 
-### Usage
+### Sidecar Prompt Format
 
-```bash
-node streaming-semantic-entropy.mjs /path/to/model.gguf
+The slim-summarize model uses a specific prompt format:
+
+```
+<human>: {text}
+<summarize> key points (5) </summarize>
+<bot>:
 ```
 
-Requires `models/slim-nli.gguf` for the NLI sidecar.
+Output is a Python-style list: `['point1', 'point2', 'point3']`
+
+When budget is tight, uses `brief description (1)` for a single cohesive summary.
+
+### Budget Management
+
+| Concept | Formula |
+|---------|---------|
+| Max sink tokens | `nCtx * sinkBudgetRatio` (default 0.4 = 819 tokens) |
+| Summary budget | `maxSinkTokens - anchorTokens.length` |
+| Over budget? | Re-summarize with `brief description (1)`, maxTokens=100 |
 
 ### Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `K_SAMPLES` | 4 | Candidate continuations per check |
-| `SAMPLE_TOKENS` | 30 | Tokens per candidate |
-| `CHECK_INTERVAL` | 50 | Check entropy every N tokens |
-| `ENTROPY_THRESHOLD` | 0.5 | Below this = semantic repetition |
+| `TAIL_SIZE` | 256 | Most recent tokens to retain |
+| `TARGET_TOKENS` | 5000 | Total tokens to generate |
+| `sinkBudgetRatio` | 0.4 | Fraction of context allocated to sinks |
+| `summaryMaxTokens` | 200 | Max tokens for summary generation |
 
-### Multi-Sequence Support
+### Key APIs
 
-KV cache forking requires `nSeqMax > 1`:
-
-```javascript
-const mainCtx = await createContext({
-  modelPath,
-  nCtx: 2048,
-  nSeqMax: K_SAMPLES + 2,  // Enable multi-sequence
-});
-```
-
-### Semantic Clustering Algorithm
-
-From `get_semantic_ids()` in the Nature paper:
-
-```javascript
-async clusterBySemantic(samples) {
-  const semanticIds = new Array(n).fill(-1);
-  let nextId = 0;
-
-  for (let i = 0; i < n; i++) {
-    if (semanticIds[i] === -1) {
-      semanticIds[i] = nextId;
-      for (let j = i + 1; j < n; j++) {
-        if (await this.areSemanticallySimilar(samples[i], samples[j])) {
-          semanticIds[j] = nextId;
-        }
-      }
-      nextId++;
-    }
-  }
-  return semanticIds;
-}
-```
-
-### Entropy Interpretation
-
-| Entropy | K=4 | Meaning |
-|---------|-----|---------|
-| 1.386 | 4 clusters | Maximum diversity (all unique meanings) |
-| 0.693 | 2 clusters | Moderate diversity |
-| 0.0 | 1 cluster | All samples semantically equivalent (repetition!) |
-
----
-
-## Comparison of Approaches
-
-| Aspect | N-gram (tsampler) | Semantic Entropy |
-|--------|-------------------|------------------|
-| Detects | Exact token sequences | Meaning equivalence |
-| Overhead | O(1) per token | O(K²) NLI calls per check |
-| False positives | Common code idioms | Rare (meaning-based) |
-| False negatives | Paraphrased repetition | Rare |
-| Best for | Loop prevention | Quality-critical generation |
-
-### When to Use Each
-
-- **streaming.mjs**: Basic infinite context with BlinkKV
-- **streaming-tsampler.mjs**: Long-form generation where exact loops are the concern
-- **streaming-semantic-entropy.mjs**: Quality-critical generation where semantic diversity matters
+| Method | Description |
+|--------|-------------|
+| `clearAndReseed(sinks, tail)` | Clear cache, re-decode sinks + tail |
+| `tokenize(text)` | Tokenize summary text for sink injection |
+| `kvCacheClear()` | Clear sidecar KV before each summary |
+| `formatChat(messages)` | Format anchor message with chat template |
 
 ---
 
 ## References
 
 1. Han et al. 2024 - "LM-Infinite: Zero-Shot Extreme Length Generalization" (BlinkKV)
-2. Farquhar et al. 2024 - "Detecting Hallucinations in Large Language Models Using Semantic Entropy" ([Nature](https://www.nature.com/articles/s41586-024-07421-0))
-3. Quevedo et al. 2024 - "Detecting Hallucinations: A Token Probability Approach" ([arXiv](https://arxiv.org/abs/2405.19648))
-4. llmware/slim-nli - Specialized NLI model for entailment ([HuggingFace](https://huggingface.co/llmware/slim-nli))

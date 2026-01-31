@@ -5,7 +5,8 @@ on:
     branches: [main]
     paths:
       - 'lib/index.d.ts'
-      - 'jsdoc.json'
+      - 'lib/Branch.js'
+      - 'typedoc.json'
       - 'README.md'
       - '.github/workflows/docs.yml'
   workflow_dispatch:

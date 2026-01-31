@@ -362,7 +362,7 @@ jobs:
 
           # Determine npm tag based on version
           if [[ "$VERSION" == *-alpha* ]]; then
-            NPM_TAG="latest"  # TODO: revert to "alpha" once released
+            NPM_TAG="alpha"
           elif [[ "$VERSION" == *-beta* ]]; then
             NPM_TAG="beta"
           elif [[ "$VERSION" == *-rc* ]]; then
@@ -394,7 +394,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-alpha* ]]; then
-            npm publish --tag latest --access public --provenance  # TODO: revert to "alpha" once released
+            npm publish --tag alpha --access public --provenance
           elif [[ "$VERSION" == *-beta* ]]; then
             npm publish --tag beta --access public --provenance
           elif [[ "$VERSION" == *-rc* ]]; then

@@ -3,6 +3,7 @@
 #include <napi.h>
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/metrics.hpp>
+#include <lloyal/branch.hpp>
 #include <llama/llama.h>
 #include <memory>
 #include <mutex>
@@ -350,6 +351,21 @@ private:
    */
   Napi::Value freePerplexityTracker(const Napi::CallbackInfo& info);
 
+  // ===== BRANCH API (internal, wrapped by lib/Branch.ts) =====
+
+  Napi::Value _branchCreate(const Napi::CallbackInfo& info);
+  Napi::Value _branchFork(const Napi::CallbackInfo& info);
+  Napi::Value _branchCaptureLogits(const Napi::CallbackInfo& info);
+  Napi::Value _branchDecodeAndCaptureOne(const Napi::CallbackInfo& info);
+  Napi::Value _branchSample(const Napi::CallbackInfo& info);
+  Napi::Value _branchAccept(const Napi::CallbackInfo& info);
+  Napi::Value _branchGetSeqId(const Napi::CallbackInfo& info);
+  Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);
+  Napi::Value _branchGetPerplexity(const Napi::CallbackInfo& info);
+  Napi::Value _branchPrune(const Napi::CallbackInfo& info);
+  Napi::Value _branchDestroy(const Napi::CallbackInfo& info);
+  Napi::Value _branchSamplerChainReseed(const Napi::CallbackInfo& info);
+
 private:
   // ===== INTERNAL STATE =====
 
@@ -371,6 +387,9 @@ private:
   // ===== HANDLE-BASED PERPLEXITY TRACKING =====
   std::unordered_map<int32_t, lloyal::metrics::PerplexityHandle> _perplexityHandles;
   int32_t _nextPerplexityHandle = 1;
+
+  // ===== BRANCH STORE =====
+  lloyal::branch::BranchStore _branchStore{16};  // capacity 16
 
   // ===== DECODE MUTEX =====
   std::mutex _decodeMutex;

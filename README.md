@@ -29,8 +29,8 @@ Working examples demonstrate each capability:
 
 | Example                                   | What It Demonstrates                                                          |
 | ----------------------------------------- | ----------------------------------------------------------------------------- |
-| [`best-of-n/`](./examples/best-of-n/)     | Multi-sequence generation, PPL selection, captured logits for fair comparison |
-| [`speculative/`](./examples/speculative/) | KV forking, draft/verify/accept/reject, `kvCacheRemove` for rejected tokens   |
+| [`best-of-n/`](./examples/best-of-n/)     | Branch API parallel generation, PPL selection, fork/produce/commit            |
+| [`speculative/`](./examples/speculative/) | Branch API fork/prune, draft/verify/accept/reject, bonus token sampling       |
 | [`entropy/`](./examples/entropy/)         | Entropy Decision Tree — `modelEntropy()` mid-generation as control signal     |
 | [`grammar/`](./examples/grammar/)         | Pull loop with generators, JSON schema constraints, KV + grammar branching    |
 | [`streaming/`](./examples/streaming/)     | Infinite context via BlinkKV, `clearAndReseed`, perplexity tracking           |
@@ -50,22 +50,56 @@ Each example has a README explaining the pattern in depth.
 
 ## Core Patterns
 
-### Forkable State
+### Branch API
 
-KV cache, grammar parser, and perplexity trackers all live behind handles. Handles clone atomically.
+`Branch` is the primary API for parallel generation. Each branch owns a KV cache sequence, sampler chain, logits snapshot, and perplexity tracker. Fork a branch to explore alternatives, compare by perplexity, prune losers.
 
-**Two forking strategies:**
+```javascript
+import { createContext, Branch } from '@lloyal-labs/lloyal.node';
+
+const ctx = await createContext({ modelPath: './model.gguf', nSeqMax: 8 });
+const tokens = await ctx.tokenize('Once upon a time');
+await ctx.decode(tokens, 0, 0);
+
+// Create root branch, capture logits from prefill
+const root = Branch.create(ctx, 0, tokens.length, { temperature: 0.8 });
+root.captureLogits();
+
+// Fork N candidates — each gets copied KV, logits, sampler, perplexity
+const candidates = [1, 2, 3, 4, 5].map((seqId, i) => {
+  const branch = root.fork(seqId);
+  branch.reseedSampler(1000 + i); // Unique PRNG per branch
+  return branch;
+});
+
+// Generate in parallel (interleaved round-robin)
+for (let t = 0; t < 50; t++) {
+  for (const branch of candidates) {
+    const { token, isStop } = branch.produce(); // Sample (no KV write)
+    if (isStop) continue;
+    branch.commit(token); // Accept + decode + capture
+  }
+}
+
+// Select best by perplexity, prune losers
+const best = candidates.reduce((a, b) => a.perplexity < b.perplexity ? a : b);
+for (const c of candidates) { if (c !== best) c.prune(); }
+```
+
+**What `fork()` clones:** KV cache sequence, logits snapshot, sampler chain (penalties + PRNG), perplexity tracker. Under unified KV (the default), forking is a metadata-only operation — no KV tensor buffers are copied.
+
+**Use cases:** Best-of-N sampling, speculative decoding, MCTS/LATS tree search, beam search.
+
+See [`examples/best-of-n/`](./examples/best-of-n/) and [`examples/speculative/`](./examples/speculative/) for complete patterns.
+
+### Low-Level Forking
+
+For fine-grained control without the Branch wrapper, raw KV and state operations are available:
 
 | Approach             | Method                            | Use Case                                     |
 | -------------------- | --------------------------------- | -------------------------------------------- |
 | **Tag copy**         | `kvSeqCopy(src, dst)`             | Parallel branches with different seqIds      |
 | **Snapshot/restore** | `kvCacheSave()` / `kvCacheLoad()` | Sequential exploration, return to checkpoint |
-
-[`examples/best-of-n/`](./examples/best-of-n/) uses tag copy — each candidate gets its own seqId, branches run in parallel:
-
-```javascript
-ctx.kvSeqCopy(0, seqId); // O(1) tag copy, branch diverges on seqId
-```
 
 [`examples/grammar/`](./examples/grammar/) uses snapshot/restore — save state, explore branches sequentially, restore between each:
 
@@ -74,25 +108,6 @@ const snapshot = await ctx.kvCacheSave(0); // Save checkpoint
 // ... explore branch ...
 await ctx.kvCacheLoad(0, snapshot); // Return to checkpoint
 ```
-
-Both approaches also fork grammar state with `cloneSampler()` when grammar constraints are involved.
-
-### Captured Logits
-
-After decode, logits represent P(next_token | context). When forking to multiple sequences, capture logits for fair comparison:
-
-```javascript
-// Capture after prefill
-const capturedLogits = new Float32Array(ctx.getLogits());
-
-// All candidates sample first token from same distribution
-const token = sampleWithStrategy(capturedLogits, { params, workspace, prng });
-
-// Compute surprisal from captured logits (native C++)
-const surprisal = ctx.modelSurprisal(token, 'nats', capturedLogits);
-```
-
-See [`examples/best-of-n/`](./examples/best-of-n/) for the full pattern.
 
 ### Entropy as Control Signal
 
