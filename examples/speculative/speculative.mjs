@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 /**
- * Speculative Decoding with Forkable KV State
+ * Speculative Decoding with Branch API
  *
- * This example demonstrates the KV cache primitives needed for speculative decoding:
- * - Draft tokens speculatively on a sequence
- * - Fork KV state for verification
- * - Accept/reject tokens and continue from accepted prefix
+ * This example demonstrates speculative decoding using the Branch primitive:
+ * - Main branch tracks committed state
+ * - Fork a draft branch for speculative generation
+ * - Prune draft on rejection, commit accepted tokens to main
+ * - Sample bonus token from main at rejection point
  *
  * Real speculative decoding uses a small "draft" model and large "target" model.
  * This example uses the same model for both (demonstrating the mechanics, not speedup).
+ *
+ * Branch API Benefits:
+ * - Atomic fork: KV + logits + sampler + perplexity cloned together
+ * - produce/commit separation: sample without KV write, then commit
+ * - Shared prefix: forked branches share KV for common prefix
+ * - Clean cleanup: prune() removes divergent KV entries
  *
  * References:
  * - Leviathan et al. 2023 "Fast Inference from Transformers via Speculative Decoding"
@@ -21,7 +28,7 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -32,7 +39,7 @@ const DEFAULT_MODEL = path.resolve(
 // Parse args
 const args = process.argv.slice(2);
 const jsonlMode = args.includes('--jsonl');
-const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+const modelPath = args.find((a) => !a.startsWith('--')) || DEFAULT_MODEL;
 
 /** Emit output - JSONL or human-readable */
 function emit(event, data) {
@@ -51,7 +58,7 @@ function emit(event, data) {
  *
  * Here we simulate by accepting tokens with probability based on draft confidence.
  */
-function simulateVerification(drafts, ctx) {
+function simulateVerification(drafts) {
   // In production: compare draft probabilities to target probabilities
   // Here: accept high-confidence drafts (low entropy), reject uncertain ones
   let accepted = 0;
@@ -74,12 +81,16 @@ async function main() {
   const GENERATION_LENGTH = 30;
 
   if (!jsonlMode) {
-    console.log('Speculative Decoding Demo');
-    console.log('=========================\n');
+    console.log('Speculative Decoding Demo (Branch API)');
+    console.log('======================================\n');
     console.log(`Loading model: ${path.basename(modelPath)}`);
   }
 
-  emit('start', { model: path.basename(modelPath), draftCount: DRAFT_COUNT, generationLength: GENERATION_LENGTH });
+  emit('start', {
+    model: path.basename(modelPath),
+    draftCount: DRAFT_COUNT,
+    generationLength: GENERATION_LENGTH,
+  });
 
   const ctx = await createContext({
     modelPath,
@@ -96,14 +107,22 @@ async function main() {
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
 
+  // Create main branch - tracks committed state
+  // Uses greedy sampling for the "target" model behavior
+  const main = Branch.create(ctx, 0, promptTokens.length, {
+    temperature: 0.7, // For bonus token sampling
+  });
+  main.captureLogits();
+
   const output = [];
-  let pos = promptTokens.length;
   let totalDrafted = 0;
   let totalAccepted = 0;
   let iterations = 0;
 
   if (!jsonlMode) {
-    console.log(`\nGenerating ${GENERATION_LENGTH} tokens with speculative decoding...\n`);
+    console.log(
+      `\nGenerating ${GENERATION_LENGTH} tokens with speculative decoding...\n`
+    );
     process.stdout.write(prompt);
   }
 
@@ -111,78 +130,77 @@ async function main() {
     iterations++;
 
     // === DRAFT PHASE ===
-    // Generate N speculative tokens greedily (fast, low quality is fine)
+    // Fork main branch for speculative drafting
+    // Draft branch shares KV prefix with main, diverges as it generates
+    const draft = main.fork(1);
+    draft.reseedSampler(iterations); // Different seed each iteration for diversity
+
     const drafts = [];
-    const draftStartPos = pos;
 
     for (let i = 0; i < DRAFT_COUNT && output.length + drafts.length < GENERATION_LENGTH; i++) {
+      // Get entropy BEFORE sampling (from current logits)
       const entropy = ctx.modelEntropy('nats');
-      const token = ctx.sample({ temperature: 0.0 }); // Greedy drafting
 
-      if (ctx.isStopToken(token)) break;
+      // produce() samples from captured logits (no KV write yet)
+      const { token, text, isStop } = draft.produce();
 
-      drafts.push({
-        token,
-        text: ctx.tokenToText(token),
-        entropy,
-      });
+      if (isStop) break;
 
-      await ctx.decode([token], pos++, 0);
+      drafts.push({ token, text, entropy });
+
+      // commit() accepts token + decodes + captures new logits
+      draft.commit(token);
     }
 
-    if (drafts.length === 0) break;
+    if (drafts.length === 0) {
+      draft.prune();
+      break;
+    }
     totalDrafted += drafts.length;
 
     // === VERIFY PHASE ===
-    // Fork KV state for verification (in real impl: run target model on seq 1)
-    ctx.kvSeqCopy(0, 1);
-
     // Simulate verification - in production this compares draft vs target distributions
-    const acceptedCount = simulateVerification(drafts, ctx);
+    const acceptedCount = simulateVerification(drafts);
     totalAccepted += acceptedCount;
 
-    // === ACCEPT/REJECT ===
-    // Keep only the accepted tokens
-    const accepted = drafts.slice(0, acceptedCount);
-    const rejected = drafts.slice(acceptedCount);
+    // === CLEANUP DRAFT ===
+    // Prune draft branch - removes its divergent KV entries
+    // Main branch is unchanged (still at pre-draft position)
+    draft.prune();
 
-    // Output accepted tokens
+    // === ACCEPT PHASE ===
+    // Commit accepted tokens to main branch
+    const accepted = drafts.slice(0, acceptedCount);
     for (const d of accepted) {
+      main.commit(d.token);
       if (!jsonlMode) {
         process.stdout.write(d.text);
       }
-      emit('token', { token: d.token, text: d.text, entropy: d.entropy, accepted: true });
+      emit('token', {
+        token: d.token,
+        text: d.text,
+        entropy: d.entropy,
+        accepted: true,
+      });
       output.push(d.token);
     }
 
-    // If we rejected some drafts, we need to:
-    // 1. Remove rejected tokens from KV cache
-    // 2. Sample one "bonus" token from the target model at the rejection point
+    // === BONUS TOKEN ===
+    // If we rejected some drafts, sample a bonus token from main
+    // Main is now at the accepted position with fresh logits
+    const rejected = drafts.slice(acceptedCount);
     if (rejected.length > 0) {
-      // Calculate position where rejection occurred
-      const rejectPos = draftStartPos + acceptedCount;
+      // produce() samples from main's current logits (at rejection point)
+      const { token: bonusToken, text: bonusText, isStop } = main.produce();
 
-      // Remove rejected tokens from KV cache (positions rejectPos to end)
-      await ctx.kvCacheRemove(0, rejectPos, -1);
-
-      // In real speculative decoding: sample from target distribution at rejection point
-      // Here we just sample with some temperature for diversity
-      const bonusToken = ctx.sample({ temperature: 0.7 });
-
-      if (!ctx.isStopToken(bonusToken)) {
-        const bonusText = ctx.tokenToText(bonusToken);
+      if (!isStop) {
+        main.commit(bonusToken);
         if (!jsonlMode) {
           process.stdout.write(bonusText);
         }
         emit('token', { token: bonusToken, text: bonusText, bonus: true });
         output.push(bonusToken);
-        await ctx.decode([bonusToken], rejectPos, 0);
-        pos = rejectPos + 1;
-      } else {
-        pos = rejectPos;
       }
-    } else {
-      // All drafts accepted - pos is already correct
     }
 
     emit('iteration', {
@@ -193,14 +211,14 @@ async function main() {
       hasBonus: rejected.length > 0,
     });
 
-    // Clean up verification sequence
-    await ctx.kvCacheRemove(1, 0, -1);
-
     // Check for natural stopping
     if (output.length > 0 && ctx.isStopToken(output[output.length - 1])) {
       break;
     }
   }
+
+  // Cleanup main branch
+  main.prune();
 
   // Statistics
   const acceptRate = totalDrafted > 0 ? totalAccepted / totalDrafted : 0;
@@ -225,20 +243,23 @@ async function main() {
     console.log(`  Output tokens: ${output.length}`);
 
     console.log('\n' + '='.repeat(50));
-    console.log('How Speculative Decoding Works');
+    console.log('How Speculative Decoding Works (Branch API)');
     console.log('='.repeat(50));
     console.log(`
-  1. DRAFT: Generate N tokens quickly (greedy, small model)
-  2. FORK:  Copy KV state for verification
-  3. VERIFY: Run target model on all N tokens in one batch
-  4. ACCEPT: Keep tokens where target agrees with draft
-  5. BONUS:  Sample one token from target at first rejection
-  6. REPEAT: Continue from accepted prefix + bonus token
+  1. MAIN:   Create main branch tracking committed state
+  2. FORK:   Fork draft branch (shares KV prefix with main)
+  3. DRAFT:  produce/commit N tokens on draft branch
+  4. VERIFY: Check draft confidence (entropy threshold)
+  5. PRUNE:  Remove draft branch (cleans up divergent KV)
+  6. COMMIT: Apply accepted tokens to main branch
+  7. BONUS:  Sample one token from main at rejection point
+  8. REPEAT: Continue from main's new position
 
-  Speedup comes from:
-  - Draft model is faster than target model
-  - Target verifies N tokens in ONE forward pass (batched)
-  - Accept rate determines actual speedup: higher = better
+  Branch API Advantages:
+  - Atomic fork: KV + logits + sampler copied together
+  - Shared prefix: Only divergent KV uses extra memory
+  - Clean separation: produce() samples, commit() writes
+  - Easy cleanup: prune() handles KV removal
 `);
   }
 

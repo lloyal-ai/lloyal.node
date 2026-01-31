@@ -1211,6 +1211,44 @@ export interface SessionContext {
    * Context becomes unusable after disposal.
    */
   dispose(): void;
+
+  // ===== BRANCH API (internal, wrapped by Branch class) =====
+
+  /** @internal Create a new branch for parallel generation */
+  _branchCreate(seqId: number, position: number, params?: SamplingParams): number;
+
+  /** @internal Fork a branch to a new sequence */
+  _branchFork(handle: number, newSeqId: number): number;
+
+  /** @internal Capture logits into branch's snapshot */
+  _branchCaptureLogits(handle: number): void;
+
+  /** @internal Decode a single token and capture logits */
+  _branchDecodeAndCaptureOne(handle: number, token: number): void;
+
+  /** @internal Sample next token from branch's logits snapshot */
+  _branchSample(handle: number): number;
+
+  /** @internal Accept token (update sampler state for penalties) */
+  _branchAccept(handle: number, token: number): void;
+
+  /** @internal Get branch's sequence ID */
+  _branchGetSeqId(handle: number): number;
+
+  /** @internal Get branch's current position */
+  _branchGetPosition(handle: number): number;
+
+  /** @internal Get branch's perplexity */
+  _branchGetPerplexity(handle: number): number;
+
+  /** @internal Prune branch (remove KV cache entries and free handle) */
+  _branchPrune(handle: number): void;
+
+  /** @internal Destroy branch (free handle without removing KV cache) */
+  _branchDestroy(handle: number): void;
+
+  /** @internal Reseed branch sampler PRNG for diversity after fork */
+  _branchSamplerChainReseed(handle: number, seed: number): void;
 }
 
 /**
@@ -1353,3 +1391,140 @@ export function withLogits<T>(
   ctx: SessionContext,
   fn: (logits: Float32Array) => T
 ): T;
+
+/**
+ * Result from Branch.produce()
+ */
+export interface Produced {
+  /** Sampled token ID */
+  token: number;
+  /** Text representation of the token */
+  text: string;
+  /** Whether this is a stop token (EOS) */
+  isStop: boolean;
+}
+
+/**
+ * Forkable inference handle for covalent generation
+ *
+ * A Branch owns everything needed for independent generation: a KV cache
+ * sequence, sampler chain, logits snapshot, and perplexity tracker.
+ *
+ * Forking is cheap — the KV prefix is shared in memory (metadata-only operation under unified KV —
+ * no KV tensor buffers are copied), so sibling branches read from the same physical KV entries.
+ * Only tokens decoded after the fork point are exclusive to each branch.
+ *
+ * Branches form trees, not just flat lists. Fork from root for best-of-N,
+ * fork from children for MCTS/beam search, fork from a draft for speculative
+ * decoding.
+ *
+ * The produce/commit protocol separates sampling from state advancement:
+ * produce() samples without writing to KV, letting you inspect the result
+ * before deciding to commit().
+ *
+ * @example Best-of-N with perplexity selection
+ * ```typescript
+ * const root = Branch.create(ctx, 0, tokens.length, { temperature: 0.8 });
+ * root.captureLogits();
+ *
+ * const candidates = [1, 2, 3, 4, 5].map((seqId, i) => {
+ *   const branch = root.fork(seqId);
+ *   branch.reseedSampler(1000 + i);
+ *   return branch;
+ * });
+ *
+ * for (let t = 0; t < 50; t++) {
+ *   for (const branch of candidates) {
+ *     const { token, isStop } = branch.produce();
+ *     if (isStop) continue;
+ *     branch.commit(token);
+ *   }
+ * }
+ *
+ * const best = candidates.reduce((a, b) => a.perplexity < b.perplexity ? a : b);
+ * for (const c of candidates) { if (c !== best) c.prune(); }
+ * ```
+ */
+export class Branch {
+  /**
+   * Create a root branch at the given position
+   *
+   * The branch takes ownership of the sequence and creates its own sampler
+   * chain from the provided params. Call captureLogits() after prefill to
+   * freeze the logit distribution before forking.
+   *
+   * @param ctx SessionContext to create branch on
+   * @param seqId Sequence ID for this branch
+   * @param position Starting position (typically prompt token count)
+   * @param params Sampling parameters (temperature, topP, etc.)
+   */
+  static create(
+    ctx: SessionContext,
+    seqId: number,
+    position: number,
+    params?: SamplingParams
+  ): Branch;
+
+  /**
+   * Fork this branch to a new sequence
+   *
+   * The child shares the parent's KV prefix in memory (metadata-only under unified KV, no KV buffer copy).
+   * Logits, sampler state, and perplexity tracker are cloned so the child
+   * can diverge independently. Fork from any branch — root or intermediate —
+   * to build arbitrarily deep trees.
+   *
+   * @param newSeqId Sequence ID for the forked branch
+   */
+  fork(newSeqId: number): Branch;
+
+  /** Freeze the current logit distribution into this branch. Essential before fork(). */
+  captureLogits(): void;
+
+  /** Decode a single token, write to KV, and capture resulting logits */
+  decodeAndCaptureOne(token: number): void;
+
+  /** Sample next token from branch's frozen logits snapshot */
+  sample(): number;
+
+  /** Accept token for repeat-penalty tracking */
+  accept(token: number): void;
+
+  /** Discard branch — remove its divergent KV entries and free the handle (use for losers) */
+  prune(): void;
+
+  /** Release handle but keep KV entries intact (use for winners, continue with raw ops) */
+  destroy(): void;
+
+  /**
+   * Reseed the sampler's PRNG for diversity after fork()
+   *
+   * CRITICAL for parallel generation: Without reseeding, all forked branches
+   * produce identical outputs because they share the same PRNG state.
+   *
+   * Only affects stochastic samplers (temperature > 0). Greedy samplers are unchanged.
+   *
+   * @param seed - New seed for the PRNG
+   */
+  reseedSampler(seed: number): void;
+
+  /** Sample next token without advancing state. Inspect before committing. */
+  produce(): Produced;
+
+  /** Accept and advance — write token to KV and update branch state. */
+  commit(token: number): void;
+
+  /** Branch's sequence ID */
+  readonly seqId: number;
+
+  /** Branch's current position */
+  readonly position: number;
+
+  /** Branch's perplexity */
+  readonly perplexity: number;
+
+  /** Internal handle (for debugging) */
+  readonly handle: number;
+
+  /** Whether this branch has been disposed */
+  readonly disposed: boolean;
+}

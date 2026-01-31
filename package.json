@@ -49,7 +49,8 @@
   "devDependencies": {
     "cmake-js": "^7.4.0",
     "glob": "^11.0.0",
-    "typedoc": "^0.27.5"
+    "typedoc": "^0.28.16",
+    "typedoc-rhineai-theme": "^1.2.0"
   },
   "optionalDependencies": {
     "@lloyal-labs/lloyal.node-darwin-arm64": "1.0.6-alpha",

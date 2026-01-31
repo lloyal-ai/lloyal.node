@@ -1,5 +1,6 @@
 {
   "$schema": "https://typedoc.org/schema.json",
+  "plugin": ["typedoc-rhineai-theme"],
   "entryPoints": ["lib/index.d.ts"],
   "out": "docs/api",
   "name": "lloyal.node API Reference",
