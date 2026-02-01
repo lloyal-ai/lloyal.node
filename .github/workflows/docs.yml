@@ -6,6 +6,7 @@ on:
     paths:
       - 'lib/index.d.ts'
       - 'lib/Branch.js'
+      - 'package.json'
       - 'typedoc.json'
       - 'README.md'
       - '.github/workflows/docs.yml'

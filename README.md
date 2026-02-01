@@ -1,14 +1,68 @@
 # lloyal.node
 
-**Advanced edge inference for Node.js**
+**Covalent inference for Node.js**
 
-A llama.cpp control surface in TypeScript with atomic inference state forking. Real time rolling perplexity/entropy/surprisal and multi-sequence parallel exploration primitives.
+Forkable inference state for llama.cpp — Branch a generation into a tree — branches share a KV prefix bond while each owns its own sampler chain, grammar, logits snapshot, and perplexity tracker. Under unified KV, forking is a metadata operation — no tensor buffers are copied — so tree search memory scales with divergent tokens, not total context.
+
+## The Branch API
+
+Fork from root for best-of-N, fork from children for MCTS/beam search, fork from a draft for speculative decoding. The produce/commit protocol separates sampling from state advancement — sample without writing to KV, inspect the result, then decide whether to commit.
+
+```javascript
+import { createContext, Branch } from '@lloyal-labs/lloyal.node';
+
+const ctx = await createContext({ modelPath: './model.gguf', nSeqMax: 8 });
+const tokens = await ctx.tokenize('Once upon a time');
+await ctx.decode(tokens, 0, 0);
+
+// Create root branch, freeze logits from prefill
+const root = Branch.create(ctx, 0, tokens.length, { temperature: 0.8 });
+root.captureLogits();
+
+// Fork N candidates — KV prefix shared, sampler/grammar/logits/perplexity cloned
+const candidates = [1, 2, 3, 4, 5].map((seqId, i) => {
+  const branch = root.fork(seqId);
+  branch.reseedSampler(1000 + i);
+  return branch;
+});
+
+// Generate (interleaved round-robin)
+for (let t = 0; t < 50; t++) {
+  for (const branch of candidates) {
+    const { token, isStop } = branch.produce(); // Sample, no KV write
+    if (isStop) continue;
+    branch.commit(token); // Accept + forward pass + capture
+  }
+}
+
+// Select by perplexity, prune losers
+const best = candidates.reduce((a, b) => (a.perplexity < b.perplexity ? a : b));
+for (const c of candidates) {
+  if (c !== best) c.prune();
+}
+```
+
+**What `fork()` shares:** KV cache prefix (metadata-only under unified KV — no tensor buffers copied).
+
+**What `fork()` clones:** Logits snapshot, sampler chain (penalties + PRNG), grammar state, logit bias, perplexity tracker.
+
+**Key methods:**
+
+- `produce()` / `commit()` — two-phase: sample without KV write, then advance
+- `prune()` — discard loser and its divergent KV entries
+- `destroy()` — release handle, keep KV (for winners continuing with raw ops)
+- `reseedSampler()` — unique PRNG per fork for stochastic diversity
+- `perplexity` — rolling PPL per branch for quality-based selection
+
+---
+
+## Install
 
 ```bash
 npm install @lloyal-labs/lloyal.node
 ```
 
-Prebuilt binaries for 13 platforms:
+Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, not install time.
 
 | Platform | Arch  | Acceleration        |
 | -------- | ----- | ------------------- |
@@ -19,95 +73,32 @@ Prebuilt binaries for 13 platforms:
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-GPU selection happens at runtime, not install time. See [distribution.md](docs/distribution.md) for details.
+See [distribution.md](docs/distribution.md) for details.
 
 ---
 
 ## Examples
 
-Working examples demonstrate each capability:
-
-| Example                                   | What It Demonstrates                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------- |
-| [`best-of-n/`](./examples/best-of-n/)     | Branch API parallel generation, PPL selection, fork/produce/commit            |
-| [`speculative/`](./examples/speculative/) | Branch API fork/prune, draft/verify/accept/reject, bonus token sampling       |
-| [`entropy/`](./examples/entropy/)         | Entropy Decision Tree — `modelEntropy()` mid-generation as control signal     |
-| [`grammar/`](./examples/grammar/)         | Pull loop with generators, JSON schema constraints, KV + grammar branching    |
-| [`streaming/`](./examples/streaming/)     | Infinite context via BlinkKV, `clearAndReseed`, perplexity tracking           |
-| [`chat/`](./examples/chat/)               | Interactive streaming chat                                                    |
-| [`embed/`](./examples/embed/)             | Text embeddings extraction                                                    |
+| Example                                   | Pattern                                                                    |
+| ----------------------------------------- | -------------------------------------------------------------------------- |
+| [`best-of-n/`](./examples/best-of-n/)     | Branch API: fork, produce/commit, perplexity selection                     |
+| [`speculative/`](./examples/speculative/) | Branch API: draft/verify, fork/prune, bonus token sampling                 |
+| [`streaming/`](./examples/streaming/)     | Infinite context via BlinkKV reseeding with sidecar summarization          |
+| [`entropy/`](./examples/entropy/)         | `modelEntropy()` mid-generation as control signal                          |
+| [`grammar/`](./examples/grammar/)         | Pull loop with generators, JSON schema constraints, KV + grammar branching |
+| [`chat/`](./examples/chat/)               | Interactive streaming chat                                                 |
+| [`embed/`](./examples/embed/)             | Text embeddings extraction                                                 |
 
 ```bash
 node examples/best-of-n/best-of-n.mjs
 node examples/speculative/speculative.mjs
-node examples/entropy/entropy.mjs
-node examples/grammar/grammar.mjs
 ```
 
-Each example has a README explaining the pattern in depth.
+Each example has a README explaining the pattern.
 
 ---
 
-## Core Patterns
-
-### Branch API
-
-`Branch` is the primary API for parallel generation. Each branch owns a KV cache sequence, sampler chain, logits snapshot, and perplexity tracker. Fork a branch to explore alternatives, compare by perplexity, prune losers.
-
-```javascript
-import { createContext, Branch } from '@lloyal-labs/lloyal.node';
-
-const ctx = await createContext({ modelPath: './model.gguf', nSeqMax: 8 });
-const tokens = await ctx.tokenize('Once upon a time');
-await ctx.decode(tokens, 0, 0);
-
-// Create root branch, capture logits from prefill
-const root = Branch.create(ctx, 0, tokens.length, { temperature: 0.8 });
-root.captureLogits();
-
-// Fork N candidates — each gets copied KV, logits, sampler, perplexity
-const candidates = [1, 2, 3, 4, 5].map((seqId, i) => {
-  const branch = root.fork(seqId);
-  branch.reseedSampler(1000 + i); // Unique PRNG per branch
-  return branch;
-});
-
-// Generate in parallel (interleaved round-robin)
-for (let t = 0; t < 50; t++) {
-  for (const branch of candidates) {
-    const { token, isStop } = branch.produce(); // Sample (no KV write)
-    if (isStop) continue;
-    branch.commit(token); // Accept + decode + capture
-  }
-}
-
-// Select best by perplexity, prune losers
-const best = candidates.reduce((a, b) => a.perplexity < b.perplexity ? a : b);
-for (const c of candidates) { if (c !== best) c.prune(); }
-```
-
-**What `fork()` clones:** KV cache sequence, logits snapshot, sampler chain (penalties + PRNG), perplexity tracker. Under unified KV (the default), forking is a metadata-only operation — no KV tensor buffers are copied.
-
-**Use cases:** Best-of-N sampling, speculative decoding, MCTS/LATS tree search, beam search.
-
-See [`examples/best-of-n/`](./examples/best-of-n/) and [`examples/speculative/`](./examples/speculative/) for complete patterns.
-
-### Low-Level Forking
-
-For fine-grained control without the Branch wrapper, raw KV and state operations are available:
-
-| Approach             | Method                            | Use Case                                     |
-| -------------------- | --------------------------------- | -------------------------------------------- |
-| **Tag copy**         | `kvSeqCopy(src, dst)`             | Parallel branches with different seqIds      |
-| **Snapshot/restore** | `kvCacheSave()` / `kvCacheLoad()` | Sequential exploration, return to checkpoint |
-
-[`examples/grammar/`](./examples/grammar/) uses snapshot/restore — save state, explore branches sequentially, restore between each:
-
-```javascript
-const snapshot = await ctx.kvCacheSave(0); // Save checkpoint
-// ... explore branch ...
-await ctx.kvCacheLoad(0, snapshot); // Return to checkpoint
-```
+## Other Patterns
 
 ### Entropy as Control Signal
 
@@ -124,26 +115,21 @@ if (entropy > 4.0) {
 
 See [`examples/entropy/`](./examples/entropy/) for entropy-triggered sampling strategies.
 
-### Pull Loop with Generators
+### Low-Level KV Operations
 
-For branching mid-generation, generators provide natural backpressure:
+For fine-grained control without Branch:
+
+| Approach             | Method                            | Use Case                                     |
+| -------------------- | --------------------------------- | -------------------------------------------- |
+| **Sequence copy**    | `kvSeqCopy(src, dst)`             | Share prefix across sequences                |
+| **Snapshot/restore** | `kvCacheSave()` / `kvCacheLoad()` | Sequential exploration, return to checkpoint |
+
+### Grammar-Constrained Generation
 
 ```javascript
-function* tokenGenerator(ctx, grammarHandle) {
-  while (true) {
-    const logits = ctx.getLogits();
-    ctx.applySampler(grammarHandle, logits);
-    const token = ctx.sample({ temperature: 0.7 });
-    if (ctx.isStopToken(token)) return;
-    ctx.acceptSamplerToken(grammarHandle, token);
-    yield { token, text: ctx.tokenToText(token) };
-  }
-}
-
-// Consumer controls pace — stop at branch point
-for (const { token, text } of gen) {
-  if (accumulated.includes('"city"')) break; // Pause here, branch
-}
+const grammar = ctx.jsonSchemaToGrammar(schema);
+const handle = ctx.createSampler(grammar);
+// Pull loop — consumer controls pace, can branch at any point
 ```
 
 See [`examples/grammar/`](./examples/grammar/) for the full pull loop pattern.
@@ -152,80 +138,9 @@ See [`examples/grammar/`](./examples/grammar/) for the full pull loop pattern.
 
 ## API Reference
 
-### Context Creation
+Full API documentation: **[lloyal-ai.github.io/lloyal.node](https://lloyal-ai.github.io/lloyal.node/)**
 
-```typescript
-const ctx = await createContext({
-  modelPath: string,       // Path to .gguf file (required)
-  nCtx?: number,           // Context size (default: 2048)
-  nThreads?: number,       // CPU threads (default: 4)
-  embeddings?: boolean,    // Enable embedding mode (default: false)
-  poolingType?: number,    // 0=NONE, 1=MEAN, 2=CLS, 3=LAST
-  nSeqMax?: number,        // Max parallel sequences (default: 1)
-});
-```
-
-### Core Methods
-
-| Method                        | Returns             | Description                     |
-| ----------------------------- | ------------------- | ------------------------------- |
-| `tokenize(text)`              | `Promise<number[]>` | Text → token IDs                |
-| `detokenize(tokens)`          | `Promise<string>`   | Token IDs → text                |
-| `tokenToText(token)`          | `string`            | Single token → text (streaming) |
-| `decode(tokens, pos, seqId?)` | `Promise<void>`     | Forward pass, updates KV cache  |
-| `sample(params?)`             | `number`            | Sample next token               |
-| `isStopToken(token)`          | `boolean`           | Check for EOS token             |
-| `getLogits()`                 | `Float32Array`      | Raw logits (zero-copy view)     |
-
-### KV Cache
-
-| Method                             | Returns           | Description                    |
-| ---------------------------------- | ----------------- | ------------------------------ |
-| `kvCacheSize(seqId?)`              | `number`          | Tokens in cache                |
-| `kvCacheClear()`                   | `Promise<void>`   | Clear all sequences            |
-| `kvCacheRemove(seqId, start, end)` | `Promise<void>`   | Remove token range             |
-| `kvCacheSave(seqId?)`              | `Promise<Buffer>` | Snapshot state                 |
-| `kvCacheLoad(seqId, state)`        | `Promise<void>`   | Restore state                  |
-| `kvSeqCopy(src, dst)`              | `void`            | Copy sequence (tag copy, O(1)) |
-| `kvSeqKeep(seqId)`                 | `void`            | Keep only one sequence         |
-| `clearAndReseed(sinks, tail)`      | `Promise<void>`   | BlinkKV pattern                |
-
-### Grammar (Handle-Based)
-
-| Method                           | Returns  | Description                 |
-| -------------------------------- | -------- | --------------------------- |
-| `jsonSchemaToGrammar(schema)`    | `string` | Schema → GBNF               |
-| `createSampler(grammarStr)`      | `number` | Create grammar handle       |
-| `cloneSampler(handle)`           | `number` | Clone grammar state         |
-| `applySampler(handle, logits)`   | `void`   | Apply constraints to logits |
-| `acceptSamplerToken(handle, id)` | `void`   | Advance parser state        |
-| `freeSamplerHandle(handle)`      | `void`   | Release grammar handle      |
-
-### Metrics
-
-| Method                                  | Returns         | Description                                |
-| --------------------------------------- | --------------- | ------------------------------------------ |
-| `modelEntropy(base?, logits?)`          | `number`        | Distribution entropy (bits/nats)           |
-| `modelSurprisal(token, base?, logits?)` | `number`        | Token surprisal (supports captured logits) |
-| `createPerplexityTracker()`             | `TrackerHandle` | Create tracker (forkable)                  |
-| `clonePerplexityTracker(handle)`        | `TrackerHandle` | Clone tracker state                        |
-| `addSurprisal(handle, value)`           | `void`          | Add to tracker                             |
-| `getPerplexity(handle)`                 | `number`        | Get current PPL                            |
-| `freePerplexityTracker(handle)`         | `void`          | Release tracker                            |
-
-### Embeddings
-
-| Method                      | Returns         | Description                 |
-| --------------------------- | --------------- | --------------------------- |
-| `encode(tokens)`            | `Promise<void>` | Forward pass for embeddings |
-| `getEmbeddings(normalize?)` | `Float32Array`  | Extract embedding vector    |
-| `getEmbeddingDimension()`   | `number`        | Vector dimension            |
-
-### Lifecycle
-
-| Method      | Description                          |
-| ----------- | ------------------------------------ |
-| `dispose()` | Free native resources (**required**) |
+Generated from [`lib/index.d.ts`](./lib/index.d.ts) with TypeDoc.
 
 ---
 
