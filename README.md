@@ -4,9 +4,7 @@
 
 Forkable inference state for llama.cpp — Branch a generation into a tree — prefix sharing is the bond between branches while each owns its own machinery (sampler chain, seed, grammar, logits snapshot, perplexity tracker) enabling controlled divergence at decode time.
 
-Under unified KV, forking is a metadata operation — no tensor buffers are copied — so tree search memory scales with divergent tokens, not total context.
-
-## The Branch API
+## Branch API
 
 Fork from root for best-of-N, fork from children for MCTS/beam search, fork from a draft for speculative decoding. The produce/commit protocol separates sampling from state advancement — sample without writing to KV, inspect the result, then decide whether to commit.
 
