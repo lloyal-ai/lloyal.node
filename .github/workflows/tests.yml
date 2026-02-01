@@ -58,6 +58,10 @@ jobs:
         run: |
           node -e "const fs = require('fs'); if (!fs.existsSync('llama.cpp/CMakeLists.txt')) throw new Error('llama.cpp submodule missing! Run: git submodule update --init --recursive'); console.log('✓ Submodules found');"
 
+      - name: Validate llama.cpp version
+        run: node scripts/sync-llama-cpp.js --check
+        shell: bash
+
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 

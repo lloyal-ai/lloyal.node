@@ -20,6 +20,7 @@
     "test:api": "node test/api.js",
     "test:e2e": "node test/e2e.js",
     "test:examples": "node test/examples.js",
+    "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "node examples/chat/chat.mjs"
   },
   "repository": {
