@@ -2,7 +2,9 @@
 
 **Covalent inference for Node.js**
 
-Forkable inference state for llama.cpp — Branch a generation into a tree — branches share a KV prefix bond while each owns its own sampler chain, grammar, logits snapshot, and perplexity tracker. Under unified KV, forking is a metadata operation — no tensor buffers are copied — so tree search memory scales with divergent tokens, not total context.
+Forkable inference state for llama.cpp — Branch a generation into a tree — prefix sharing is the bond between branches while each owns its own machinery (sampler chain, seed, grammar, logits snapshot, perplexity tracker) enabling controlled divergence at decode time.
+
+Under unified KV, forking is a metadata operation — no tensor buffers are copied — so tree search memory scales with divergent tokens, not total context.
 
 ## The Branch API
 
