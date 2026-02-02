@@ -2,7 +2,7 @@
 
 **Covalent inference for Node.js**
 
-Forkable inference state for llama.cpp — Branch a generation into a tree — prefix sharing is the bond between branches while each owns its own machinery (sampler chain, seed, grammar, logits snapshot, perplexity tracker) enabling controlled divergence at decode time.
+Forkable inference state for llama.cpp — Branch a generation into a tree — prefix sharing is the bond across branches while each owns its own machinery (sampler chain, seed, grammar, logits snapshot, perplexity tracker) enabling controlled divergence at decode time.
 
 ## Branch API
 
