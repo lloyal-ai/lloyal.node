@@ -204,14 +204,27 @@ endif()
 # =============================================================================
 # Post-Build: Copy Shared Libraries
 # =============================================================================
-# Copy llama.cpp shared libraries to the same directory as the .node file
-# This is required because RPATH is set to @loader_path (same directory)
-# Note: On Windows with static libs (BUILD_SHARED_LIBS=OFF), no copies needed
+# Copy llama.cpp shared libraries to the same directory as the .node file.
+# This is required because RPATH is set to @loader_path / $ORIGIN (same directory).
+#
+# llama.cpp sets SOVERSION on all shared targets, producing versioned filenames:
+#   macOS: libllama.0.0.X.dylib (real), libllama.0.dylib (soname), libllama.dylib (linker)
+#   Linux: libllama.so.0.0.X (real), libllama.so.0 (soname), libllama.so (linker)
+# The binary's load command references the SONAME (e.g., @rpath/libllama.0.dylib),
+# so all three variants must be present for runtime loading to succeed.
+#
+# Note: On Windows, BUILD_SHARED_LIBS=OFF (static linking), so this section is skipped.
 
 if(BUILD_SHARED_LIBS)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:llama>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_SONAME_FILE:llama>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_LINKER_FILE:llama>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMENT "Copying libllama to output directory"
     )
@@ -221,6 +234,12 @@ if(BUILD_SHARED_LIBS)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:ggml>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_SONAME_FILE:ggml>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_LINKER_FILE:ggml>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMENT "Copying libggml to output directory"
     )
 
@@ -228,12 +247,24 @@ if(BUILD_SHARED_LIBS)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:ggml-base>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_SONAME_FILE:ggml-base>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_LINKER_FILE:ggml-base>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMENT "Copying libggml-base to output directory"
     )
 
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:ggml-cpu>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_SONAME_FILE:ggml-cpu>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_LINKER_FILE:ggml-cpu>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMENT "Copying libggml-cpu to output directory"
     )
@@ -244,6 +275,12 @@ if(BUILD_SHARED_LIBS)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:ggml-metal>
                 $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_SONAME_FILE:ggml-metal>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:ggml-metal>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
             COMMENT "Copying libggml-metal to output directory"
         )
     endif()
@@ -252,6 +289,12 @@ if(BUILD_SHARED_LIBS)
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:ggml-cuda>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_SONAME_FILE:ggml-cuda>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:ggml-cuda>
                 $<TARGET_FILE_DIR:${PROJECT_NAME}>
             COMMENT "Copying libggml-cuda to output directory"
         )
@@ -262,6 +305,12 @@ if(BUILD_SHARED_LIBS)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:ggml-vulkan>
                 $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_SONAME_FILE:ggml-vulkan>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:ggml-vulkan>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
             COMMENT "Copying libggml-vulkan to output directory"
         )
     endif()
@@ -270,6 +319,12 @@ if(BUILD_SHARED_LIBS)
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:ggml-blas>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_SONAME_FILE:ggml-blas>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:ggml-blas>
                 $<TARGET_FILE_DIR:${PROJECT_NAME}>
             COMMENT "Copying libggml-blas to output directory"
         )

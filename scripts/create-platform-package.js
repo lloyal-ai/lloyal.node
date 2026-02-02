@@ -79,8 +79,9 @@ if (osName === 'darwin') {
   });
 
 } else if (osName === 'linux') {
-  // Copy all .so files
-  const sos = fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.so'));
+  // Copy all .so files including versioned variants (e.g., libllama.so.0, libllama.so.0.0.X)
+  // llama.cpp sets SOVERSION, producing versioned names that the binary references at runtime
+  const sos = fs.readdirSync(BUILD_DIR).filter(f => /\.so(\.\d+)*$/.test(f));
   if (sos.length > 0) {
     sos.forEach(so => {
       fs.copyFileSync(path.join(BUILD_DIR, so), path.join(BIN_DIR, so));

@@ -36,3 +36,5 @@ Thumbs.db
 .cache/
 
 tmp/
+
+packages/darwin-arm64
