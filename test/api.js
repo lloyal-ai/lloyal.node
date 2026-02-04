@@ -21,9 +21,14 @@ console.log('=== liblloyal-node Integration Test ===\n');
 console.log(`Model: ${MODEL_PATH}`);
 console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(2)} MB\n`);
 
-// Load addon via lib (uses runtime loading with fallback)
+// Load addon — prefer local build for development, fall back to loadBinary for CI
 const { loadBinary } = require('..');
-const addon = loadBinary();
+let addon;
+try {
+  addon = require('../build/Release/lloyal.node');
+} catch {
+  addon = loadBinary();
+}
 
 async function runTests() {
   let ctx = null;
@@ -616,8 +621,10 @@ ws ::= [ \\t\\n]*`;
 
       const greedy = { temperature: 0 };
 
-      // Turn 1: ctx.decode → Branch.create → generate
-      const turn1Toks = await bCtx.tokenize(turnInputs[0]);
+      // Turn 1: format with chat template → ctx.decode → Branch.create → generate
+      const messages = [{ role: 'user', content: turnInputs[0] }];
+      const { prompt: turn1Prompt } = await bCtx.formatChat(JSON.stringify(messages));
+      const turn1Toks = await bCtx.tokenize(turn1Prompt);
       await bCtx.decode(turn1Toks, 0, 0);
 
       const trunk = Branch.create(bCtx, 0, turn1Toks.length, greedy);
@@ -642,10 +649,18 @@ ws ::= [ \\t\\n]*`;
       console.log(`    "${gen1Text.trim()}"`);
 
       let prevPos = trunk.position;
+      let lastKVText = turn1Prompt + gen1Text;  // text representation of what's in KV
+      let lastGenText = gen1Text;
 
-      // Turns 2-4: branch.prefill → generate (same branch, growing inputs)
+      // Turns 2-4: format growing conversation → diff → prefill → generate
       for (let t = 1; t < turnInputs.length; t++) {
-        const inputToks = await bCtx.tokenize(turnInputs[t]);
+        // Build conversation with previous assistant response + new user message
+        messages.push({ role: 'assistant', content: lastGenText });
+        messages.push({ role: 'user', content: turnInputs[t] });
+
+        const { prompt: fullPrompt } = await bCtx.formatChat(JSON.stringify(messages));
+        const newContent = fullPrompt.slice(lastKVText.length);
+        const inputToks = await bCtx.tokenize(newContent);
         const expectedPos = prevPos + inputToks.length;
 
         trunk.prefill(inputToks);
@@ -674,6 +689,8 @@ ws ::= [ \\t\\n]*`;
         console.log(`  ✓ Turn ${t + 1}: ${gen.length} tokens, pos=${trunk.position}, ppl=${trunk.perplexity.toFixed(2)}`);
         console.log(`    "${genText.trim()}"`);
 
+        lastKVText = fullPrompt + genText;
+        lastGenText = genText;
         prevPos = trunk.position;
       }
 
@@ -694,7 +711,7 @@ ws ::= [ \\t\\n]*`;
 
     {
       // A prompt long enough to exercise multi-batch chunking at nBatch=32
-      const ablationPrompt = turnInputs.join('');
+      const ablationContent = turnInputs.join('');
       const nBatchValues = [32, 64, 128, 512];
       const resultsByBatch = {};
 
@@ -706,6 +723,9 @@ ws ::= [ \\t\\n]*`;
           nThreads: 4,
         });
 
+        // Format with chat template so instruct model enters generation mode
+        const aMessages = [{ role: 'user', content: ablationContent }];
+        const { prompt: ablationPrompt } = await aCtx.formatChat(JSON.stringify(aMessages));
         const promptToks = await aCtx.tokenize(ablationPrompt);
         await aCtx.decode(promptToks, 0, 0);
 
