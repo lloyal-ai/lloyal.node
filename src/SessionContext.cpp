@@ -632,6 +632,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchFork", &SessionContext::_branchFork),
     InstanceMethod("_branchCaptureLogits", &SessionContext::_branchCaptureLogits),
     InstanceMethod("_branchDecodeAndCaptureOne", &SessionContext::_branchDecodeAndCaptureOne),
+    InstanceMethod("_branchDecodeAndCaptureBatch", &SessionContext::_branchDecodeAndCaptureBatch),
     InstanceMethod("_branchSample", &SessionContext::_branchSample),
     InstanceMethod("_branchAccept", &SessionContext::_branchAccept),
     InstanceMethod("_branchGetSeqId", &SessionContext::_branchGetSeqId),
@@ -2006,6 +2007,12 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
     params = adaptSamplingParamsFromJS(info[2].As<Napi::Object>());
   }
 
+  // Per-branch nBatch override (optional 4th arg), falls back to context default
+  int32_t nBatch = _nBatch;
+  if (info.Length() >= 4 && info[3].IsNumber()) {
+    nBatch = info[3].As<Napi::Number>().Int32Value();
+  }
+
   // Create branch using lloyal::branch::create
   auto handle = lloyal::branch::create(
     _context,
@@ -2013,7 +2020,7 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
     seqId,
     position,
     params,
-    _nBatch,  // n_batch for decode operations
+    nBatch,  // per-branch override or context default
     nullptr,  // grammar_str
     nullptr,  // boundary_tracker
     &_branchStore
@@ -2072,6 +2079,40 @@ Napi::Value SessionContext::_branchDecodeAndCaptureOne(const Napi::CallbackInfo&
   auto token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
 
   lloyal::branch::decode_and_capture_one(handle, token, &_branchStore);
+
+  return env.Undefined();
+}
+
+// Bulk-decode tokens into a branch's KV cache and capture final logits.
+//
+// tokens.size() is the total token count (n_tokens).  The branch's n_batch
+// (set at Branch.create via the nBatch parameter, stored on BranchState)
+// controls the chunk size — decode_and_capture_batch passes both to
+// decoder::decode_tokens which loops: min(n_tokens - processed, n_batch)
+// tokens per llama_decode call.
+//
+// Does NOT accept tokens into the sampler's penalty window.
+// Wrapped by Branch.prefill() on the JS side.
+Napi::Value SessionContext::_branchDecodeAndCaptureBatch(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsArray()) {
+    throw Napi::Error::New(env, "_branchDecodeAndCaptureBatch requires (handle, tokens[])");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  Napi::Array jsTokens = info[1].As<Napi::Array>();
+  std::vector<llama_token> tokens;
+  tokens.reserve(jsTokens.Length());
+  for (uint32_t i = 0; i < jsTokens.Length(); i++) {
+    tokens.push_back(static_cast<llama_token>(jsTokens.Get(i).As<Napi::Number>().Int32Value()));
+  }
+
+  if (!tokens.empty()) {
+    lloyal::branch::decode_and_capture_batch(handle, tokens.data(), tokens.size(), &_branchStore);
+  }
 
   return env.Undefined();
 }

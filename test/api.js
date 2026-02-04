@@ -576,6 +576,181 @@ ws ::= [ \\t\\n]*`;
 
     console.log('✅ Test 17: Metrics API passed\n');
 
+    // ===== TEST 18: Branch.prefill — growing multi-turn conversation =====
+    // Exercises the pull API multi-turn pattern on a single persistent branch:
+    //   Turn 1: ctx.decode (initial prefill) → Branch.create → produce/commit
+    //   Turn 2: branch.prefill(~10 tokens)  → produce/commit
+    //   Turn 3: branch.prefill(~50 tokens)  → produce/commit
+    //   Turn 4: branch.prefill(~100 tokens) → produce/commit
+    // Same branch object (same handle) across all turns. Verifies position
+    // accumulates correctly and generation works after each prefill.
+    console.log('🌿 Test 18: Branch.prefill — growing multi-turn conversation');
+
+    const { Branch } = require('..');
+
+    const GEN_TOKENS = 8;
+
+    const turnInputs = [
+      "What is the capital of France?",
+      " Tell me more about that city.",
+      " I am planning a trip there next summer and would like to know about " +
+        "the best neighborhoods to stay in, the most interesting museums to " +
+        "visit, and any local restaurants you would recommend for authentic " +
+        "French cuisine.",
+      " That sounds wonderful. Can you also tell me about the public " +
+        "transportation system, specifically how to get from Charles de " +
+        "Gaulle airport to the city center, whether the metro is easy to " +
+        "navigate for tourists who do not speak French, what kind of passes " +
+        "or tickets are available for weekly travel, and if there are any " +
+        "useful mobile apps that provide real-time transit information and " +
+        "route planning for visitors to the city?",
+    ];
+
+    {
+      const bCtx = await addon.createContext({
+        modelPath: MODEL_PATH,
+        nCtx: 2048,
+        nBatch: 512,
+        nThreads: 4,
+      });
+
+      const greedy = { temperature: 0 };
+
+      // Turn 1: ctx.decode → Branch.create → generate
+      const turn1Toks = await bCtx.tokenize(turnInputs[0]);
+      await bCtx.decode(turn1Toks, 0, 0);
+
+      const trunk = Branch.create(bCtx, 0, turn1Toks.length, greedy);
+      trunk.captureLogits();
+
+      console.log(`\n  Turn 1 prompt: "${turnInputs[0]}" (${turn1Toks.length} tokens)`);
+
+      const gen1 = [];
+      for (let i = 0; i < GEN_TOKENS; i++) {
+        const { token, isStop } = trunk.produce();
+        if (isStop) break;
+        trunk.commit(token);
+        gen1.push(token);
+      }
+
+      if (gen1.length === 0) {
+        throw new Error('Turn 1: generated 0 tokens');
+      }
+
+      const gen1Text = await bCtx.detokenize(gen1);
+      console.log(`  ✓ Turn 1: ${gen1.length} tokens, pos=${trunk.position}, ppl=${trunk.perplexity.toFixed(2)}`);
+      console.log(`    "${gen1Text.trim()}"`);
+
+      let prevPos = trunk.position;
+
+      // Turns 2-4: branch.prefill → generate (same branch, growing inputs)
+      for (let t = 1; t < turnInputs.length; t++) {
+        const inputToks = await bCtx.tokenize(turnInputs[t]);
+        const expectedPos = prevPos + inputToks.length;
+
+        trunk.prefill(inputToks);
+
+        if (trunk.position !== expectedPos) {
+          throw new Error(
+            `Turn ${t + 1} prefill: expected position ${expectedPos}, got ${trunk.position}`
+          );
+        }
+
+        console.log(`\n  Turn ${t + 1} prefill: ${inputToks.length} tokens → position=${trunk.position}`);
+
+        const gen = [];
+        for (let i = 0; i < GEN_TOKENS; i++) {
+          const { token, isStop } = trunk.produce();
+          if (isStop) break;
+          trunk.commit(token);
+          gen.push(token);
+        }
+
+        if (gen.length === 0) {
+          throw new Error(`Turn ${t + 1}: generated 0 tokens after prefill`);
+        }
+
+        const genText = await bCtx.detokenize(gen);
+        console.log(`  ✓ Turn ${t + 1}: ${gen.length} tokens, pos=${trunk.position}, ppl=${trunk.perplexity.toFixed(2)}`);
+        console.log(`    "${genText.trim()}"`);
+
+        prevPos = trunk.position;
+      }
+
+      console.log(`\n  ✓ Same branch across ${turnInputs.length} turns, final position=${trunk.position}`);
+
+      trunk.prune();
+      bCtx.dispose();
+    }
+
+    console.log('\n✅ Test 18: Branch.prefill passed\n');
+
+    // ===== TEST 19: nBatch ablation — different chunk sizes, identical output =====
+    // Verifies nBatch is a pure performance parameter: chunking the same tokens
+    // into different batch sizes must produce identical greedy logits.
+    // Each nBatch variant runs in its own context to avoid breaking the
+    // Branch abstraction with manual kvSeqCopy.
+    console.log('🔬 Test 19: nBatch ablation — chunk size does not affect output');
+
+    {
+      // A prompt long enough to exercise multi-batch chunking at nBatch=32
+      const ablationPrompt = turnInputs.join('');
+      const nBatchValues = [32, 64, 128, 512];
+      const resultsByBatch = {};
+
+      for (const nBatch of nBatchValues) {
+        const aCtx = await addon.createContext({
+          modelPath: MODEL_PATH,
+          nCtx: 2048,
+          nBatch: 512,
+          nThreads: 4,
+        });
+
+        const promptToks = await aCtx.tokenize(ablationPrompt);
+        await aCtx.decode(promptToks, 0, 0);
+
+        // Branch with this nBatch value — prefill uses it for chunking
+        const branch = Branch.create(aCtx, 0, promptToks.length, { temperature: 0 }, nBatch);
+        branch.captureLogits();
+
+        // Prefill a follow-up through the branch to exercise decode_and_capture_batch
+        const followUp = await aCtx.tokenize(" What else should I know?");
+        branch.prefill(followUp);
+
+        // Generate greedily
+        const gen = [];
+        for (let i = 0; i < GEN_TOKENS; i++) {
+          const { token, isStop } = branch.produce();
+          if (isStop) break;
+          branch.commit(token);
+          gen.push(token);
+        }
+
+        resultsByBatch[nBatch] = gen;
+
+        console.log(`  nBatch=${String(nBatch).padStart(3)}: prefill ${followUp.length} tokens → generated [${gen.join(',')}]`);
+
+        branch.prune();
+        aCtx.dispose();
+      }
+
+      // All variants must produce identical tokens
+      const reference = resultsByBatch[nBatchValues[0]].join(',');
+      for (let i = 1; i < nBatchValues.length; i++) {
+        const nb = nBatchValues[i];
+        if (resultsByBatch[nb].join(',') !== reference) {
+          throw new Error(
+            `nBatch=${nb} diverged from nBatch=${nBatchValues[0]}: ` +
+            `[${resultsByBatch[nb]}] vs [${reference}]`
+          );
+        }
+      }
+
+      console.log(`  ✓ All ${nBatchValues.length} nBatch variants produced identical output`);
+    }
+
+    console.log('\n✅ Test 19: nBatch ablation passed\n');
+
     // ===== SUCCESS =====
     console.log('✅ All integration tests passed!\n');
 

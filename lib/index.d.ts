@@ -1225,7 +1225,7 @@ export interface SessionContext {
   // ===== BRANCH API (internal, wrapped by Branch class) =====
 
   /** @internal Create a new branch for parallel generation */
-  _branchCreate(seqId: number, position: number, params?: SamplingParams): number;
+  _branchCreate(seqId: number, position: number, params?: SamplingParams, nBatch?: number): number;
 
   /** @internal Fork a branch to a new sequence */
   _branchFork(handle: number, newSeqId: number): number;
@@ -1235,6 +1235,9 @@ export interface SessionContext {
 
   /** @internal Decode a single token and capture logits */
   _branchDecodeAndCaptureOne(handle: number, token: number): void;
+
+  /** @internal Decode multiple tokens in n_batch-sized chunks and capture logits */
+  _branchDecodeAndCaptureBatch(handle: number, tokens: number[]): void;
 
   /** @internal Sample next token from branch's logits snapshot */
   _branchSample(handle: number): number;
@@ -1467,12 +1470,14 @@ export class Branch {
    * @param seqId Sequence ID for this branch
    * @param position Starting position (typically prompt token count)
    * @param params Sampling parameters (temperature, topP, etc.)
+   * @param nBatch Per-branch batch size override (defaults to context nBatch)
    */
   static create(
     ctx: SessionContext,
     seqId: number,
     position: number,
-    params?: SamplingParams
+    params?: SamplingParams,
+    nBatch?: number
   ): Branch;
 
   /**
@@ -1492,6 +1497,27 @@ export class Branch {
 
   /** Decode a single token, write to KV, and capture resulting logits */
   decodeAndCaptureOne(token: number): void;
+
+  /**
+   * Bulk-decode tokens into the branch's KV cache and capture logits.
+   *
+   * `tokens.length` is the total count to process; the branch's `nBatch`
+   * (set at `Branch.create`) controls how many are sent per `llama_decode`
+   * call. E.g. 500 tokens with `nBatch=64` → 8 calls (7×64 + 1×52).
+   *
+   * Advances `position` by `tokens.length`. Stores final logits into the
+   * branch's internal snapshot — the next `produce()`/`sample()` reads
+   * from it.
+   *
+   * Does NOT accept tokens into the repeat-penalty window — for external
+   * tokens (user input between turns), not model-generated tokens.
+   * For model output, use `commit()` which does accept + decode.
+   *
+   * Branch-level equivalent of `ctx.decode()`.
+   *
+   * @param tokens - Token IDs to decode
+   */
+  prefill(tokens: number[]): void;
 
   /** Sample next token from branch's frozen logits snapshot */
   sample(): number;
