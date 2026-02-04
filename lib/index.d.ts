@@ -74,6 +74,16 @@ export interface ContextOptions {
   nThreads?: number;
 
   /**
+   * Batch size for token processing
+   *
+   * Controls how many tokens are processed per llama_decode call.
+   * Higher values improve throughput for prompt prefill at the cost of memory.
+   * Also sets llama_context_params.n_batch and n_ubatch at context creation.
+   * Default: 512
+   */
+  nBatch?: number;
+
+  /**
    * Enable embedding extraction mode
    *
    * When true, context is optimized for embedding extraction.

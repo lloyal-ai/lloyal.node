@@ -401,12 +401,12 @@ private:
 class DecodeWorker : public Napi::AsyncWorker {
 public:
   DecodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens,
-               int32_t pos, llama_seq_id seqId = 0)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _pos(pos), _seqId(seqId) {}
+               int32_t pos, llama_seq_id seqId, int32_t nBatch)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _pos(pos), _seqId(seqId), _nBatch(nBatch) {}
 
   void Execute() override {
     try {
-      lloyal::decoder::decode_tokens(_ctx, _tokens, _pos, lloyal::defaults::N_BATCH_PROCESS, _seqId);
+      lloyal::decoder::decode_tokens(_ctx, _tokens, _pos, _nBatch, _seqId);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -428,6 +428,7 @@ private:
   std::vector<llama_token> _tokens;
   int32_t _pos;
   llama_seq_id _seqId;
+  int32_t _nBatch;
 };
 
 /**
@@ -436,12 +437,12 @@ private:
  */
 class EncodeWorker : public Napi::AsyncWorker {
 public:
-  EncodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens) {}
+  EncodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens, int32_t nBatch)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _nBatch(nBatch) {}
 
   void Execute() override {
     try {
-      lloyal::embedding::encode(_ctx, _tokens, lloyal::defaults::N_BATCH_PROCESS);
+      lloyal::embedding::encode(_ctx, _tokens, _nBatch);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -461,6 +462,7 @@ private:
   Napi::Promise::Deferred _deferred;
   llama_context* _ctx;
   std::vector<llama_token> _tokens;
+  int32_t _nBatch;
 };
 
 /**
@@ -694,10 +696,12 @@ SessionContext::~SessionContext() {
 
 void SessionContext::initializeContext(
   std::shared_ptr<llama_model> model,
-  llama_context* context
+  llama_context* context,
+  int32_t nBatch
 ) {
   _model = std::move(model);
   _context = context;
+  _nBatch = nBatch;
 
   std::cerr << "[SessionContext::initializeContext] Initialized:" << std::endl;
   std::cerr << "  Model ptr: " << static_cast<void*>(_model.get()) << std::endl;
@@ -811,7 +815,7 @@ Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
   }
 
   // Run async
-  auto* worker = new DecodeWorker(env, _context, tokens, position, seqId);
+  auto* worker = new DecodeWorker(env, _context, tokens, position, seqId, _nBatch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1005,7 +1009,7 @@ Napi::Value SessionContext::encode(const Napi::CallbackInfo& info) {
   }
 
   // Run async
-  auto* worker = new EncodeWorker(env, _context, tokens);
+  auto* worker = new EncodeWorker(env, _context, tokens, _nBatch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1619,7 +1623,7 @@ Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
     _decodeStepId++;
 
     // Decode
-    lloyal::decoder::decode_tokens(_context, tokens, position, 512, seqId);
+    lloyal::decoder::decode_tokens(_context, tokens, position, _nBatch, seqId);
 
     // Capture logits immediately
     float* logits = lloyal::logits::get(_context, -1);
@@ -1809,10 +1813,7 @@ Napi::Value SessionContext::clearAndReseed(const Napi::CallbackInfo& info) {
     tail.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
   }
 
-  // Use default batch size (512) from context params
-  int32_t n_batch = 512;
-
-  auto* worker = new ClearAndReseedWorker(env, _context, std::move(sinks), std::move(tail), n_batch);
+  auto* worker = new ClearAndReseedWorker(env, _context, std::move(sinks), std::move(tail), _nBatch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1883,6 +1884,12 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     nCtx = options.Get("nCtx").As<Napi::Number>().Int32Value();
   }
 
+  // Extract nBatch (optional, default N_BATCH_INIT = 512)
+  int32_t nBatch = lloyal::defaults::N_BATCH_INIT;
+  if (options.Has("nBatch") && options.Get("nBatch").IsNumber()) {
+    nBatch = options.Get("nBatch").As<Napi::Number>().Int32Value();
+  }
+
   // Extract nThreads (optional, 0 = auto)
   int32_t nThreads = 0;  // 0 = llama.cpp auto-detects
   if (options.Has("nThreads") && options.Get("nThreads").IsNumber()) {
@@ -1948,8 +1955,8 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   // Create context
   llama_context_params ctx_params = llama_context_default_params();
   ctx_params.n_ctx = static_cast<uint32_t>(nCtx);
-  ctx_params.n_batch = lloyal::defaults::N_BATCH_INIT;
-  ctx_params.n_ubatch = lloyal::defaults::N_BATCH_INIT;
+  ctx_params.n_batch = static_cast<uint32_t>(nBatch);
+  ctx_params.n_ubatch = static_cast<uint32_t>(nBatch);
   ctx_params.n_threads = static_cast<uint32_t>(nThreads);
   ctx_params.n_seq_max = static_cast<uint32_t>(nSeqMax);
   ctx_params.kv_unified = true;  // Share KV across sequences (efficient for branching)
@@ -1974,7 +1981,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   SessionContext* obj = SessionContext::Unwrap(instance);
 
   // Initialize
-  obj->initializeContext(std::move(sharedModel), ctx);
+  obj->initializeContext(std::move(sharedModel), ctx, nBatch);
 
   std::cout << "[CreateContext] SessionContext initialized" << std::endl;
   return instance;
@@ -2006,7 +2013,7 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
     seqId,
     position,
     params,
-    64,       // penalty_last_n default
+    _nBatch,  // n_batch for decode operations
     nullptr,  // grammar_str
     nullptr,  // boundary_tracker
     &_branchStore

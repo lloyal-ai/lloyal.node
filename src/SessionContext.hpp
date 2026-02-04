@@ -72,7 +72,8 @@ public:
    */
   void initializeContext(
     std::shared_ptr<llama_model> model,
-    llama_context* context
+    llama_context* context,
+    int32_t nBatch = lloyal::defaults::N_BATCH_INIT
   );
 
 private:
@@ -372,6 +373,7 @@ private:
   std::shared_ptr<llama_model> _model;
   llama_context* _context = nullptr;
   bool _disposed = false;
+  int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
 
   // Persistent sampling chain (for repeat penalty tracking across tokens)
   // Pattern from branch.hpp: create once via sampler::create_chain(), reuse across samples.
