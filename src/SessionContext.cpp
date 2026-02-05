@@ -362,12 +362,19 @@ private:
  */
 class TokenizeWorker : public Napi::AsyncWorker {
 public:
-  TokenizeWorker(Napi::Env env, std::shared_ptr<llama_model> model, const std::string& text)
-    : AsyncWorker(env), _deferred(env), _model(model), _text(text) {}
+  TokenizeWorker(Napi::Env env, std::shared_ptr<llama_model> model,
+                 const std::string& text, bool addSpecial, bool addSpecialOverridden)
+    : AsyncWorker(env), _deferred(env), _model(model), _text(text),
+      _addSpecial(addSpecial), _addSpecialOverridden(addSpecialOverridden) {}
 
   void Execute() override {
-    // Use convenience overload that auto-extracts vocab and handles add_bos
-    _result = lloyal::tokenizer::tokenize(_model.get(), _text);
+    if (_addSpecialOverridden) {
+      const llama_vocab* vocab = llama_model_get_vocab(_model.get());
+      _result = lloyal::tokenizer::tokenize(vocab, _text, _addSpecial, true);
+    } else {
+      // Use convenience overload that auto-extracts vocab and handles add_bos
+      _result = lloyal::tokenizer::tokenize(_model.get(), _text);
+    }
     if (_result.empty()) {
       SetError("Tokenization failed");
     }
@@ -392,6 +399,8 @@ private:
   Napi::Promise::Deferred _deferred;
   std::shared_ptr<llama_model> _model;
   std::string _text;
+  bool _addSpecial;
+  bool _addSpecialOverridden;
   std::vector<llama_token> _result;
 };
 
@@ -569,6 +578,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("sample", &SessionContext::sample),
     InstanceMethod("tokenToText", &SessionContext::tokenToText),
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
+    InstanceMethod("getEogToken", &SessionContext::getEogToken),
 
     // ===== PROMPT PREPARATION =====
     InstanceMethod("tokenize", &SessionContext::tokenize),
@@ -826,13 +836,20 @@ Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (text: string)");
+    throw Napi::TypeError::New(env, "Expected (text: string, addSpecial?: boolean)");
   }
 
   std::string text = info[0].As<Napi::String>().Utf8Value();
 
+  bool addSpecial = true;
+  bool addSpecialOverridden = false;
+  if (info.Length() >= 2 && info[1].IsBoolean()) {
+    addSpecial = info[1].As<Napi::Boolean>().Value();
+    addSpecialOverridden = true;
+  }
+
   // Run async
-  auto* worker = new TokenizeWorker(env, _model, text);
+  auto* worker = new TokenizeWorker(env, _model, text, addSpecial, addSpecialOverridden);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1082,6 +1099,21 @@ Napi::Value SessionContext::isStopToken(const Napi::CallbackInfo& info) {
   bool isEog = lloyal::tokenizer::is_eog(_model.get(), token);
 
   return Napi::Boolean::New(env, isEog);
+}
+
+Napi::Value SessionContext::getEogToken(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  const llama_vocab* vocab = llama_model_get_vocab(_model.get());
+  llama_token eot = llama_vocab_eot(vocab);
+  if (eot == LLAMA_TOKEN_NULL) {
+    eot = llama_vocab_eos(vocab);  // Fallback: Zephyr-style models use EOS
+  }
+  if (eot == LLAMA_TOKEN_NULL) {
+    throw Napi::Error::New(env, "Model has no EOT or EOS token");
+  }
+  return Napi::Number::New(env, static_cast<double>(eot));
 }
 
 Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {

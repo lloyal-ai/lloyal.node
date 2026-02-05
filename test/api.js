@@ -771,6 +771,75 @@ ws ::= [ \\t\\n]*`;
 
     console.log('\n✅ Test 19: nBatch ablation passed\n');
 
+    // ===== TEST 20: getEogToken() and tokenize(text, addSpecial) =====
+    console.log('🔑 Test 20: getEogToken() and tokenize(text, addSpecial)');
+
+    // 20a: getEogToken returns an integer
+    const eog = ctx.getEogToken();
+    console.log(`  EOG token ID: ${eog}`);
+    if (typeof eog !== 'number' || !Number.isInteger(eog)) {
+      throw new Error('EOG should be an integer');
+    }
+
+    // 20b: EOG token is recognized as a stop token
+    if (!ctx.isStopToken(eog)) {
+      throw new Error('EOG token should be a stop token');
+    }
+
+    // 20c: EOG token has text representation
+    const eogText = ctx.tokenToText(eog);
+    console.log(`  EOG text: ${eogText}`);
+    if (typeof eogText !== 'string' || eogText.length === 0) {
+      throw new Error('EOG should have text representation');
+    }
+
+    // 20d: tokenize with default addSpecial
+    const withDefault = await ctx.tokenize('Hello world, how are you?');
+    console.log(`  Default: [${withDefault.slice(0, 3).join(', ')}...] (${withDefault.length} tokens)`);
+
+    // 20e: tokenize with addSpecial=true (explicit)
+    const withSpecial = await ctx.tokenize('Hello world, how are you?', true);
+    console.log(`  addSpecial=true:  [${withSpecial.slice(0, 3).join(', ')}...] (${withSpecial.length} tokens)`);
+
+    // 20f: tokenize with addSpecial=false (BOS suppressed)
+    const noSpecial = await ctx.tokenize('Hello world, how are you?', false);
+    console.log(`  addSpecial=false: [${noSpecial.slice(0, 3).join(', ')}...] (${noSpecial.length} tokens)`);
+
+    // 20g: addSpecial=false should produce <= addSpecial=true tokens
+    // (equal if model metadata already has add_bos=false, e.g. SmolLM2)
+    if (noSpecial.length > withSpecial.length) {
+      throw new Error(
+        `addSpecial=false (${noSpecial.length}) should not produce more tokens than addSpecial=true (${withSpecial.length})`
+      );
+    }
+
+    // 20h: If model adds BOS by default, explicit true should match default
+    if (withDefault.length !== withSpecial.length ||
+        !withDefault.every((t, i) => t === withSpecial[i])) {
+      throw new Error('Default and addSpecial=true should produce identical tokens');
+    }
+
+    // 20i: The non-special tokens (content tokens) should be a suffix of the special version
+    // Either they're identical (model has no BOS) or noSpecial is withSpecial minus leading BOS
+    if (noSpecial.length === withSpecial.length) {
+      console.log('  (Model does not add BOS by default — both paths identical)');
+      if (!noSpecial.every((t, i) => t === withSpecial[i])) {
+        throw new Error('When equal length, token arrays should be identical');
+      }
+    } else if (noSpecial.length === withSpecial.length - 1) {
+      console.log(`  (Model adds BOS token ${withSpecial[0]} by default)`);
+      const match = withSpecial.slice(1).every((t, i) => t === noSpecial[i]);
+      if (!match) {
+        throw new Error('Tokens after BOS should match noSpecial tokens');
+      }
+    } else {
+      throw new Error(
+        `Unexpected token count difference: withSpecial=${withSpecial.length}, noSpecial=${noSpecial.length}`
+      );
+    }
+
+    console.log('✅ Test 20: getEogToken + tokenize(addSpecial) passed\n');
+
     // ===== SUCCESS =====
     console.log('✅ All integration tests passed!\n');
 

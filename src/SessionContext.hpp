@@ -125,6 +125,12 @@ private:
   Napi::Value isStopToken(const Napi::CallbackInfo& info);
 
   /**
+   * Get the model's end-of-generation token ID
+   * Returns EOT token, falling back to EOS for Zephyr-style models
+   */
+  Napi::Value getEogToken(const Napi::CallbackInfo& info);
+
+  /**
    * Format messages using model's chat template
    * Args: messagesJson (string), templateOverride (optional string)
    * Returns: Promise<{ prompt: string, stopTokens: string[] }>

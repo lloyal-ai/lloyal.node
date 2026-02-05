@@ -421,6 +421,21 @@ export interface SessionContext {
    */
   isStopToken(token: number): boolean;
 
+  /**
+   * Get the model's end-of-generation token ID
+   *
+   * Returns the EOT token (e.g. <|im_end|> for ChatML), falling back
+   * to EOS (e.g. </s>) for Zephyr-style models. This is the inverse
+   * of isStopToken() — "what IS the stop token?" vs "is this a stop token?"
+   *
+   * Use case: warm multi-turn continuation prepends this token to close
+   * the previous assistant turn before injecting new user content.
+   *
+   * @returns Token ID (integer)
+   * @throws If model has neither EOT nor EOS token
+   */
+  getEogToken(): number;
+
   // ===== PROMPT PREPARATION =====
 
   /**
@@ -432,16 +447,20 @@ export interface SessionContext {
    * Cost: ~1ms per 100 characters
    *
    * @param text Text to tokenize
+   * @param addSpecial Whether to add special tokens (BOS/EOS). Defaults to
+   *   model metadata setting (typically true). Pass false for mid-sequence
+   *   tokenization (e.g., warm multi-turn continuation deltas).
    * @returns Array of token IDs
    * @example
    * ```typescript
+   * // Full sequence (default — includes BOS)
    * const tokens = await ctx.tokenize("Hello world");
-   * console.log(tokens); // [15496, 1917] for Llama models
    *
-   * await ctx.decode(tokens, 0);
+   * // Mid-sequence delta (no BOS)
+   * const delta = await ctx.tokenize("continuation text", false);
    * ```
    */
-  tokenize(text: string): Promise<number[]>;
+  tokenize(text: string, addSpecial?: boolean): Promise<number[]>;
 
   /**
    * Detokenize array of tokens back to text
