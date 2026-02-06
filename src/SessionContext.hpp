@@ -131,6 +131,12 @@ private:
   Napi::Value getEogToken(const Napi::CallbackInfo& info);
 
   /**
+   * Get the model's turn separator token IDs
+   * Returns tokens that close an assistant turn and transition to the next message
+   */
+  Napi::Value getTurnSeparator(const Napi::CallbackInfo& info);
+
+  /**
    * Format messages using model's chat template
    * Args: messagesJson (string), templateOverride (optional string)
    * Returns: Promise<{ prompt: string, stopTokens: string[] }>
@@ -399,6 +405,10 @@ private:
 
   // ===== BRANCH STORE =====
   lloyal::branch::BranchStore _branchStore{16};  // capacity 16
+
+  // ===== TURN SEPARATOR CACHE =====
+  std::vector<llama_token> _turnSeparatorCache;
+  bool _turnSeparatorCached = false;
 
   // ===== DECODE MUTEX =====
   std::mutex _decodeMutex;

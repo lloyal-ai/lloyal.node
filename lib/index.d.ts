@@ -436,6 +436,32 @@ export interface SessionContext {
    */
   getEogToken(): number;
 
+  /**
+   * Get the model's turn separator token IDs
+   *
+   * Returns the tokens that close an assistant turn and transition to the
+   * next message, as determined by the model's chat template. Computed once
+   * per model, cached.
+   *
+   * For ChatML templates: [im_end_id, newline_id] (e.g., [2, 198])
+   * For Llama 3 templates: [eot_id] (e.g., [128009])
+   *
+   * Use case: warm multi-turn prefill to achieve exact parity with cold path.
+   *
+   * @returns Array of token IDs (cached after first call)
+   *
+   * @example
+   * ```typescript
+   * const separator = ctx.getTurnSeparator();
+   * console.log(separator.map(t => ctx.tokenToText(t)).join(''));  // "<|im_end|>\n"
+   *
+   * // Warm prefill with exact cold/warm parity
+   * const deltaTokens = await ctx.tokenize(deltaPrompt, false);
+   * branch.prefill([...separator, ...deltaTokens]);
+   * ```
+   */
+  getTurnSeparator(): number[];
+
   // ===== PROMPT PREPARATION =====
 
   /**
@@ -1490,13 +1516,17 @@ export class Branch {
    * @param position Starting position (typically prompt token count)
    * @param params Sampling parameters (temperature, topP, etc.)
    * @param nBatch Per-branch batch size override (defaults to context nBatch)
+   * @param grammar GBNF grammar string for constrained generation. When provided,
+   *   sample() returns only grammar-valid tokens. The grammar state is cloned on
+   *   fork(), so sibling branches can diverge independently.
    */
   static create(
     ctx: SessionContext,
     seqId: number,
     position: number,
     params?: SamplingParams,
-    nBatch?: number
+    nBatch?: number,
+    grammar?: string
   ): Branch;
 
   /**

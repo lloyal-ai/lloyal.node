@@ -579,6 +579,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("tokenToText", &SessionContext::tokenToText),
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
     InstanceMethod("getEogToken", &SessionContext::getEogToken),
+    InstanceMethod("getTurnSeparator", &SessionContext::getTurnSeparator),
 
     // ===== PROMPT PREPARATION =====
     InstanceMethod("tokenize", &SessionContext::tokenize),
@@ -1114,6 +1115,23 @@ Napi::Value SessionContext::getEogToken(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Model has no EOT or EOS token");
   }
   return Napi::Number::New(env, static_cast<double>(eot));
+}
+
+Napi::Value SessionContext::getTurnSeparator(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Compute once, cache thereafter
+  if (!_turnSeparatorCached) {
+    _turnSeparatorCache = lloyal::chat_template::get_turn_separator(_model.get());
+    _turnSeparatorCached = true;
+  }
+
+  Napi::Array result = Napi::Array::New(env, _turnSeparatorCache.size());
+  for (size_t i = 0; i < _turnSeparatorCache.size(); i++) {
+    result[i] = Napi::Number::New(env, static_cast<double>(_turnSeparatorCache[i]));
+  }
+  return result;
 }
 
 Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {
@@ -2027,7 +2045,7 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchCreate requires (seqId, position, params?)");
+    throw Napi::Error::New(env, "_branchCreate requires (seqId, position, params?, nBatch?, grammar?)");
   }
 
   auto seqId = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());
@@ -2045,6 +2063,14 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
     nBatch = info[3].As<Napi::Number>().Int32Value();
   }
 
+  // Grammar string (optional 5th arg)
+  const char* grammar_str = nullptr;
+  std::string grammar_storage;  // Keep string alive for duration of create()
+  if (info.Length() >= 5 && info[4].IsString()) {
+    grammar_storage = info[4].As<Napi::String>().Utf8Value();
+    grammar_str = grammar_storage.c_str();
+  }
+
   // Create branch using lloyal::branch::create
   auto handle = lloyal::branch::create(
     _context,
@@ -2052,9 +2078,9 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
     seqId,
     position,
     params,
-    nBatch,  // per-branch override or context default
-    nullptr,  // grammar_str
-    nullptr,  // boundary_tracker
+    nBatch,       // per-branch override or context default
+    grammar_str,  // grammar GBNF string (or nullptr)
+    nullptr,      // boundary_tracker
     &_branchStore
   );
 
