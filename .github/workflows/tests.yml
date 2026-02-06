@@ -6,14 +6,13 @@ on:
 
 jobs:
   test-build:
-    name: Test on ${{ matrix.os }} (Node ${{ matrix.node }})
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
-        node: [22, 24]
 
     steps:
       - name: Checkout code
@@ -30,10 +29,10 @@ jobs:
       - name: Download test models
         run: bash scripts/download-test-models.sh
 
-      - name: Setup Node.js ${{ matrix.node }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
           cache: 'npm'
 
       - name: Install build dependencies (Linux)
@@ -76,30 +75,21 @@ jobs:
         run: |
           node -e "const fs = require('fs'); const files = fs.readdirSync('build/Release'); console.log('Build outputs:', files); if (!files.some(f => f.endsWith('.node'))) throw new Error('No .node file built!');"
 
-      - name: Run API tests (Windows)
+      - name: Run integration tests (Windows)
         if: runner.os == 'Windows'
         run: |
           $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
-          npm run test:api
+          npm run test:integration
         timeout-minutes: 5
+        env:
+          LLOYAL_LOCAL: '1'
 
-      - name: Run API tests (Unix)
+      - name: Run integration tests (Unix)
         if: runner.os != 'Windows'
-        run: npm run test:api
+        run: npm run test:integration
         timeout-minutes: 5
-
-      - name: Run E2E tests (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
-          npm run test:e2e
-        timeout-minutes: 5
-
-      - name: Run E2E tests (Unix)
-        if: runner.os != 'Windows'
-        run: npm run test:e2e
-        timeout-minutes: 5
-        # Note: E2E tests include embedding suite which skips gracefully if no embedding model
+        env:
+          LLOYAL_LOCAL: '1'
 
       - name: Display build info
         if: always()
@@ -108,7 +98,7 @@ jobs:
           echo "Build Information"
           echo "================================"
           echo "OS: ${{ runner.os }}"
-          echo "Node: ${{ matrix.node }}"
+          echo "Node: 24"
           echo "Platform: $(node -p 'process.platform')"
           echo "Arch: $(node -p 'process.arch')"
           echo "Build system: cmake-js"
@@ -120,12 +110,94 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-failure-${{ matrix.os }}-node${{ matrix.node }}
+          name: build-failure-${{ matrix.os }}
           path: |
             build/
             build/CMakeCache.txt
             build/CMakeFiles/CMakeError.log
           retention-days: 7
+
+  # Model architecture matrix - tests all models on Metal GPU
+  setup-model-matrix:
+    name: Setup Model Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.read-matrix.outputs.models }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Read model matrix
+        id: read-matrix
+        run: |
+          # Extract model names and files from test/matrix.json
+          models=$(jq -c '[.models[] | {name: .name, file: .file}]' test/matrix.json)
+          echo "models=$models" >> $GITHUB_OUTPUT
+          echo "Model matrix: $models"
+
+  test-model-matrix:
+    name: Examples - ${{ matrix.model.name }}
+    runs-on: macos-14  # Metal GPU
+    needs: setup-model-matrix
+
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJson(needs.setup-model-matrix.outputs.models) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache all test models
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: test-models-all-v1
+
+      - name: Download all test models
+        run: bash scripts/download-test-models.sh --all
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install build dependencies
+        run: brew install cmake ninja
+
+      - name: Install npm dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build from submodules
+        run: npm run build
+
+      - name: Run integration tests
+        run: npm run test:integration
+        timeout-minutes: 5
+        env:
+          LLOYAL_LOCAL: '1'
+          MODEL_PATH: models/${{ matrix.model.file }}
+
+      - name: Run example tests
+        run: npm run test:examples
+        timeout-minutes: 15
+        env:
+          LLOYAL_LOCAL: '1'
+          MODEL_PATH: models/${{ matrix.model.file }}
+
+      - name: Display test info
+        if: always()
+        run: |
+          echo "================================"
+          echo "Model Matrix Test"
+          echo "================================"
+          echo "Model: ${{ matrix.model.name }}"
+          echo "File: ${{ matrix.model.file }}"
+          echo "Platform: Metal (macos-14)"
 
   verify-npm-package:
     name: Verify npm package contents
@@ -185,7 +257,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [test-build, verify-npm-package]
+    needs: [test-build, test-model-matrix, verify-npm-package]
     if: always()
 
     steps:
@@ -195,9 +267,11 @@ jobs:
           echo "Test Results Summary"
           echo "================================"
           echo "✓ Source builds tested on Linux, macOS, Windows"
-          echo "✓ Node.js 22, 24 (LTS) compatibility verified"
+          echo "✓ Node.js 24 (Active LTS) compatibility verified"
+          echo "✓ Model architecture matrix tested on Metal"
           echo "✓ npm package contents verified"
-          echo "✓ API tests passed (11 tests)"
-          echo "✓ E2E tests passed (4 text generation + 8 embedding tests)"
+          echo "✓ Integration tests passed"
+          echo "✓ Example tests passed"
           echo ""
           echo "Build & Test Status: ${{ needs.test-build.result }}"
+          echo "Model Matrix Status: ${{ needs.test-model-matrix.result }}"

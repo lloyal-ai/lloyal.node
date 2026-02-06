@@ -800,7 +800,7 @@ Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number, seqId?: number)");
+    throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number[, seqId: number])");
   }
 
   // Revoke any active logits buffer before decode
@@ -837,7 +837,7 @@ Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (text: string, addSpecial?: boolean)");
+    throw Napi::TypeError::New(env, "Expected (text: string[, addSpecial: boolean])");
   }
 
   std::string text = info[0].As<Napi::String>().Utf8Value();
@@ -1139,7 +1139,7 @@ Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (messagesJson: string, templateOverride?: string)");
+    throw Napi::TypeError::New(env, "Expected (messagesJson: string[, templateOverride: string])");
   }
 
   std::string messagesJson = info[0].As<Napi::String>().Utf8Value();
@@ -1296,7 +1296,7 @@ Napi::Value SessionContext::kvSeqCopy(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 2) {
-    throw Napi::TypeError::New(env, "Expected (srcSeqId, dstSeqId, p0?, p1?)");
+    throw Napi::TypeError::New(env, "Expected (srcSeqId: number, dstSeqId: number[, p0: number, p1: number])");
   }
 
   llama_seq_id src = toSeqId(info[0].As<Napi::Number>().DoubleValue());
@@ -2045,7 +2045,7 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchCreate requires (seqId, position, params?, nBatch?, grammar?)");
+    throw Napi::Error::New(env, "_branchCreate requires (seqId, position[, params[, nBatch[, grammar]]])");
   }
 
   auto seqId = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());

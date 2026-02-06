@@ -16,9 +16,8 @@
     "clean": "cmake-js clean && rm -rf build_test/",
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
-    "test": "npm run test:api && npm run test:e2e",
-    "test:api": "node test/api.js",
-    "test:e2e": "node test/e2e.js",
+    "test": "npm run test:integration",
+    "test:integration": "node test/integration.js",
     "test:examples": "node test/examples.js",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "node examples/chat/chat.mjs"

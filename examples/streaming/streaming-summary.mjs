@@ -3,15 +3,16 @@
  * Infinite context generation with dynamic summary sinks
  *
  * Usage:
- *   node streaming-summary.mjs [model-path]          # Human-readable output
- *   node streaming-summary.mjs [model-path] --jsonl  # JSONL output for testing
+ *   node streaming-summary.mjs [model-path]              # Self-summary (default)
+ *   node streaming-summary.mjs [model-path] --sidecar    # Use slim-summarize sidecar
+ *   node streaming-summary.mjs [model-path] --jsonl      # JSONL output for testing
  *
  * This example demonstrates:
  * - BlinkKV reseeding with ghostwritten progress sinks
- * - Sidecar model (slim-summarize) for evicted content summarization
+ * - Self-summary: main model summarizes its own evicted content (default)
+ * - Sidecar mode: optional slim-summarize model for summarization (--sidecar)
  * - Outline detection with structural progress tracking
  * - Pattern matching (not instruction following) to guide continuation
- * - Graceful degradation when sidecar model is missing
  *
  * After reseed, KV cache contains: [progress][tail]
  * - progress = minimal anchor + checklist of done/current sections + summary
@@ -39,7 +40,12 @@ const SUMMARY_MODEL = path.resolve(
 // Parse args
 const args = process.argv.slice(2);
 const jsonlMode = args.includes('--jsonl');
+const useSidecar = args.includes('--sidecar');
 const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+// Parse --max-tokens for CI (default 5000)
+const maxTokensArg = args.find(a => a.startsWith('--max-tokens='));
+const TARGET_TOKENS = maxTokensArg ? parseInt(maxTokensArg.split('=')[1], 10) : 5000;
 
 /** Emit output - JSONL or human-readable */
 function emit(event, data) {
@@ -74,16 +80,35 @@ function parseSummaryOutput(raw) {
 }
 
 /**
- * Generate a summary using the sidecar model
+ * Generate a summary using sidecar context
+ * @param {object} summaryCtx - Context to use for summarization
+ * @param {string} text - Text to summarize
+ * @param {object} options - Options: maxTokens, brief, format ('self' | 'slim-summarize')
  */
 async function generateSummary(summaryCtx, text, options = {}) {
   const maxTokens = options.maxTokens || 200;
-  const paramStr = options.brief
-    ? 'brief description (1)'
-    : 'key points (5)';
+  const format = options.format || 'self';
 
-  const prompt = `<human> ${text.slice(-10000)}\n<summarize> ${paramStr}</summarize>\n<bot>:`;
-  const tokens = await summaryCtx.tokenize(prompt);
+  let tokens;
+
+  if (format === 'self') {
+    // Self-summary: use model's chat template via formatChat()
+    const { prompt } = await summaryCtx.formatChat(
+      JSON.stringify([
+        {
+          role: 'system',
+          content: 'Summarize the following text concisely. List the key points.',
+        },
+        { role: 'user', content: text.slice(-10000) },
+      ])
+    );
+    tokens = await summaryCtx.tokenize(prompt);
+  } else {
+    // slim-summarize prompt format
+    const paramStr = options.brief ? 'brief description (1)' : 'key points (5)';
+    const prompt = `<human> ${text.slice(-10000)}\n<summarize> ${paramStr}</summarize>\n<bot>:`;
+    tokens = await summaryCtx.tokenize(prompt);
+  }
 
   await summaryCtx.kvCacheClear();
   await summaryCtx.decode(tokens, 0, 0);
@@ -97,7 +122,10 @@ async function generateSummary(summaryCtx, text, options = {}) {
     await summaryCtx.decode([token], pos++, 0);
   }
 
-  return parseSummaryOutput(response.trim());
+  // Only parse slim-summarize Python-style list format
+  return format === 'slim-summarize'
+    ? parseSummaryOutput(response.trim())
+    : response.trim();
 }
 
 /**
@@ -169,11 +197,14 @@ async function main() {
   const TAIL_SIZE = 256;
   const MAX_SINK_RATIO = 0.4;
   const MAX_SINK_TOKENS = Math.floor(nCtx * MAX_SINK_RATIO);
-  const TARGET_TOKENS = 5000;
   const SUMMARY_MAX_TOKENS = 200;
+
+  // Determine summary mode before emitting start event
+  const summaryFormat = useSidecar ? 'slim-summarize' : 'self';
 
   if (!jsonlMode) {
     console.log(`Loading model: ${modelPath}`);
+    console.log(`Summary mode: ${summaryFormat}`);
   }
 
   emit('start', {
@@ -182,6 +213,7 @@ async function main() {
     tailSize: TAIL_SIZE,
     maxSinkTokens: MAX_SINK_TOKENS,
     targetTokens: TARGET_TOKENS,
+    summaryMode: summaryFormat,
   });
 
   const ctx = await createContext({
@@ -190,16 +222,30 @@ async function main() {
   });
 
   // Summary sidecar — preload in background (overlaps with prompt decode + generation)
-  const summaryModelAvailable = fs.existsSync(SUMMARY_MODEL);
+  // Default: "self" mode - second context from same model (weights shared via model_registry)
+  // --sidecar flag: use slim-summarize.gguf instead
   let summaryCtx = null;
-  const summaryCtxPromise = summaryModelAvailable
-    ? createContext({ modelPath: SUMMARY_MODEL, contextSize: 4096 })
-    : null;
-  if (!summaryModelAvailable) {
-    if (!jsonlMode) {
-      console.log('Summary model not found - running without summary sinks');
+  let summaryCtxPromise = null;
+  let actualSummaryFormat = summaryFormat;
+
+  if (useSidecar) {
+    // Sidecar mode: use slim-summarize.gguf
+    const summaryModelAvailable = fs.existsSync(SUMMARY_MODEL);
+    if (summaryModelAvailable) {
+      summaryCtxPromise = createContext({ modelPath: SUMMARY_MODEL, contextSize: 4096 });
+    } else {
+      if (!jsonlMode) {
+        console.log('Sidecar model not found - falling back to self-summary');
+      }
+      emit('sidecar_missing', { message: 'slim-summarize.gguf not found, using self-summary' });
+      // Fall back to self mode
+      summaryCtxPromise = createContext({ modelPath, contextSize: 4096 });
+      actualSummaryFormat = 'self';
     }
-    emit('summary_missing', { message: 'slim-summarize.gguf not found' });
+  } else {
+    // Self mode (default): second context from same model
+    // Weights are shared via model_registry — only KV cache is duplicated
+    summaryCtxPromise = createContext({ modelPath, contextSize: 4096 });
   }
 
   const prompt = `Write a comprehensive guide to machine learning, covering the following topics in extreme detail with examples, code snippets, and mathematical formulas:
@@ -308,10 +354,11 @@ Begin:
       // Resolve preloaded sidecar (should already be loaded by now)
       if (summaryModelAvailable && !summaryCtx) {
         summaryCtx = await summaryCtxPromise;
+        const summaryModelName = actualSummaryFormat === 'self' ? path.basename(modelPath) : 'slim-summarize.gguf';
         if (!jsonlMode) {
-          console.log('\n  [Summary sidecar loaded: slim-summarize.gguf]');
+          console.log(`\n  [Summary context loaded: ${summaryModelName} (${actualSummaryFormat} mode)]`);
         }
-        emit('summary_loaded', { model: 'slim-summarize.gguf' });
+        emit('summary_loaded', { model: summaryModelName, mode: actualSummaryFormat });
       }
 
       // Run summary sidecar if available
@@ -326,6 +373,7 @@ Begin:
 
         const newPage = await generateSummary(summaryCtx, evictedFromSegment, {
           maxTokens: SUMMARY_MAX_TOKENS,
+          format: actualSummaryFormat,
         });
         summaries.push(newPage);
         chainText = summaries.join('\n');
@@ -342,6 +390,7 @@ Begin:
           const folded = await generateSummary(summaryCtx, toFold.join('\n'), {
             brief: true,
             maxTokens: 100,
+            format: actualSummaryFormat,
           });
           summaries.unshift(folded);
           chainText = summaries.join('\n');
