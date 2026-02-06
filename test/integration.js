@@ -346,10 +346,11 @@ async function testBranchPrefill() {
     assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
     let lastText = prompt + await ctx.detokenize(gen1);
+    let lastGen = gen1;  // Track last generation for multi-turn
 
     // Turn 2-3: prefill + generate
     for (let t = 1; t < turns.length; t++) {
-      messages.push({ role: 'assistant', content: await ctx.detokenize(gen1) });
+      messages.push({ role: 'assistant', content: await ctx.detokenize(lastGen) });
       messages.push({ role: 'user', content: turns[t] });
 
       const { prompt: fullPrompt } = await ctx.formatChat(JSON.stringify(messages));
@@ -371,6 +372,7 @@ async function testBranchPrefill() {
       assert(gen.length > 0, `Turn ${t + 1}: generated ${gen.length} tokens`);
 
       lastText = fullPrompt + await ctx.detokenize(gen);
+      lastGen = gen;  // Update for next turn
     }
 
     branch.prune();
@@ -393,7 +395,7 @@ async function testNBatchAblation() {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
       nCtx: 1024,
-      nBatch: 512,
+      nBatch,
       nThreads: 4
     });
 

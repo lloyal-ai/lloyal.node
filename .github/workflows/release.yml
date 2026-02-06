@@ -271,6 +271,7 @@ jobs:
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
+          LLOYAL_NO_FALLBACK: '1'
 
       - name: Run integration tests (Unix)
         if: runner.os != 'Windows' && (matrix.gpu == 'cpu' || matrix.gpu == 'metal')
@@ -281,6 +282,7 @@ jobs:
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
+          LLOYAL_NO_FALLBACK: '1'
 
       # Upload package artifact for publish job
       - name: Upload platform package artifact

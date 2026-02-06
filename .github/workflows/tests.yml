@@ -24,7 +24,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/
-          key: test-models-v1
+          key: test-models-v1-${{ hashFiles('test/matrix.json') }}
 
       - name: Download test models
         run: bash scripts/download-test-models.sh
@@ -155,7 +155,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/
-          key: test-models-all-v1
+          key: test-models-all-v1-${{ hashFiles('test/matrix.json') }}
 
       - name: Download all test models
         run: bash scripts/download-test-models.sh --all

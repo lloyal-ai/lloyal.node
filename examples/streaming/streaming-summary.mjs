@@ -351,8 +351,8 @@ Begin:
 
       let sinks;
 
-      // Resolve preloaded sidecar (should already be loaded by now)
-      if (summaryModelAvailable && !summaryCtx) {
+      // Resolve preloaded summary context (should already be loaded by now)
+      if (summaryCtxPromise && !summaryCtx) {
         summaryCtx = await summaryCtxPromise;
         const summaryModelName = actualSummaryFormat === 'self' ? path.basename(modelPath) : 'slim-summarize.gguf';
         if (!jsonlMode) {
