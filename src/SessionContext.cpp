@@ -652,6 +652,8 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchDestroy", &SessionContext::_branchDestroy),
     InstanceMethod("_branchSamplerChainReseed", &SessionContext::_branchSamplerChainReseed),
+    InstanceMethod("_branchSteer", &SessionContext::_branchSteer),
+    InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
 
     // ===== PROPERTIES =====
     InstanceAccessor("vocabSize", &SessionContext::getVocabSize, nullptr),
@@ -2297,6 +2299,75 @@ Napi::Value SessionContext::_branchSamplerChainReseed(const Napi::CallbackInfo& 
   if (state->sampler_chain && state->has_dist_sampler) {
     lloyal::sampler::reseed_chain(state->sampler_chain, seed);
   }
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchSteer(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::Error::New(env, "_branchSteer requires (handle, biases[])");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  if (!info[1].IsArray()) {
+    throw Napi::Error::New(env, "_branchSteer: biases must be an array");
+  }
+
+  Napi::Array biasArray = info[1].As<Napi::Array>();
+  uint32_t length = biasArray.Length();
+
+  // Build vector of biases from JS [{token, bias}, ...]
+  std::vector<llama_logit_bias> biases;
+  biases.reserve(length);
+
+  for (uint32_t i = 0; i < length; i++) {
+    Napi::Value item = biasArray[i];
+    if (!item.IsObject()) {
+      throw Napi::Error::New(env, "_branchSteer: each bias must be {token, bias}");
+    }
+    Napi::Object obj = item.As<Napi::Object>();
+
+    if (!obj.Has("token") || !obj.Has("bias")) {
+      throw Napi::Error::New(env, "_branchSteer: each bias must have 'token' and 'bias' properties");
+    }
+
+    llama_logit_bias bias;
+    bias.token = static_cast<llama_token>(obj.Get("token").As<Napi::Number>().Int32Value());
+    bias.bias = obj.Get("bias").As<Napi::Number>().FloatValue();
+    biases.push_back(bias);
+  }
+
+  // Create steer function that applies these biases
+  // Capture by value so the vector is owned by the lambda
+  lloyal::branch::set_steer(handle, [biases](llama_token_data_array& cur_p) {
+    for (const auto& bias : biases) {
+      for (size_t i = 0; i < cur_p.size; ++i) {
+        if (cur_p.data[i].id == bias.token) {
+          cur_p.data[i].logit += bias.bias;
+          break;
+        }
+      }
+    }
+  }, &_branchStore);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchClearSteer(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchClearSteer requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  lloyal::branch::clear_steer(handle, &_branchStore);
 
   return env.Undefined();
 }
