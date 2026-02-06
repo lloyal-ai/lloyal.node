@@ -368,12 +368,14 @@ jobs:
               --region=us-central1 \
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
+              --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
               --task-timeout=10m
           else
             gcloud run jobs create $JOB_NAME \
               --region=us-central1 \
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
+              --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
               --task-timeout=10m \
               --gpu=1 \
               --gpu-type=nvidia-l4 \

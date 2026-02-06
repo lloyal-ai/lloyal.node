@@ -48,15 +48,24 @@ fi
 
 # 4. Assign Roles
 echo "Assigning IAM roles..."
+
+# Grant Artifact Registry Writer (Push images)
 gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
   --location="$REGION" \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/artifactregistry.writer" > /dev/null
 
+# Grant Cloud Run Developer (Create/Update Jobs)
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$SA_EMAIL" \
-  --role="roles/run.admin" > /dev/null
+  --role="roles/run.developer" > /dev/null
 
+# Grant Cloud Run Invoker (Execute Jobs)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="roles/run.invoker" > /dev/null
+
+# Grant Service Account User (Act as itself)
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/iam.serviceAccountUser" > /dev/null

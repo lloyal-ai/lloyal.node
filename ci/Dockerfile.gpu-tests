@@ -23,6 +23,12 @@ RUN wget -qO- https://deb.nodesource.com/setup_24.x | bash - \
 
 WORKDIR /app
 
+# Copy package.json first for dependency caching
+COPY package.json ./
+
+# Install dependencies (omit dev deps - only need runtime deps like @lloyal-labs/tsampler)
+RUN npm install --omit=dev
+
 # Copy pre-built packages from release workflow
 # These are downloaded as artifacts before docker build
 COPY packages/ ./packages/
@@ -31,7 +37,6 @@ COPY packages/ ./packages/
 COPY test/ ./test/
 COPY examples/ ./examples/
 COPY lib/ ./lib/
-COPY package.json ./
 
 # Download test model (cached in image layer)
 RUN mkdir -p models && \
