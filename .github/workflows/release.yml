@@ -306,10 +306,6 @@ jobs:
     runs-on: ubuntu-latest
     if: success()
 
-    # Gate GPU tests on label to control spend
-    # Remove this condition to run on every release
-    # if: contains(github.event.pull_request.labels.*.name, 'gpu-tests')
-
     permissions:
       contents: read
       id-token: write  # Required for Workload Identity Federation
@@ -352,7 +348,6 @@ jobs:
           IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lloyal-ci/gpu-tests:${{ github.sha }}-${{ matrix.backend }}"
           docker build \
             -f ci/Dockerfile.gpu-tests \
-            --build-arg GPU_BACKEND=${{ matrix.backend }} \
             -t "$IMAGE" .
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
@@ -397,6 +392,9 @@ jobs:
 
           echo "Execution: $EXECUTION"
 
+          # Wait for logs to flush to Cloud Logging
+          sleep 5
+
           # Get logs
           gcloud logging read \
             "resource.type=cloud_run_job AND resource.labels.job_name=$JOB_NAME AND resource.labels.location=us-central1" \
@@ -409,7 +407,7 @@ jobs:
     runs-on: ubuntu-latest
     # Only run if ALL jobs succeeded AND not a test tag AND not manual skip
     # Use v0.0.0-gpu-test or workflow_dispatch with skip_publish to test CI
-    if: success() && !contains(github.ref_name, '-test') && github.event.inputs.skip_publish != 'true'
+    if: success() && !contains(github.ref_name, '-test') && github.event.inputs.skip_publish != true
     permissions:
       contents: read
       id-token: write  # Required for npm provenance
