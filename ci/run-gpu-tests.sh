@@ -10,6 +10,17 @@ echo ""
 
 # GPU backend to test (passed as arg or env)
 GPU_BACKEND="${1:-${LLOYAL_GPU:-cuda}}"
+
+# Validate GPU backend to avoid injection and invalid values
+case "${GPU_BACKEND}" in
+  cuda|vulkan)
+    ;;
+  *)
+    echo "Error: Invalid GPU backend '${GPU_BACKEND}'. Allowed values are: cuda, vulkan." >&2
+    exit 1
+    ;;
+esac
+
 PACKAGE_NAME="linux-x64-${GPU_BACKEND}"
 
 echo "Testing backend: ${GPU_BACKEND}"
@@ -24,6 +35,10 @@ else
   ls -la ./packages/
   exit 1
 fi
+
+echo ""
+echo "=== Downloading Test Models ==="
+./scripts/download-test-models.sh
 
 echo ""
 echo "=== Verifying Backend ==="

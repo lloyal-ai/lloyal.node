@@ -186,6 +186,6 @@ jobs:
 
           # Get logs
           gcloud logging read \
-            "resource.type=cloud_run_job AND resource.labels.job_name=$JOB_NAME AND resource.labels.location=us-central1" \
+            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB_NAME\" AND resource.labels.location=\"us-central1\"" \
             --limit=200 \
             --format='value(textPayload)'
