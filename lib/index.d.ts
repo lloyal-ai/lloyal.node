@@ -1592,6 +1592,95 @@ export class Branch {
    */
   reseedSampler(seed: number): void;
 
+  /**
+   * Apply dynamic logit adjustments for this branch only
+   *
+   * Unlike `logit_bias` in sampling params (which is cloned on fork), steer biases
+   * are NOT inherited by child branches. Each branch manages its own steer state
+   * independently. This makes steer ideal for path-dependent constraints.
+   *
+   * **Use cases:**
+   * - **tsampler**: Block tokens that would create repeated N-grams based on
+   *   this branch's specific generation history
+   * - **Diverse beam search**: Penalize tokens already chosen by sibling beams
+   *   to encourage output diversity across the beam
+   * - **Dynamic constraints**: Apply token restrictions that change per-step
+   *
+   * **Sampling order:** Grammar → Logit Bias → Steer → Sampler Chain
+   *
+   * @param biases - Array of token adjustments. Use `-Infinity` to completely
+   *   block a token, positive values to boost probability, negative to reduce.
+   *
+   * @example Block tokens for N-gram deduplication (tsampler pattern)
+   * ```ts
+   * // Compute which tokens would create repeated 4-grams
+   * const blocked = computeNgramBlocks(generatedTokens, n=4);
+   *
+   * // Block those tokens for this sample only
+   * branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
+   *
+   * const { token } = branch.produce();  // Blocked tokens won't be sampled
+   * branch.commit(token);
+   *
+   * // Clear for next iteration (recompute based on new history)
+   * branch.clearSteer();
+   * ```
+   *
+   * @example Diverse beam search
+   * ```ts
+   * // Each beam penalizes tokens chosen by siblings this step
+   * for (const beam of beams) {
+   *   // Collect tokens chosen by other beams
+   *   const siblingTokens = beams
+   *     .filter(b => b !== beam && b.lastToken !== undefined)
+   *     .map(b => b.lastToken);
+   *
+   *   // Penalize sibling choices to encourage diversity
+   *   beam.branch.steer(siblingTokens.map(t => ({ token: t, bias: -2.0 })));
+   *
+   *   const { token } = beam.branch.produce();
+   *   beam.branch.commit(token);
+   *   beam.lastToken = token;
+   *   beam.branch.clearSteer();
+   * }
+   * ```
+   *
+   * @example Boost specific tokens
+   * ```ts
+   * // Boost "yes" and "no" tokens for a yes/no question
+   * branch.steer([
+   *   { token: yesTokenId, bias: 5.0 },
+   *   { token: noTokenId, bias: 5.0 }
+   * ]);
+   * ```
+   */
+  steer(biases: Array<{ token: number; bias: number }>): void;
+
+  /**
+   * Clear all steer biases from this branch
+   *
+   * Removes any dynamic logit adjustments set by `steer()`. Call this after
+   * each generation step if your steer constraints are computed per-step
+   * (e.g., N-gram blocking where the blocked set changes as text grows).
+   *
+   * @example Per-step steer pattern
+   * ```ts
+   * for (let i = 0; i < maxTokens; i++) {
+   *   // Compute constraints based on current state
+   *   const blocked = computeConstraints(generatedTokens);
+   *   branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
+   *
+   *   const { token, isStop } = branch.produce();
+   *   if (isStop) break;
+   *
+   *   branch.commit(token);
+   *   branch.clearSteer();  // Reset for next iteration
+   *   generatedTokens.push(token);
+   * }
+   * ```
+   */
+  clearSteer(): void;
+
   /** Sample next token without advancing state. Inspect before committing. */
   produce(): Produced;
 
