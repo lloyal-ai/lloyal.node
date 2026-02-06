@@ -255,7 +255,7 @@ jobs:
       # Currently: CPU (all platforms) and Metal (macOS)
       # TODO: Re-enable vulkan/cuda when self-hosted GPU runners are available
       - name: Run integration tests (Windows)
-        if: runner.os == 'Windows' && matrix.gpu == 'cpu'
+        if: runner.os == 'Windows' && matrix.gpu == 'cpu' && matrix.cross_compile != true
         shell: pwsh
         run: |
           $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
