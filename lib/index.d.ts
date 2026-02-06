@@ -421,6 +421,47 @@ export interface SessionContext {
    */
   isStopToken(token: number): boolean;
 
+  /**
+   * Get the model's end-of-generation token ID
+   *
+   * Returns the EOT token (e.g. <|im_end|> for ChatML), falling back
+   * to EOS (e.g. </s>) for Zephyr-style models. This is the inverse
+   * of isStopToken() — "what IS the stop token?" vs "is this a stop token?"
+   *
+   * Use case: warm multi-turn continuation prepends this token to close
+   * the previous assistant turn before injecting new user content.
+   *
+   * @returns Token ID (integer)
+   * @throws If model has neither EOT nor EOS token
+   */
+  getEogToken(): number;
+
+  /**
+   * Get the model's turn separator token IDs
+   *
+   * Returns the tokens that close an assistant turn and transition to the
+   * next message, as determined by the model's chat template. Computed once
+   * per model, cached.
+   *
+   * For ChatML templates: [im_end_id, newline_id] (e.g., [2, 198])
+   * For Llama 3 templates: [eot_id] (e.g., [128009])
+   *
+   * Use case: warm multi-turn prefill to achieve exact parity with cold path.
+   *
+   * @returns Array of token IDs (cached after first call)
+   *
+   * @example
+   * ```typescript
+   * const separator = ctx.getTurnSeparator();
+   * console.log(separator.map(t => ctx.tokenToText(t)).join(''));  // "<|im_end|>\n"
+   *
+   * // Warm prefill with exact cold/warm parity
+   * const deltaTokens = await ctx.tokenize(deltaPrompt, false);
+   * branch.prefill([...separator, ...deltaTokens]);
+   * ```
+   */
+  getTurnSeparator(): number[];
+
   // ===== PROMPT PREPARATION =====
 
   /**
@@ -432,16 +473,20 @@ export interface SessionContext {
    * Cost: ~1ms per 100 characters
    *
    * @param text Text to tokenize
+   * @param addSpecial Whether to add special tokens (BOS/EOS). Defaults to
+   *   model metadata setting (typically true). Pass false for mid-sequence
+   *   tokenization (e.g., warm multi-turn continuation deltas).
    * @returns Array of token IDs
    * @example
    * ```typescript
+   * // Full sequence (default — includes BOS)
    * const tokens = await ctx.tokenize("Hello world");
-   * console.log(tokens); // [15496, 1917] for Llama models
    *
-   * await ctx.decode(tokens, 0);
+   * // Mid-sequence delta (no BOS)
+   * const delta = await ctx.tokenize("continuation text", false);
    * ```
    */
-  tokenize(text: string): Promise<number[]>;
+  tokenize(text: string, addSpecial?: boolean): Promise<number[]>;
 
   /**
    * Detokenize array of tokens back to text
@@ -1471,13 +1516,17 @@ export class Branch {
    * @param position Starting position (typically prompt token count)
    * @param params Sampling parameters (temperature, topP, etc.)
    * @param nBatch Per-branch batch size override (defaults to context nBatch)
+   * @param grammar GBNF grammar string for constrained generation. When provided,
+   *   sample() returns only grammar-valid tokens. The grammar state is cloned on
+   *   fork(), so sibling branches can diverge independently.
    */
   static create(
     ctx: SessionContext,
     seqId: number,
     position: number,
     params?: SamplingParams,
-    nBatch?: number
+    nBatch?: number,
+    grammar?: string
   ): Branch;
 
   /**
