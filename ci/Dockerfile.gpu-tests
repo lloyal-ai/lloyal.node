@@ -1,0 +1,44 @@
+# GPU Testing Image for lloyal.node
+# Runs integration tests on NVIDIA L4 GPU via Cloud Run Jobs
+#
+# Build: docker build -f ci/Dockerfile.gpu-tests -t gpu-tests .
+# Run:   docker run --gpus all gpu-tests
+
+FROM nvidia/cuda:12.6.1-runtime-ubuntu22.04
+
+# Install Vulkan runtime and tools
+# NOTE: Do NOT install mesa-vulkan-drivers - it provides a software fallback
+# that would let tests "pass" without real GPU hardware
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    ca-certificates \
+    libvulkan1 \
+    vulkan-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 24
+RUN wget -qO- https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy pre-built packages from release workflow
+# These are downloaded as artifacts before docker build
+COPY packages/ ./packages/
+
+# Copy test files, examples, and lib
+COPY test/ ./test/
+COPY examples/ ./examples/
+COPY lib/ ./lib/
+COPY package.json ./
+
+# Download test model (cached in image layer)
+RUN mkdir -p models && \
+    wget -q -O models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
+    "https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf"
+
+# Test script
+COPY ci/run-gpu-tests.sh ./
+
+ENTRYPOINT ["bash", "run-gpu-tests.sh"]
