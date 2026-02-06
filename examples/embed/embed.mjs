@@ -3,7 +3,8 @@
  * Embedding extraction example using lloyal.node
  *
  * Usage:
- *   node embed.mjs /path/to/embedding-model.gguf
+ *   node embed.mjs /path/to/embedding-model.gguf          # Human-readable output
+ *   node embed.mjs /path/to/embedding-model.gguf --jsonl  # JSONL output for testing
  *   node embed.mjs  # uses default nomic-embed model path
  *
  * This example demonstrates:
@@ -23,6 +24,18 @@ const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../liblloyal/tests/fixtures/nomic-embed-text-v1.5.Q4_K_M.gguf'
 );
+
+// Parse args
+const args = process.argv.slice(2);
+const jsonlMode = args.includes('--jsonl');
+const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
+
+/** Emit output - JSONL or human-readable */
+function emit(event, data) {
+  if (jsonlMode) {
+    console.log(JSON.stringify({ event, ...data }));
+  }
+}
 
 // Pooling types (matches llama.cpp LLAMA_POOLING_TYPE_*)
 const PoolingType = {
@@ -77,13 +90,13 @@ async function getEmbedding(ctx, text) {
 }
 
 async function main() {
-  const modelPath = process.argv[2] || DEFAULT_MODEL;
-
-  console.log('='.repeat(60));
-  console.log('lloyal.node Embedding Example');
-  console.log('='.repeat(60));
-  console.log(`\nLoading embedding model: ${modelPath}`);
-  console.log('This may take a moment...\n');
+  if (!jsonlMode) {
+    console.log('='.repeat(60));
+    console.log('lloyal.node Embedding Example');
+    console.log('='.repeat(60));
+    console.log(`\nLoading embedding model: ${modelPath}`);
+    console.log('This may take a moment...\n');
+  }
 
   // Create context with embedding mode enabled
   const ctx = await createContext({
@@ -94,11 +107,19 @@ async function main() {
     poolingType: PoolingType.MEAN,
   });
 
-  console.log('Model loaded!');
-  console.log(`  Embedding dimension: ${ctx.getEmbeddingDimension()}`);
-  console.log(`  Vocabulary size: ${ctx.vocabSize}`);
-  console.log(`  Has pooling: ${ctx.hasPooling()}`);
-  console.log();
+  emit('start', {
+    model: path.basename(modelPath),
+    embeddingDim: ctx.getEmbeddingDimension(),
+    hasPooling: ctx.hasPooling()
+  });
+
+  if (!jsonlMode) {
+    console.log('Model loaded!');
+    console.log(`  Embedding dimension: ${ctx.getEmbeddingDimension()}`);
+    console.log(`  Vocabulary size: ${ctx.vocabSize}`);
+    console.log(`  Has pooling: ${ctx.hasPooling()}`);
+    console.log();
+  }
 
   // Example texts to embed
   const texts = [
@@ -108,7 +129,9 @@ async function main() {
     'The feline lounged on the carpet.',
   ];
 
-  console.log('Generating embeddings for sample texts...\n');
+  if (!jsonlMode) {
+    console.log('Generating embeddings for sample texts...\n');
+  }
 
   // Get embeddings for all texts
   const embeddings = [];
@@ -118,16 +141,22 @@ async function main() {
     const elapsed = (performance.now() - start).toFixed(1);
 
     embeddings.push({ text, embedding });
-    console.log(`  "${text}" (${elapsed}ms)`);
+
+    emit('embedding', { text, dimension: embedding.length, elapsed: parseFloat(elapsed) });
+
+    if (!jsonlMode) {
+      console.log(`  "${text}" (${elapsed}ms)`);
+    }
   }
 
-  console.log('\n' + '='.repeat(60));
-  console.log('Similarity Matrix');
-  console.log('='.repeat(60) + '\n');
+  if (!jsonlMode) {
+    console.log('\n' + '='.repeat(60));
+    console.log('Similarity Matrix');
+    console.log('='.repeat(60) + '\n');
+    console.log('Comparing all pairs:\n');
+  }
 
-  // Print similarity matrix
-  console.log('Comparing all pairs:\n');
-
+  // Compute and emit similarity matrix
   for (let i = 0; i < embeddings.length; i++) {
     for (let j = i + 1; j < embeddings.length; j++) {
       const sim = cosineSimilarity(
@@ -135,21 +164,30 @@ async function main() {
         embeddings[j].embedding
       );
 
-      const bar = '█'.repeat(Math.round(sim * 20));
-      console.log(`  [${i}] vs [${j}]: ${sim.toFixed(4)} ${bar}`);
-      console.log(`      "${texts[i].substring(0, 30)}..."`);
-      console.log(`      "${texts[j].substring(0, 30)}..."`);
-      console.log();
+      emit('similarity', { i, j, similarity: sim });
+
+      if (!jsonlMode) {
+        const bar = '█'.repeat(Math.round(sim * 20));
+        console.log(`  [${i}] vs [${j}]: ${sim.toFixed(4)} ${bar}`);
+        console.log(`      "${texts[i].substring(0, 30)}..."`);
+        console.log(`      "${texts[j].substring(0, 30)}..."`);
+        console.log();
+      }
     }
   }
 
   // Semantic search demo
-  console.log('='.repeat(60));
-  console.log('Semantic Search Demo');
-  console.log('='.repeat(60) + '\n');
+  if (!jsonlMode) {
+    console.log('='.repeat(60));
+    console.log('Semantic Search Demo');
+    console.log('='.repeat(60) + '\n');
+  }
 
   const query = 'Where did the kitty rest?';
-  console.log(`Query: "${query}"\n`);
+
+  if (!jsonlMode) {
+    console.log(`Query: "${query}"\n`);
+  }
 
   const queryEmbedding = await getEmbedding(ctx, query);
 
@@ -161,17 +199,26 @@ async function main() {
     }))
     .sort((a, b) => b.similarity - a.similarity);
 
-  console.log('Results (ranked by similarity):\n');
-  ranked.forEach((result, i) => {
-    const bar = '█'.repeat(Math.round(result.similarity * 20));
-    console.log(`  ${i + 1}. ${result.similarity.toFixed(4)} ${bar}`);
-    console.log(`     "${result.text}"`);
-    console.log();
-  });
+  emit('search', { query, results: ranked.map(r => ({ text: r.text, similarity: r.similarity })) });
+
+  if (!jsonlMode) {
+    console.log('Results (ranked by similarity):\n');
+    ranked.forEach((result, i) => {
+      const bar = '█'.repeat(Math.round(result.similarity * 20));
+      console.log(`  ${i + 1}. ${result.similarity.toFixed(4)} ${bar}`);
+      console.log(`     "${result.text}"`);
+      console.log();
+    });
+  }
+
+  emit('complete', { embeddings: texts.length, queriesRun: 1 });
 
   // Cleanup
   ctx.dispose();
-  console.log('Done!');
+
+  if (!jsonlMode) {
+    console.log('Done!');
+  }
 }
 
 main().catch((err) => {

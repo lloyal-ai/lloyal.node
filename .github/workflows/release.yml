@@ -251,63 +251,34 @@ jobs:
           LLOYAL_GPU: ${{ matrix.gpu }}
           LLOYAL_NO_FALLBACK: '1'
 
-      - name: Run API tests (Windows)
-        if: runner.os == 'Windows' && matrix.cross_compile != true && matrix.gpu != 'cuda'
+      # Integration tests only run where we have real GPU hardware
+      # Currently: CPU (all platforms) and Metal (macOS)
+      # TODO: Re-enable vulkan/cuda when self-hosted GPU runners are available
+      - name: Run integration tests (Windows)
+        if: runner.os == 'Windows' && matrix.gpu == 'cpu'
         shell: pwsh
         run: |
           $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
           $env:PATH = "$pkgBin;$env:PATH"
           if ($env:VULKAN_SDK) {
             $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
-            # Vulkan runtime is in runtime\x64, not Bin
             if (Test-Path "$env:VULKAN_SDK\runtime\x64\vulkan-1.dll") {
               $env:PATH = "$env:VULKAN_SDK\runtime\x64;$env:PATH"
             }
           }
           if ($env:CUDA_PATH) { $env:PATH = "$env:CUDA_PATH\bin;$env:PATH" }
-          npm run test:api
+          npm run test:integration
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
           LLOYAL_NO_FALLBACK: '1'
 
-      - name: Run API tests (Unix)
-        if: runner.os != 'Windows' && matrix.cross_compile != true && matrix.gpu != 'cuda'
+      - name: Run integration tests (Unix)
+        if: runner.os != 'Windows' && (matrix.gpu == 'cpu' || matrix.gpu == 'metal')
         run: |
           PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
           export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
-          npm run test:api
-        timeout-minutes: 5
-        env:
-          LLOYAL_GPU: ${{ matrix.gpu }}
-          LLOYAL_NO_FALLBACK: '1'
-
-      - name: Run E2E tests (Windows)
-        if: runner.os == 'Windows' && matrix.cross_compile != true && matrix.gpu != 'cuda'
-        shell: pwsh
-        run: |
-          $pkgBin = "$PWD\node_modules\@lloyal-labs\lloyal.node-${{ matrix.package }}\bin"
-          $env:PATH = "$pkgBin;$env:PATH"
-          if ($env:VULKAN_SDK) {
-            $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
-            # Vulkan runtime is in runtime\x64, not Bin
-            if (Test-Path "$env:VULKAN_SDK\runtime\x64\vulkan-1.dll") {
-              $env:PATH = "$env:VULKAN_SDK\runtime\x64;$env:PATH"
-            }
-          }
-          if ($env:CUDA_PATH) { $env:PATH = "$env:CUDA_PATH\bin;$env:PATH" }
-          npm run test:e2e
-        timeout-minutes: 5
-        env:
-          LLOYAL_GPU: ${{ matrix.gpu }}
-          LLOYAL_NO_FALLBACK: '1'
-
-      - name: Run E2E tests (Unix)
-        if: runner.os != 'Windows' && matrix.cross_compile != true && matrix.gpu != 'cuda'
-        run: |
-          PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
-          export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
-          npm run test:e2e
+          npm run test:integration
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}

@@ -29,6 +29,10 @@ const args = process.argv.slice(2);
 const jsonlMode = args.includes('--jsonl');
 const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
 
+// Parse --max-tokens for CI (default 5000)
+const maxTokensArg = args.find(a => a.startsWith('--max-tokens='));
+const TARGET_TOKENS = maxTokensArg ? parseInt(maxTokensArg.split('=')[1], 10) : 5000;
+
 /** Emit output - JSONL or human-readable */
 function emit(event, data) {
   if (jsonlMode) {
@@ -41,7 +45,6 @@ async function main() {
   const nCtx = 2048;
   const SINK_COUNT = 4;
   const TAIL_SIZE = 256;
-  const TARGET_TOKENS = 5000;
 
   if (!jsonlMode) {
     console.log(`Loading model: ${modelPath}`);

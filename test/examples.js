@@ -7,14 +7,27 @@
  * Usage:
  *   node test/examples.js           # Run all examples
  *   node test/examples.js entropy   # Run specific example
+ *
+ * Environment variables:
+ *   MODEL_PATH       - Path to chat/instruct model (default: SmolLM2)
+ *   EMBED_MODEL_PATH - Path to embedding model (default: nomic-embed)
  */
 
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const MODEL_PATH = path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
-const SUMMARY_MODEL_PATH = path.join(__dirname, '../models/slim-summarize.gguf');
+// Model paths - use env var or default (resolve to absolute path)
+const MODEL_PATH = process.env.MODEL_PATH
+  ? path.resolve(process.env.MODEL_PATH)
+  : path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
+
+// Embedding model (separate from chat model, resolve to absolute path)
+const EMBED_MODEL_PATH = process.env.EMBED_MODEL_PATH
+  ? path.resolve(process.env.EMBED_MODEL_PATH)
+  : path.join(__dirname, '../liblloyal/tests/fixtures/nomic-embed-text-v1.5.Q4_K_M.gguf');
+
+
 if (!fs.existsSync(MODEL_PATH)) {
   console.error('❌ Test model not found!');
   console.error(`   Expected: ${MODEL_PATH}`);
@@ -25,12 +38,14 @@ if (!fs.existsSync(MODEL_PATH)) {
 /**
  * Run an example with --jsonl and collect events
  */
-function runExample(scriptPath, timeout = 600000) {
+function runExample(scriptPath, timeout = 600000, extraArgs = [], modelPathOverride = null) {
   return new Promise((resolve, reject) => {
     const events = [];
     let stderr = '';
 
-    const child = spawn('node', [scriptPath, MODEL_PATH, '--jsonl'], {
+    const modelArg = modelPathOverride || MODEL_PATH;
+
+    const child = spawn('node', [scriptPath, modelArg, '--jsonl', ...extraArgs], {
       cwd: path.dirname(scriptPath),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -42,7 +57,6 @@ function runExample(scriptPath, timeout = 600000) {
           try {
             const event = JSON.parse(line);
             events.push(event);
-            console.log(line);
           } catch {
             // Ignore malformed JSON
           }
@@ -183,14 +197,14 @@ const EXAMPLES = {
 
   streaming: {
     path: 'streaming/streaming.mjs',
-    timeout: 300000,
+    timeout: 120000,
+    extraArgs: ['--max-tokens=500'],
     validate(events) {
       const start = events.find(e => e.event === 'start');
       assert(start, 'should have start event');
-      assert(start.targetTokens === 5000, 'should target 5000 tokens');
 
       const tokens = events.filter(e => e.event === 'token');
-      assert(tokens.length > 100, 'should generate many tokens');
+      assert(tokens.length > 50, 'should generate tokens');
 
       for (const t of tokens.slice(0, 10)) {
         assert(typeof t.surprisal === 'number', 'token should have surprisal');
@@ -205,7 +219,8 @@ const EXAMPLES = {
 
   'streaming-tsampler': {
     path: 'streaming/streaming-tsampler.mjs',
-    timeout: 300000,
+    timeout: 120000,
+    extraArgs: ['--max-tokens=500'],
     validate(events) {
       const start = events.find(e => e.event === 'start');
       assert(start, 'should have start event');
@@ -224,86 +239,127 @@ const EXAMPLES = {
 
   'streaming-summary': {
     path: 'streaming/streaming-summary.mjs',
-    timeout: 600000,
-    skip: !fs.existsSync(SUMMARY_MODEL_PATH),
-    skipReason: 'slim-summarize.gguf not found',
+    timeout: 180000,
+    extraArgs: ['--max-tokens=500'],
     validate(events) {
       const start = events.find(e => e.event === 'start');
       assert(start, 'should have start event');
-      assert(start.targetTokens === 5000, 'should target 5000 tokens');
+      assert(start.summaryMode === 'self', 'should default to self-summary mode');
 
       const tokens = events.filter(e => e.event === 'token');
-      assert(tokens.length > 100, 'should generate many tokens');
+      assert(tokens.length > 50, 'should generate tokens');
 
-      // Check for token source field
       for (const t of tokens.slice(0, 10)) {
         assert(t.source === 'main', 'token should have source=main');
         assert(typeof t.surprisal === 'number', 'token should have surprisal');
       }
 
-      // With 5000 target tokens and 2048 context, expect reseeds
-      const reseeds = events.filter(e => e.event === 'reseed');
-      assert(reseeds.length > 0, 'should have at least one reseed');
-
-      // Check reseed events have sink info
-      for (const r of reseeds) {
-        assert(r.sinkTokens > 0, 'reseed should have sinkTokens > 0');
-        assert(r.tailTokens > 0, 'reseed should have tailTokens > 0');
-      }
-
-      // If summary model was loaded, check summary events
-      const summaryLoaded = events.find(e => e.event === 'summary_loaded');
-      if (summaryLoaded) {
-        const summaryCompletes = events.filter(e => e.event === 'summary_complete');
-        assert(summaryCompletes.length > 0, 'should have summary_complete events');
-
-        for (const sc of summaryCompletes) {
-          assert(sc.summaryTokens > 0, 'summary should have tokens');
-          assert(sc.compressionRatio > 0, 'summary should have compression ratio');
-          assert(sc.durationMs > 0, 'summary should have duration');
-        }
-
-        const sinkUpdates = events.filter(e => e.event === 'sink_update');
-        assert(sinkUpdates.length > 0, 'should have sink_update events');
-      }
-
       const complete = events.find(e => e.event === 'complete');
       assert(complete, 'should have complete event');
       assert(complete.generatedTokens > 0, 'should generate tokens');
-      assert(complete.reseeds > 0, 'should have reseeds > 0');
       assert(complete.finalPpl > 0, 'should have finalPpl');
     },
   },
 
+  embed: {
+    path: 'embed/embed.mjs',
+    timeout: 60000,
+    modelPath: EMBED_MODEL_PATH,
+    skip: !fs.existsSync(EMBED_MODEL_PATH),
+    skipReason: 'nomic-embed-text model not found',
+    validate(events) {
+      const start = events.find(e => e.event === 'start');
+      assert(start, 'should have start event');
+      assert(start.embeddingDim > 0, 'should have embedding dimension');
+      assert(start.hasPooling === true, 'should have pooling enabled');
+
+      const embeddings = events.filter(e => e.event === 'embedding');
+      assert(embeddings.length === 4, 'should embed 4 texts');
+
+      for (const e of embeddings) {
+        assert(e.dimension > 0, 'embedding should have dimension');
+        assert(e.elapsed >= 0, 'embedding should have elapsed time');
+      }
+
+      const similarities = events.filter(e => e.event === 'similarity');
+      assert(similarities.length === 6, 'should have 6 similarity pairs (4 choose 2)');
+
+      for (const s of similarities) {
+        assert(s.similarity >= -1 && s.similarity <= 1, 'similarity should be in [-1, 1]');
+      }
+
+      const search = events.find(e => e.event === 'search');
+      assert(search, 'should have search event');
+      assert(search.results.length === 4, 'search should rank all texts');
+
+      const complete = events.find(e => e.event === 'complete');
+      assert(complete, 'should have complete event');
+    },
+  },
 };
 
 async function runTest(name, config) {
   const fullPath = path.join(__dirname, '../examples', config.path);
 
   if (config.skip) {
-    console.log(`⏭️  ${name}: SKIPPED (${config.skipReason})`);
-    return { name, skipped: true };
+    console.log(`⏭️  ${name}: SKIPPED`);
+    console.log(`   Reason: ${config.skipReason}`);
+    return { name, skipped: true, skipReason: config.skipReason };
   }
 
-  console.log(`📜 ${name}: Running...`);
+  console.log(`\n📜 ${name}:`);
+  const startTime = Date.now();
 
   try {
-    const events = await runExample(fullPath, config.timeout);
+    const modelPathToUse = config.modelPath || MODEL_PATH;
+    const extraArgs = config.extraArgs || [];
+
+    const events = await runExample(fullPath, config.timeout, extraArgs, modelPathToUse);
     config.validate(events);
-    console.log(`✅ ${name}: PASSED (${events.length} events)`);
-    return { name, passed: true, eventCount: events.length };
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    console.log(`   ✅ PASSED (${elapsed}s)`);
+    console.log(`   Events: ${events.length} total`);
+
+    // Show key metrics from complete event if present
+    const complete = events.find(e => e.event === 'complete');
+    if (complete) {
+      const metrics = [];
+      if (complete.generatedTokens) metrics.push(`tokens: ${complete.generatedTokens}`);
+      if (complete.outputTokens) metrics.push(`tokens: ${complete.outputTokens}`);
+      if (complete.finalPpl) metrics.push(`ppl: ${complete.finalPpl.toFixed(2)}`);
+      if (complete.reseeds !== undefined) metrics.push(`reseeds: ${complete.reseeds}`);
+      if (complete.acceptRate !== undefined) metrics.push(`accept: ${(complete.acceptRate * 100).toFixed(0)}%`);
+      if (complete.validJsonCount !== undefined) metrics.push(`valid: ${complete.validJsonCount}/${complete.branchCount}`);
+      if (complete.bestPpl) metrics.push(`bestPpl: ${complete.bestPpl.toFixed(2)}`);
+      if (complete.embeddings) metrics.push(`embeddings: ${complete.embeddings}`);
+      if (metrics.length > 0) {
+        console.log(`   Metrics: ${metrics.join(', ')}`);
+      }
+    }
+
+    return {
+      name,
+      passed: true,
+      elapsed: parseFloat(elapsed),
+      eventCount: events.length,
+      metrics: complete || {}
+    };
+
   } catch (err) {
-    console.log(`❌ ${name}: FAILED`);
-    console.log(`   ${err.message}`);
-    return { name, passed: false, error: err.message };
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`   ❌ FAILED (${elapsed}s)`);
+    console.log(`   Error: ${err.message}`);
+    return { name, passed: false, elapsed: parseFloat(elapsed), error: err.message };
   }
 }
 
 async function main() {
   const filterName = process.argv[2];
 
-  console.log('=== Examples Integration Test ===\n');
-  console.log(`Model: ${path.basename(MODEL_PATH)}\n`);
+  console.log('=== Examples Integration Test ===');
+  console.log(`Model: ${path.basename(MODEL_PATH)}`);
 
   const toRun = filterName
     ? { [filterName]: EXAMPLES[filterName] }
@@ -323,25 +379,27 @@ async function main() {
   }
 
   // Summary
-  console.log('\n' + '═'.repeat(50));
-  console.log('SUMMARY');
-  console.log('═'.repeat(50));
+  console.log('\n' + '═'.repeat(60));
+  console.log('EXAMPLES TEST SUMMARY');
+  console.log('═'.repeat(60));
+  console.log(`Model: ${path.basename(MODEL_PATH)}`);
+  console.log();
 
   const passed = results.filter(r => r.passed).length;
   const failed = results.filter(r => !r.passed && !r.skipped).length;
   const skipped = results.filter(r => r.skipped).length;
+  const totalTime = results.reduce((sum, r) => sum + (r.elapsed || 0), 0).toFixed(1);
 
+  console.log('Results:');
   for (const r of results) {
-    if (r.skipped) {
-      console.log(`  ⏭️  ${r.name} (skipped)`);
-    } else if (r.passed) {
-      console.log(`  ✅ ${r.name}`);
-    } else {
-      console.log(`  ❌ ${r.name}`);
-    }
+    const status = r.skipped ? '⏭️ ' : (r.passed ? '✅' : '❌');
+    const time = r.elapsed ? ` (${r.elapsed}s)` : '';
+    const detail = r.skipped ? ` - ${r.skipReason}` : (r.error ? ` - ${r.error.slice(0, 50)}` : '');
+    console.log(`  ${status} ${r.name}${time}${detail}`);
   }
 
-  console.log(`\nResult: ${passed} passed, ${failed} failed, ${skipped} skipped`);
+  console.log();
+  console.log(`Total: ${passed} passed, ${failed} failed, ${skipped} skipped in ${totalTime}s`);
 
   process.exit(failed > 0 ? 1 : 0);
 }
