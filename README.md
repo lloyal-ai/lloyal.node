@@ -9,10 +9,10 @@ Forkable inference state for llama.cpp — Branch a generation into a tree — p
 Fork from root for best-of-N, fork from children for MCTS/beam search, fork from a draft for speculative decoding. The produce/commit protocol separates sampling from state advancement — sample without writing to KV, inspect the result, then decide whether to commit.
 
 ```javascript
-import { createContext, Branch } from '@lloyal-labs/lloyal.node';
+import { createContext, Branch } from "@lloyal-labs/lloyal.node";
 
-const ctx = await createContext({ modelPath: './model.gguf', nSeqMax: 8 });
-const tokens = await ctx.tokenize('Once upon a time');
+const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 8 });
+const tokens = await ctx.tokenize("Once upon a time");
 await ctx.decode(tokens, 0, 0);
 
 // Create root branch, freeze logits from prefill
@@ -73,6 +73,17 @@ Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, no
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
+CI integration testing (real inference) matrix:
+
+| Architecture | Test Model     | Template |
+| ------------ | -------------- | -------- |
+| Llama        | Llama 3.2 1B   | llama3   |
+| Phi          | Phi 3.5 Mini   | phi3     |
+| Qwen         | Qwen 3 1.7B    | chatml   |
+| Gemma        | Gemma 3 1B     | gemma    |
+| SmolLM       | SmolLM2 1.7B   | chatml   |
+| TinyLlama    | TinyLlama 1.1B | zephyr   |
+
 See [distribution.md](docs/distribution.md) for details.
 
 ---
@@ -105,7 +116,7 @@ Each example has a README explaining the pattern.
 Model uncertainty mid-generation enables dynamic behavior:
 
 ```javascript
-const entropy = ctx.modelEntropy('bits');
+const entropy = ctx.modelEntropy("bits");
 
 if (entropy > 4.0) {
   // High uncertainty — model is guessing
