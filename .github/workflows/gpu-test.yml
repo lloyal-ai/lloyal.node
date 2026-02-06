@@ -2,6 +2,11 @@ name: GPU Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_build:
+        description: 'Skip build step (use existing artifacts)'
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       skip_build:
