@@ -30,13 +30,13 @@
     {
       "name": "Qwen3",
       "file": "Qwen3-1.7B-Q4_K_M.gguf",
-      "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/qwen3-1.7b-q4_k_m.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
       "template": "chatml"
     },
     {
       "name": "Gemma-3",
       "file": "gemma-3-1b-it-Q4_K_M.gguf",
-      "url": "https://huggingface.co/google/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf",
       "template": "gemma"
     }
   ],

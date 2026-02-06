@@ -182,12 +182,15 @@ jobs:
           LLOYAL_LOCAL: '1'
           MODEL_PATH: models/${{ matrix.model.file }}
 
-      - name: Run example tests
-        run: npm run test:examples
-        timeout-minutes: 15
-        env:
-          LLOYAL_LOCAL: '1'
-          MODEL_PATH: models/${{ matrix.model.file }}
+      # TODO: Enable example tests when self-hosted GPU runners are available
+      # GitHub's macos-14 uses paravirtualized Metal (~2.4s/token) which is too
+      # slow for example tests. Integration tests pass but examples timeout.
+      # - name: Run example tests
+      #   run: npm run test:examples
+      #   timeout-minutes: 15
+      #   env:
+      #     LLOYAL_LOCAL: '1'
+      #     MODEL_PATH: models/${{ matrix.model.file }}
 
       - name: Display test info
         if: always()
