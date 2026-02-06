@@ -379,6 +379,8 @@ private:
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
   Napi::Value _branchDestroy(const Napi::CallbackInfo& info);
   Napi::Value _branchSamplerChainReseed(const Napi::CallbackInfo& info);
+  Napi::Value _branchSteer(const Napi::CallbackInfo& info);
+  Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====

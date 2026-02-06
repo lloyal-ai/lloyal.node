@@ -382,6 +382,106 @@ async function testBranchPrefill() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BRANCH STEER TESTS - Dynamic per-sample logit manipulation
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testBranchSteer() {
+  console.log('\n--- Branch.steer ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 512,
+    nThreads: 4
+  });
+
+  try {
+    const tokens = await ctx.tokenize("The quick brown");
+    await ctx.decode(tokens, 0, 0);
+
+    // Use greedy sampling for deterministic tests
+    const branch = Branch.create(ctx, 0, tokens.length, { temperature: 0 });
+    branch.captureLogits();
+
+    // Get the greedy token (what would be sampled without steer)
+    const greedyToken = branch.sample();
+    assert(greedyToken >= 0, `Greedy sample → ${greedyToken}`);
+
+    // Block the greedy token with steer
+    branch.steer([{ token: greedyToken, bias: -Infinity }]);
+
+    // Sample again - should get a different token
+    const steeredToken = branch.sample();
+    assert(steeredToken !== greedyToken,
+      `steer() blocks greedy: ${greedyToken} → ${steeredToken}`);
+
+    // Clear steer - should get greedy token again
+    branch.clearSteer();
+    const afterClear = branch.sample();
+    assert(afterClear === greedyToken,
+      `clearSteer() restores greedy: ${afterClear} === ${greedyToken}`);
+
+    // Test multiple blocks
+    branch.steer([
+      { token: greedyToken, bias: -Infinity },
+      { token: steeredToken, bias: -Infinity },
+    ]);
+    const doubleBlocked = branch.sample();
+    assert(doubleBlocked !== greedyToken && doubleBlocked !== steeredToken,
+      `Multiple blocks: ${doubleBlocked} ≠ {${greedyToken}, ${steeredToken}}`);
+
+    // Test boost (positive bias)
+    branch.clearSteer();
+    branch.steer([{ token: 42, bias: 100.0 }]);  // Massive boost to token 42
+    const boosted = branch.sample();
+    assert(boosted === 42, `Boost token 42 → ${boosted}`);
+
+    branch.prune();
+    ok('steer()/clearSteer() work correctly');
+
+    // Test fork invariant: steer is NOT cloned on fork
+    const tokens2 = await ctx.tokenize("Hello world");
+    await ctx.decode(tokens2, 0, 0);
+
+    const parent = Branch.create(ctx, 0, tokens2.length, { temperature: 0 });
+    parent.captureLogits();
+
+    const parentGreedy = parent.sample();
+
+    // Apply steer to parent - block the greedy token
+    parent.steer([{ token: parentGreedy, bias: -Infinity }]);
+    const parentSteered = parent.sample();
+    assert(parentSteered !== parentGreedy, `Parent steered: ${parentSteered} ≠ ${parentGreedy}`);
+
+    // Fork from parent - child should NOT inherit steer
+    const child = parent.fork(1);
+    const childSample = child.sample();
+    assert(childSample === parentGreedy,
+      `Fork does NOT inherit steer: child=${childSample} === greedy=${parentGreedy}`);
+
+    // Verify parent still has steer active
+    const parentStillSteered = parent.sample();
+    assert(parentStillSteered === parentSteered,
+      `Parent retains steer after fork: ${parentStillSteered} === ${parentSteered}`);
+
+    // Apply different steer to child - should not affect parent
+    child.steer([{ token: 99, bias: 100.0 }]);
+    const childBoosted = child.sample();
+    assert(childBoosted === 99, `Child can set own steer: ${childBoosted} === 99`);
+
+    // Parent should be unaffected by child's steer
+    const parentUnaffected = parent.sample();
+    assert(parentUnaffected === parentSteered,
+      `Parent unaffected by child steer: ${parentUnaffected} === ${parentSteered}`);
+
+    child.prune();
+    parent.prune();
+    ok('steer() NOT cloned on fork (fork invariant)');
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // NBATCH ABLATION - Chunk size must not affect output
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -648,6 +748,7 @@ async function main() {
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
+    await testBranchSteer();
     await testNBatchAblation();
     await testDeterminism();
     await testDecodeAndCapture();
