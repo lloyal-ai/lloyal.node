@@ -1,0 +1,191 @@
+name: GPU Tests
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      skip_build:
+        description: 'Skip build step (packages already built by caller)'
+        type: boolean
+        default: true
+
+jobs:
+  # Build only the GPU packages needed for testing
+  # Skipped when called from release.yml (packages already built)
+  build-gpu-packages:
+    name: Build ${{ matrix.package }}
+    if: ${{ github.event_name == 'workflow_dispatch' || inputs.skip_build == false }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gpu: cuda
+            package: linux-x64-cuda
+          - gpu: vulkan
+            package: linux-x64-vulkan
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Validate llama.cpp version
+        run: node scripts/sync-llama-cpp.js --check
+        shell: bash
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Provision CUDA toolkit (Linux)
+        if: matrix.gpu == 'cuda'
+        uses: ./.github/actions/provision-cuda
+        with:
+          version: '12.6.2'
+          arch: x64
+
+      - name: Install Vulkan SDK (Linux)
+        if: matrix.gpu == 'vulkan'
+        uses: jakoch/install-vulkan-sdk-action@v1.2.4
+        with:
+          vulkan_version: '1.4.313.0'
+          install_runtime: true
+          optional_components: com.lunarg.vulkan.arm64
+          cache: true
+          stripdown: true
+
+      # Build
+      - name: Install npm dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build native module
+        run: npm run build
+        env:
+          LLOYAL_GPU: ${{ matrix.gpu }}
+
+      # Create platform package
+      - name: Create platform package
+        shell: bash
+        run: |
+          node scripts/create-platform-package.js "${{ matrix.package }}" "ubuntu-22.04" "x64"
+
+      # Upload package artifact for gpu-integration job
+      - name: Upload platform package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.package }}
+          path: packages/${{ matrix.package }}/
+          retention-days: 1
+
+  # GPU Integration Tests via Cloud Run
+  # Runs real GPU tests on NVIDIA L4 for CUDA/Vulkan packages
+  gpu-integration:
+    name: GPU Tests (${{ matrix.backend }})
+    needs: build-gpu-packages
+    runs-on: ubuntu-latest
+    # Run if build succeeded OR was skipped (packages from caller)
+    if: ${{ !cancelled() && (needs.build-gpu-packages.result == 'success' || needs.build-gpu-packages.result == 'skipped') }}
+
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cuda
+            package: linux-x64-cuda
+          - backend: vulkan
+            package: linux-x64-vulkan
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      # Download built packages from build-gpu-packages job
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-${{ matrix.package }}
+          path: packages/package-${{ matrix.package }}
+
+      # Build and push Docker image
+      - name: Build GPU test image
+        run: |
+          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lloyal-ci/gpu-tests:${{ github.sha }}-${{ matrix.backend }}"
+          docker build \
+            -f ci/Dockerfile.gpu-tests \
+            -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      # Create/update Cloud Run Job
+      - name: Deploy Cloud Run Job
+        run: |
+          JOB_NAME="lloyal-gpu-test-${{ matrix.backend }}"
+
+          # Check if job exists
+          if gcloud run jobs describe $JOB_NAME --region=us-central1 2>/dev/null; then
+            gcloud run jobs update $JOB_NAME \
+              --region=us-central1 \
+              --image="${IMAGE}" \
+              --service-account="${{ secrets.GCP_SA_EMAIL }}" \
+              --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
+              --task-timeout=10m
+          else
+            gcloud run jobs create $JOB_NAME \
+              --region=us-central1 \
+              --image="${IMAGE}" \
+              --service-account="${{ secrets.GCP_SA_EMAIL }}" \
+              --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
+              --task-timeout=10m \
+              --gpu=1 \
+              --gpu-type=nvidia-l4 \
+              --memory=8Gi \
+              --cpu=2 \
+              --max-retries=0
+          fi
+
+      # Execute the job and wait for completion
+      - name: Run GPU tests
+        run: |
+          JOB_NAME="lloyal-gpu-test-${{ matrix.backend }}"
+
+          # Execute job
+          EXECUTION=$(gcloud run jobs execute $JOB_NAME \
+            --region=us-central1 \
+            --wait \
+            --format='value(metadata.name)')
+
+          echo "Execution: $EXECUTION"
+
+          # Wait for logs to flush to Cloud Logging
+          sleep 5
+
+          # Get logs
+          gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=$JOB_NAME AND resource.labels.location=us-central1" \
+            --limit=200 \
+            --format='value(textPayload)'
