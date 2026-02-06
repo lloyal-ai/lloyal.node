@@ -1,6 +1,12 @@
 name: GPU Tests
 
 on:
+  # TODO: Remove push trigger after testing
+  push:
+    branches: [feat/gpu-testing]
+    paths:
+      - '.github/workflows/gpu-test.yml'
+      - 'ci/**'
   workflow_dispatch:
     inputs:
       skip_build:
