@@ -25,7 +25,7 @@ jobs:
   # Skipped when called from release.yml (packages already built)
   build-gpu-packages:
     name: Build ${{ matrix.package }}
-    if: ${{ github.event_name == 'workflow_dispatch' || inputs.skip_build == false }}
+    if: ${{ inputs.skip_build != true }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
