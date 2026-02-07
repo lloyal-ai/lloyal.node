@@ -125,9 +125,7 @@ jobs:
         with:
           vulkan_version: '1.3.296.0'
           install_runtime: true
-          optional_components: com.lunarg.vulkan.arm64
-          cache: true
-          stripdown: true
+          cache: false
 
       - name: Provision CUDA toolkit (Windows)
         if: matrix.gpu == 'cuda' && runner.os == 'Windows'
@@ -142,8 +140,7 @@ jobs:
         with:
           vulkan_version: '1.3.296.0'
           install_runtime: true
-          cache: true
-          # Note: Do NOT use stripdown on Windows - it removes vulkan-1.dll runtime
+          cache: false
 
       - name: Setup LLVM and Ninja for Windows ARM64 cross-compilation
         if: runner.os == 'Windows' && matrix.cross_compile == true
