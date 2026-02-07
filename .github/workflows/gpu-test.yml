@@ -175,8 +175,8 @@ jobs:
               --task-timeout=10m \
               --gpu=1 \
               --gpu-type=nvidia-l4 \
-              --memory=8Gi \
-              --cpu=2 \
+              --memory=16Gi \
+              --cpu=4 \
               --max-retries=0 \
               --no-gpu-zonal-redundancy
           fi
