@@ -57,11 +57,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
+      # CUDA 12.2.2 required for Cloud Run L4 GPU (driver 535.x)
       - name: Provision CUDA toolkit (Linux)
         if: matrix.gpu == 'cuda'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.4.1'
+          version: '12.2.2'
           arch: x64
 
       - name: Install Vulkan SDK (Linux)
@@ -97,6 +98,12 @@ jobs:
 
   # GPU Integration Tests via Cloud Run
   # Runs real GPU tests on NVIDIA L4 for CUDA/Vulkan packages
+  #
+  # L4 GPU Requirements (as of 2024):
+  #   - Driver: 535.216.03 (supports CUDA 12.2.2 max)
+  #   - Minimum: 4 CPU, 16 GiB memory
+  #   - Regions: us-central1, us-east4, europe-west1, europe-west4, asia-southeast1
+  #   - Quota: 3 L4 GPUs per region (default)
   gpu-integration:
     name: GPU Tests (${{ matrix.backend }})
     needs: build-gpu-packages

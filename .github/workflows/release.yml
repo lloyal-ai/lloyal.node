@@ -112,11 +112,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
+      # CUDA 12.2.2 required for Cloud Run L4 GPU (driver 535.x)
       - name: Provision CUDA toolkit (Linux)
         if: matrix.gpu == 'cuda' && runner.os == 'Linux'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.4.1'
+          version: '12.2.2'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Linux)
@@ -127,11 +128,12 @@ jobs:
           install_runtime: true
           cache: false
 
+      # CUDA 12.2.2 for broad driver compatibility (matches Linux)
       - name: Provision CUDA toolkit (Windows)
         if: matrix.gpu == 'cuda' && runner.os == 'Windows'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.4.1'
+          version: '12.2.2'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Windows)
