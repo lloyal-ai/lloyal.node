@@ -61,7 +61,7 @@ jobs:
         if: matrix.gpu == 'cuda'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.6.2'
+          version: '12.4.1'
           arch: x64
 
       - name: Install Vulkan SDK (Linux)

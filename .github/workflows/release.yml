@@ -116,7 +116,7 @@ jobs:
         if: matrix.gpu == 'cuda' && runner.os == 'Linux'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.6.2'
+          version: '12.4.1'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Linux)
@@ -133,7 +133,7 @@ jobs:
         if: matrix.gpu == 'cuda' && runner.os == 'Windows'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.6.2'
+          version: '12.4.1'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Windows)
