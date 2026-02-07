@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/gpu-test.yml'
       - 'ci/**'
+      - 'src/**'
   workflow_dispatch:
     inputs:
       skip_build:
