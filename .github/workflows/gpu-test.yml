@@ -133,7 +133,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+        run: gcloud auth configure-docker us-east4-docker.pkg.dev --quiet
 
       # Download built packages from build-gpu-packages job
       - name: Download package artifact
@@ -145,7 +145,7 @@ jobs:
       # Build and push Docker image
       - name: Build GPU test image
         run: |
-          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lloyal-ci/gpu-tests:${{ github.sha }}-${{ matrix.backend }}"
+          IMAGE="us-east4-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lloyal-ci/gpu-tests:${{ github.sha }}-${{ matrix.backend }}"
           docker build \
             -f ci/Dockerfile.gpu-tests \
             -t "$IMAGE" .
@@ -158,9 +158,9 @@ jobs:
           JOB_NAME="lloyal-gpu-test-${{ matrix.backend }}"
 
           # Check if job exists
-          if gcloud run jobs describe $JOB_NAME --region=us-central1 2>/dev/null; then
+          if gcloud run jobs describe $JOB_NAME --region=us-east4 2>/dev/null; then
             gcloud run jobs update $JOB_NAME \
-              --region=us-central1 \
+              --region=us-east4 \
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
               --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
@@ -168,7 +168,7 @@ jobs:
               --no-gpu-zonal-redundancy
           else
             gcloud run jobs create $JOB_NAME \
-              --region=us-central1 \
+              --region=us-east4 \
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
               --set-env-vars=LLOYAL_GPU=${{ matrix.backend }},LLOYAL_NO_FALLBACK=1 \
@@ -188,7 +188,7 @@ jobs:
 
           # Execute job
           EXECUTION=$(gcloud run jobs execute $JOB_NAME \
-            --region=us-central1 \
+            --region=us-east4 \
             --wait \
             --format='value(metadata.name)')
 
@@ -199,6 +199,6 @@ jobs:
 
           # Get logs
           gcloud logging read \
-            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB_NAME\" AND resource.labels.location=\"us-central1\"" \
+            "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB_NAME\" AND resource.labels.location=\"us-east4\"" \
             --limit=200 \
             --format='value(textPayload)'

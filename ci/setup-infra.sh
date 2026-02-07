@@ -4,7 +4,7 @@ set -e
 # --- CONFIGURATION ---
 PROJECT_ID="lloyal-node"
 GITHUB_REPO="lloyal-ai/lloyal.node"
-REGION="us-central1"
+REGION="us-east4"
 
 # Infrastructure Names
 SA_NAME="github-ci-runner"
