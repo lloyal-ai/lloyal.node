@@ -4,8 +4,13 @@ set -e
 echo "=== GPU Test Environment ==="
 # NOTE: nvcc is N/A because we use cuda:runtime image (no compiler needed - binary already built)
 echo "CUDA:   $(nvcc --version 2>/dev/null | grep release || echo 'runtime-only')"
-echo "GPU:    $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
-echo "Vulkan: $(vulkaninfo --summary 2>/dev/null | grep 'GPU' || echo 'N/A')"
+echo "GPU:    $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null || echo 'N/A')"
+echo ""
+echo "Vulkan ICD files:"
+ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || echo "  (none found)"
+echo ""
+echo "Vulkan devices:"
+vulkaninfo --summary 2>&1 | head -20 || echo "  (vulkaninfo failed)"
 echo ""
 
 # GPU backend to test (passed as arg or env)

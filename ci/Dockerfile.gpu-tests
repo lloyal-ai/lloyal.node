@@ -4,11 +4,16 @@
 # Build: docker build -f ci/Dockerfile.gpu-tests -t gpu-tests .
 # Run:   docker run --gpus all gpu-tests
 
-FROM nvidia/cuda:12.6.2-runtime-ubuntu22.04
+# CUDA 12.2.2 required for Cloud Run L4 GPU (driver 535.x supports up to 12.2.x)
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
 # Install Vulkan runtime, tools, and utilities
 # NOTE: Do NOT install mesa-vulkan-drivers - it provides a software fallback
 # that would let tests "pass" without real GPU hardware
+#
+# Cloud Run GPU Note: The NVIDIA Vulkan ICD may not be exposed by Cloud Run's
+# container runtime. If Vulkan tests fail to detect GPU, this is a Cloud Run
+# limitation, not a package issue. CUDA tests will still work.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
