@@ -172,8 +172,12 @@ jobs:
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 
+      # Build with CPU-only to avoid paravirtualized Metal GPU bugs
+      # (NeoX RoPE kernel returns zeros on Apple Paravirtual device)
       - name: Build from submodules
         run: npm run build
+        env:
+          LLOYAL_GPU: cpu
 
       - name: Run integration tests
         run: npm run test:integration

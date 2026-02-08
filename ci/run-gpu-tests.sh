@@ -2,24 +2,8 @@
 set -e
 
 echo "=== GPU Test Environment ==="
-# NOTE: nvcc is N/A because we use cuda:runtime image (no compiler needed - binary already built)
 echo "CUDA:   $(nvcc --version 2>/dev/null | grep release || echo 'runtime-only')"
 echo "GPU:    $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null || echo 'N/A')"
-echo ""
-echo "Vulkan ICD files (/etc/vulkan/icd.d/):"
-ls -la /etc/vulkan/icd.d/ 2>/dev/null || echo "  (none found)"
-cat /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null || echo "  (no nvidia_icd.json)"
-echo ""
-echo "VK_ICD_FILENAMES: ${VK_ICD_FILENAMES:-not set}"
-echo "NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-not set}"
-echo ""
-echo "NVIDIA libs mounted:"
-ls -la /usr/lib/x86_64-linux-gnu/libGLX_nvidia* 2>/dev/null || echo "  (not in /usr/lib/x86_64-linux-gnu/)"
-ls -la /usr/lib/libGLX_nvidia* 2>/dev/null || echo "  (not in /usr/lib/)"
-ldconfig -p 2>/dev/null | grep -i nvidia | head -5 || echo "  (no nvidia libs in ldconfig)"
-echo ""
-echo "Vulkan devices:"
-vulkaninfo --summary 2>&1 | head -30 || echo "  (vulkaninfo failed)"
 echo ""
 
 # GPU backend to test (passed as arg or env)
