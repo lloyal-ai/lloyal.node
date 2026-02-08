@@ -10,10 +10,6 @@ FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 # Install Vulkan runtime, tools, and utilities
 # NOTE: Do NOT install mesa-vulkan-drivers - it provides a software fallback
 # that would let tests "pass" without real GPU hardware
-#
-# Cloud Run GPU Note: The NVIDIA Vulkan ICD may not be exposed by Cloud Run's
-# container runtime. If Vulkan tests fail to detect GPU, this is a Cloud Run
-# limitation, not a package issue. CUDA tests will still work.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
@@ -53,5 +49,24 @@ COPY scripts/download-test-models.sh ./scripts/
 
 # Test script
 COPY ci/run-gpu-tests.sh ./
+
+# --- VULKAN FIX FOR CLOUD RUN ---
+# Cloud Run mounts NVIDIA driver binaries but doesn't create the Vulkan ICD
+# manifest that the Vulkan loader needs to discover the driver.
+#
+# 1. Create the missing NVIDIA ICD Manifest
+#    This tells the Vulkan loader to use the NVIDIA library mounted by Cloud Run
+RUN mkdir -p /etc/vulkan/icd.d && \
+    echo '{ "file_format_version": "1.0.0", "ICD": { "library_path": "libGLX_nvidia.so.0", "api_version": "1.3.99" } }' \
+    > /etc/vulkan/icd.d/nvidia_icd.json
+
+# 2. Configure Environment Variables
+#    - VK_ICD_FILENAMES: Point Vulkan loader to our ICD manifest
+#    - NVIDIA_DRIVER_CAPABILITIES: Mount graphics libs (required for Vulkan, not just CUDA)
+#    - NVIDIA_VISIBLE_DEVICES: Ensure GPU is visible
+ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+ENV NVIDIA_VISIBLE_DEVICES=all
+# --- END VULKAN FIX ---
 
 ENTRYPOINT ["bash", "run-gpu-tests.sh"]
