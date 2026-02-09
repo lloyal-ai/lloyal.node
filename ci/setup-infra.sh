@@ -65,6 +65,11 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/run.invoker" > /dev/null
 
+# Grant Logging Viewer (Read logs back to CI)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="roles/logging.viewer" > /dev/null
+
 # Grant Service Account User (Act as itself)
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --member="serviceAccount:$SA_EMAIL" \
