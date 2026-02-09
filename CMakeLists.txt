@@ -76,6 +76,10 @@ if(WIN32)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 endif()
 
+# Enable llama.cpp common library (normally only built for standalone)
+# This provides chat template processing, batch utilities, JSON schema to grammar, etc.
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build llama.cpp common library" FORCE)
+
 # Set RPATH globally BEFORE adding llama.cpp subdirectory
 # This ensures ALL shared libraries (llama, ggml, ggml-*, gpu backends, etc.)
 # inherit these settings automatically - no need to hardcode target names
@@ -139,8 +143,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # liblloyal::liblloyal transitively brings:
 #   - llama (and ggml, and GPU deps like CUDA::cudart)
 #   - The llama/llama.h include structure we created
+# common is llama.cpp's common library (chat templates, batch utils, etc.)
 target_link_libraries(${PROJECT_NAME} PRIVATE
     liblloyal::liblloyal
+    common
     ${CMAKE_JS_LIB}
 )
 

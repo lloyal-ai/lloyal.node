@@ -73,7 +73,7 @@ Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, no
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-CI integration testing (real inference) matrix:
+CI integration testing (real inference):
 
 | Architecture | Test Model     | Template |
 | ------------ | -------------- | -------- |
