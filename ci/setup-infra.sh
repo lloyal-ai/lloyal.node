@@ -105,9 +105,7 @@ gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
 # --- OUTPUT ---
 PROVIDER_FULL_PATH=$(gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" --location="global" --workload-identity-pool="$POOL_NAME" --format="value(name)")
 
-echo ""
-echo "✅ Infrastructure Setup Complete!"
-echo "Secrets for GitHub:"
+echo "DONE:"
 echo "GCP_PROJECT_ID   : $PROJECT_ID"
 echo "GCP_SA_EMAIL     : $SA_EMAIL"
 echo "GCP_WIF_PROVIDER : $PROVIDER_FULL_PATH"
