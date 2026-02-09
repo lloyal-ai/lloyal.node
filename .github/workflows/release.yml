@@ -112,12 +112,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      # Use default CUDA 12.6 for building (forward compatible with L4's 12.2 runtime)
-      - name: Provision CUDA toolkit (Linux)
-        if: matrix.gpu == 'cuda' && runner.os == 'Linux'
+      # CUDA 12.2.2 for x64 - must match L4 GPU driver (535.x supports max 12.2)
+      # PTX compiled with newer CUDA won't run on older drivers
+      - name: Provision CUDA toolkit (Linux x64)
+        if: matrix.gpu == 'cuda' && runner.os == 'Linux' && matrix.arch == 'x64'
         uses: ./.github/actions/provision-cuda
         with:
-          arch: ${{ matrix.arch }}
+          version: '12.2.2'
+          arch: x64
+
+      # CUDA 12.6 for ARM64 - no L4 testing, use latest available
+      - name: Provision CUDA toolkit (Linux ARM64)
+        if: matrix.gpu == 'cuda' && runner.os == 'Linux' && matrix.arch == 'arm64'
+        uses: ./.github/actions/provision-cuda
+        with:
+          arch: arm64
 
       # Vulkan 1.4.x required for ARM64 (jakoch/vulkan-sdk-arm only has 1.4.x)
       - name: Install Vulkan SDK (Linux)
