@@ -11,6 +11,12 @@ on:
         type: boolean
         default: true
 
+# Top-level permissions for all jobs
+# - id-token: write needed for GPU tests (GCP WIF) and npm publish (provenance)
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   build-and-test:
     name: Build & Test ${{ matrix.package }}
