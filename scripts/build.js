@@ -6,6 +6,7 @@
  * 
  * Usage:
  *   npm run build                     # CPU/Metal (auto-detected)
+ *   LLOYAL_GPU=cpu npm run build      # CPU only (disables Metal on macOS)
  *   LLOYAL_GPU=cuda npm run build     # CUDA
  *   LLOYAL_GPU=vulkan npm run build   # Vulkan
  *   LLOYAL_GPU=metal npm run build    # Metal (macOS only)
@@ -29,6 +30,12 @@ if (gpuBackend === 'cuda') {
 } else if (gpuBackend === 'metal') {
   cmakeFlags.push('--CDGGML_METAL=ON');
   console.log('[lloyal.node] GPU backend: Metal');
+} else if (gpuBackend === 'cpu') {
+  // Explicitly disable GPU backends (useful for CI with paravirtualized GPUs)
+  if (PLATFORM === 'darwin') {
+    cmakeFlags.push('--CDGGML_METAL=OFF');
+  }
+  console.log('[lloyal.node] GPU backend: CPU only (forced)');
 } else if (PLATFORM === 'darwin') {
   // Metal is auto-enabled on macOS by llama.cpp
   console.log('[lloyal.node] GPU backend: Metal (auto-enabled on macOS)');

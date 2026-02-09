@@ -1994,7 +1994,8 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   std::cout << "[CreateContext] Loading model from XCFramework..." << std::endl;
 
   llama_model_params model_params = llama_model_default_params();
-  model_params.n_gpu_layers = 0;
+  // -1 = offload all layers to GPU (auto-detect), 0 = CPU only
+  model_params.n_gpu_layers = -1;
 
   std::cout << "[CreateContext] Acquiring from ModelRegistry..." << std::endl;
   auto sharedModel = lloyal::ModelRegistry::acquire(fsPath, model_params);

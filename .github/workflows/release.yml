@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_publish:
+        description: 'Skip npm publish (for testing)'
+        type: boolean
+        default: true
 
 jobs:
   build-and-test:
@@ -106,38 +112,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
+      # CUDA 12.2.2 required for Cloud Run L4 GPU (driver 535.x)
       - name: Provision CUDA toolkit (Linux)
         if: matrix.gpu == 'cuda' && runner.os == 'Linux'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.6.2'
+          version: '12.2.2'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Linux)
         if: matrix.gpu == 'vulkan' && runner.os == 'Linux'
         uses: jakoch/install-vulkan-sdk-action@v1.2.4
         with:
-          vulkan_version: '1.4.313.0'
+          vulkan_version: '1.3.296.0'
           install_runtime: true
-          optional_components: com.lunarg.vulkan.arm64
-          cache: true
-          stripdown: true
+          cache: false
 
+      # CUDA 12.2.2 for broad driver compatibility (matches Linux)
       - name: Provision CUDA toolkit (Windows)
         if: matrix.gpu == 'cuda' && runner.os == 'Windows'
         uses: ./.github/actions/provision-cuda
         with:
-          version: '12.6.2'
+          version: '12.2.2'
           arch: ${{ matrix.arch }}
 
       - name: Install Vulkan SDK (Windows)
         if: matrix.gpu == 'vulkan' && runner.os == 'Windows'
         uses: jakoch/install-vulkan-sdk-action@v1.2.4
         with:
-          vulkan_version: '1.4.313.0'
+          vulkan_version: '1.3.296.0'
           install_runtime: true
-          cache: true
-          # Note: Do NOT use stripdown on Windows - it removes vulkan-1.dll runtime
+          cache: false
 
       - name: Setup LLVM and Ninja for Windows ARM64 cross-compilation
         if: runner.os == 'Windows' && matrix.cross_compile == true
@@ -251,9 +256,8 @@ jobs:
           LLOYAL_GPU: ${{ matrix.gpu }}
           LLOYAL_NO_FALLBACK: '1'
 
-      # Integration tests only run where we have real GPU hardware
-      # Currently: CPU (all platforms) and Metal (macOS)
-      # TODO: Re-enable vulkan/cuda when self-hosted GPU runners are available
+      # Integration tests on GitHub runners (no GPU hardware)
+      # GPU tests (CUDA/Vulkan) run separately via gpu-test.yml on Cloud Run with NVIDIA L4
       - name: Run integration tests (Windows)
         if: runner.os == 'Windows' && matrix.gpu == 'cpu' && matrix.cross_compile != true
         shell: pwsh
@@ -292,12 +296,19 @@ jobs:
           path: packages/${{ matrix.package }}/
           retention-days: 1
 
+  # GPU Integration Tests (reusable workflow)
+  gpu-tests:
+    name: GPU Tests
+    needs: build-and-test
+    uses: ./.github/workflows/gpu-test.yml
+    secrets: inherit
+
   publish:
     name: Publish all packages
-    needs: build-and-test
+    needs: [build-and-test, gpu-tests]
     runs-on: ubuntu-latest
-    # Only run if ALL build-and-test jobs succeeded
-    if: success()
+    # Only run if ALL jobs succeeded AND either it's a tag push or manual run without skip
+    if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
     permissions:
       contents: read
       id-token: write  # Required for npm provenance
