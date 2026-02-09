@@ -276,8 +276,11 @@ jobs:
           LLOYAL_GPU: ${{ matrix.gpu }}
           LLOYAL_NO_FALLBACK: '1'
 
+      # Skip Metal integration tests on CI - GitHub Actions paravirtual GPU (Apple5)
+      # has driver bugs with strided memory access (NeoX RoPE kernel).
+      # Metal packages are built and verified to load, but GPU tests are skipped.
       - name: Run integration tests (Unix)
-        if: runner.os != 'Windows' && (matrix.gpu == 'cpu' || matrix.gpu == 'metal')
+        if: runner.os != 'Windows' && matrix.gpu == 'cpu'
         run: |
           PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
           export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
