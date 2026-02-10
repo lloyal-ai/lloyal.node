@@ -4,6 +4,7 @@
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/metrics.hpp>
 #include <lloyal/branch.hpp>
+#include <lloyal/chat_in.hpp>
 #include <llama/llama.h>
 #include <memory>
 #include <mutex>
@@ -135,6 +136,12 @@ private:
    * Returns tokens that close an assistant turn and transition to the next message
    */
   Napi::Value getTurnSeparator(const Napi::CallbackInfo& info);
+
+  /**
+   * Get warm turn wrapper tokens for template-aware warm continuation
+   * Returns { turnSeparator: number[], userPrefix: number[], userToAssistant: number[] }
+   */
+  Napi::Value getWarmTurnTokens(const Napi::CallbackInfo& info);
 
   /**
    * Format messages using model's chat template
@@ -412,6 +419,10 @@ private:
   // ===== TURN SEPARATOR CACHE =====
   std::vector<llama_token> _turnSeparatorCache;
   bool _turnSeparatorCached = false;
+
+  // ===== WARM TURN TOKENS CACHE =====
+  lloyal::chat_in::WarmTurnTokens _warmTurnTokensCache;
+  bool _warmTurnTokensCached = false;
 
   // ===== DECODE MUTEX =====
   std::mutex _decodeMutex;

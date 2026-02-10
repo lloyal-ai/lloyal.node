@@ -345,22 +345,23 @@ async function testBranchPrefill() {
     }
     assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
-    let lastText = prompt + await ctx.detokenize(gen1);
-    let lastGen = gen1;  // Track last generation for multi-turn
+    // Warm turn tokens for probe-based prefill (no string diff, no BOS bug)
+    const warm = ctx.getWarmTurnTokens();
 
-    // Turn 2-3: prefill + generate
+    // Turn 2-3: prefill using warm probe + generate
     for (let t = 1; t < turns.length; t++) {
-      messages.push({ role: 'assistant', content: await ctx.detokenize(lastGen) });
-      messages.push({ role: 'user', content: turns[t] });
-
-      const { prompt: fullPrompt } = await ctx.formatChat(JSON.stringify(messages));
-      const delta = fullPrompt.slice(lastText.length);
-      const deltaToks = await ctx.tokenize(delta);
+      const contentToks = await ctx.tokenize(turns[t], false);
+      const prefillToks = [
+        ...warm.turnSeparator,
+        ...warm.userPrefix,
+        ...contentToks,
+        ...warm.userToAssistant,
+      ];
 
       const posBefore = branch.position;
-      branch.prefill(deltaToks);
-      assert(branch.position === posBefore + deltaToks.length,
-        `Turn ${t + 1}: prefill ${deltaToks.length} tokens → pos=${branch.position}`);
+      branch.prefill(prefillToks);
+      assert(branch.position === posBefore + prefillToks.length,
+        `Turn ${t + 1}: prefill ${prefillToks.length} tokens → pos=${branch.position}`);
 
       const gen = [];
       for (let i = 0; i < GEN_TOKENS; i++) {
@@ -370,9 +371,6 @@ async function testBranchPrefill() {
         gen.push(token);
       }
       assert(gen.length > 0, `Turn ${t + 1}: generated ${gen.length} tokens`);
-
-      lastText = fullPrompt + await ctx.detokenize(gen);
-      lastGen = gen;  // Update for next turn
     }
 
     branch.prune();
@@ -424,18 +422,17 @@ async function testWarmColdParity() {
     }
 
     assistantContent = await warmCtx.detokenize(gen1);
-    const lastText = prompt1 + assistantContent;
 
-    // Turn 2: prefill delta, generate
-    const msgs2 = [
-      { role: 'user', content: userMessages[0] },
-      { role: 'assistant', content: assistantContent },
-      { role: 'user', content: userMessages[1] }
+    // Turn 2: prefill using warm probe (no string diff, no BOS bug)
+    const warm = warmCtx.getWarmTurnTokens();
+    const contentToks = await warmCtx.tokenize(userMessages[1], false);
+    const prefillToks = [
+      ...warm.turnSeparator,
+      ...warm.userPrefix,
+      ...contentToks,
+      ...warm.userToAssistant,
     ];
-    const { prompt: fullPrompt2 } = await warmCtx.formatChat(JSON.stringify(msgs2));
-    const delta = fullPrompt2.slice(lastText.length);
-    const deltaToks = await warmCtx.tokenize(delta);
-    branch.prefill(deltaToks);
+    branch.prefill(prefillToks);
 
     warmGen2 = [];
     for (let i = 0; i < GEN_TOKENS; i++) {
@@ -500,6 +497,68 @@ async function testWarmColdParity() {
         break;
       }
     }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WARM TURN TOKENS PROBE - Verifies template-extracted role wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testWarmTurnTokens() {
+  console.log('\n--- Warm Turn Tokens Probe ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 512,
+    nThreads: 4
+  });
+
+  try {
+    const warm = ctx.getWarmTurnTokens();
+
+    assert(Array.isArray(warm.turnSeparator) && warm.turnSeparator.length > 0,
+      `turnSeparator: ${warm.turnSeparator.length} tokens`);
+    assert(Array.isArray(warm.userPrefix) && warm.userPrefix.length > 0,
+      `userPrefix: ${warm.userPrefix.length} tokens`);
+    assert(Array.isArray(warm.userToAssistant) && warm.userToAssistant.length > 0,
+      `userToAssistant: ${warm.userToAssistant.length} tokens`);
+
+    // All token IDs should be valid numbers
+    for (const tok of warm.turnSeparator) {
+      assert(typeof tok === 'number' && Number.isInteger(tok), `turnSeparator token ${tok} is integer`);
+    }
+    for (const tok of warm.userPrefix) {
+      assert(typeof tok === 'number' && Number.isInteger(tok), `userPrefix token ${tok} is integer`);
+    }
+    for (const tok of warm.userToAssistant) {
+      assert(typeof tok === 'number' && Number.isInteger(tok), `userToAssistant token ${tok} is integer`);
+    }
+
+    // turnSeparator should contain at least one EOG token
+    const hasEog = warm.turnSeparator.some(t => ctx.isStopToken(t));
+    assert(hasEog, 'turnSeparator contains at least one EOG token');
+
+    // userPrefix should NOT contain EOG tokens
+    const prefixHasEog = warm.userPrefix.some(t => ctx.isStopToken(t));
+    assert(!prefixHasEog, 'userPrefix contains no EOG tokens');
+
+    // Cached: second call returns same result
+    const warm2 = ctx.getWarmTurnTokens();
+    assert(
+      warm.turnSeparator.join(',') === warm2.turnSeparator.join(',') &&
+      warm.userPrefix.join(',') === warm2.userPrefix.join(',') &&
+      warm.userToAssistant.join(',') === warm2.userToAssistant.join(','),
+      'getWarmTurnTokens() is cached (idempotent)');
+
+    // Log for diagnostic visibility
+    const sepText = warm.turnSeparator.map(t => ctx.tokenToText(t)).join('');
+    const prefText = warm.userPrefix.map(t => ctx.tokenToText(t)).join('');
+    const u2aText = warm.userToAssistant.map(t => ctx.tokenToText(t)).join('');
+    console.log(`    separator: ${JSON.stringify(sepText)}`);
+    console.log(`    userPrefix: ${JSON.stringify(prefText)}`);
+    console.log(`    userToAssistant: ${JSON.stringify(u2aText)}`);
+  } finally {
+    ctx.dispose();
   }
 }
 
@@ -1059,6 +1118,7 @@ async function main() {
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
+    await testWarmTurnTokens();
     await testWarmColdParity();
     await testWarmSemanticRecall();
     await testBranchSteer();
