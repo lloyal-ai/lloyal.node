@@ -12,15 +12,15 @@
  * - Clear separation: sync produce, async commit
  */
 
-import * as readline from 'node:readline';
-import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import * as readline from "node:readline";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createContext } from "../../lib/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
   __dirname,
-  '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
+  "../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
 );
 
 /**
@@ -40,7 +40,7 @@ async function main() {
   const modelPath = process.argv[2] || DEFAULT_MODEL;
 
   console.log(`Loading model: ${modelPath}`);
-  console.log('This may take a moment...\n');
+  console.log("This may take a moment...\n");
 
   const ctx = await createContext({
     modelPath,
@@ -48,37 +48,37 @@ async function main() {
     threads: 4,
   });
 
-  console.log('Model loaded! Type your message and press Enter.');
-  console.log('Commands: /clear to reset, /quit to exit\n');
+  console.log("Model loaded! Type your message and press Enter.");
+  console.log("Commands: /clear to reset, /quit to exit\n");
 
   const messages = [];
   let position = 0;
-  let lastPrompt = '';
+  let lastPrompt = "";
 
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
-  const askUser = () => rl.question('> ', handleInput);
+  const askUser = () => rl.question("> ", handleInput);
 
   async function handleInput(input) {
     const trimmed = input.trim();
 
-    if (trimmed === '/quit' || trimmed === '/exit') {
-      console.log('Goodbye!');
+    if (trimmed === "/quit" || trimmed === "/exit") {
+      console.log("Goodbye!");
       ctx.dispose();
       rl.close();
       return;
     }
 
-    if (trimmed === '/clear') {
+    if (trimmed === "/clear") {
       await ctx.kvCacheClear();
       messages.length = 0;
       position = 0;
-      lastPrompt = '';
+      lastPrompt = "";
       console.clear();
-      console.log('Conversation cleared.\n');
+      console.log("Conversation cleared.\n");
       askUser();
       return;
     }
@@ -88,11 +88,11 @@ async function main() {
       return;
     }
 
-    messages.push({ role: 'user', content: trimmed });
+    messages.push({ role: "user", content: trimmed });
 
     // Format with chat template
     const { prompt: fullPrompt } = await ctx.formatChat(
-      JSON.stringify(messages)
+      JSON.stringify(messages),
     );
 
     // Prompt diffing - only tokenize new content
@@ -105,8 +105,8 @@ async function main() {
     position += tokens.length;
 
     // Generate: sync produce, async commit
-    process.stdout.write('< ');
-    let response = '';
+    process.stdout.write("< ");
+    let response = "";
 
     for (const { text, tokenId } of produceTokens(ctx, {
       temperature: 0.7,
@@ -120,9 +120,9 @@ async function main() {
       position += 1;
     }
 
-    console.log('\n');
+    console.log("\n");
 
-    messages.push({ role: 'assistant', content: response.trim() });
+    messages.push({ role: "assistant", content: response.trim() });
     lastPrompt = fullPrompt + response;
 
     askUser();
@@ -132,6 +132,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Error:', err.message);
+  console.error("Error:", err.message);
   process.exit(1);
 });

@@ -9,7 +9,7 @@ models/
 
 # Generated documentation
 docs/api/
-
+docs/_internal
 # Vendor build artifacts (generated during npm install)
 vendor/llama.cpp/build-*/
 

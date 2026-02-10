@@ -111,11 +111,281 @@ export interface ContextOptions {
 }
 
 /**
+ * Chat format detected by the template engine
+ *
+ * Identifies how the model formats tool calls, reasoning blocks, and content.
+ * Returned by {@link SessionContext.formatChat | formatChat()} in
+ * {@link FormattedChatResult.format} and consumed by
+ * {@link SessionContext.parseChatOutput | parseChatOutput()}.
+ *
+ * You generally don't need to inspect these values directly --
+ * just pass them through from the formatChat result to parseChatOutput.
+ *
+ * Only commonly-used values are listed. The full set matches llama.cpp's
+ * `common_chat_format` enum (30+ formats).
+ */
+export enum ChatFormat {
+  /** Plain content, no special formatting */
+  CONTENT_ONLY = 0,
+  /** Generic tool call format */
+  GENERIC = 1,
+}
+
+/**
+ * Reasoning/thinking block format
+ *
+ * Controls how `<think>` blocks are handled during formatting and parsing.
+ *
+ * @see {@link FormatChatOptions.reasoningFormat} for input-side usage
+ * @see {@link ParseChatOutputOptions.reasoningFormat} for output-side usage
+ */
+export enum ReasoningFormat {
+  /** No reasoning extraction (default) */
+  NONE = 0,
+  /** Auto-detect reasoning format from model template */
+  AUTO = 1,
+  /** DeepSeek legacy format (`<think>...</think>` in content) */
+  DEEPSEEK_LEGACY = 2,
+  /** DeepSeek format (structured reasoning extraction) */
+  DEEPSEEK = 3,
+}
+
+/**
+ * Grammar trigger type
+ *
+ * Determines how lazy grammar activation is triggered during generation.
+ *
+ * @see {@link GrammarTrigger}
+ * @see {@link FormattedChatResult.grammarTriggers}
+ */
+export enum GrammarTriggerType {
+  /** Trigger on a specific token ID */
+  TOKEN = 0,
+  /** Trigger on a word boundary match */
+  WORD = 1,
+  /** Trigger on a regex pattern match */
+  PATTERN = 2,
+  /** Trigger on a full-string regex pattern match */
+  PATTERN_FULL = 3,
+}
+
+/**
+ * Options for chat template formatting
+ *
+ * Controls format-awareness fields passed to the chat template engine.
+ * All fields are optional -- sensible defaults are used when omitted.
+ *
+ * @example With tools and reasoning
+ * ```typescript
+ * const result = await ctx.formatChat(messagesJson, {
+ *   tools: JSON.stringify(tools),
+ *   toolChoice: 'auto',
+ *   reasoningFormat: 'auto',
+ * });
+ * ```
+ */
+export interface FormatChatOptions {
+  /** Custom Jinja2 template override (bypasses model's built-in template) */
+  templateOverride?: string;
+
+  /**
+   * JSON array of OpenAI-format tool definitions
+   *
+   * @example
+   * ```typescript
+   * const tools = [{ type: 'function', function: {
+   *   name: 'get_weather',
+   *   description: 'Get current weather',
+   *   parameters: { type: 'object', properties: { location: { type: 'string' } } }
+   * }}];
+   * options.tools = JSON.stringify(tools);
+   * ```
+   */
+  tools?: string;
+
+  /** Tool choice strategy (default: "auto") */
+  toolChoice?: 'auto' | 'required' | 'none';
+
+  /** Allow parallel tool calls (default: false) */
+  parallelToolCalls?: boolean;
+
+  /**
+   * Reasoning format (default: "none")
+   *
+   * Controls `<think>` block handling in the template.
+   * Use "auto" to let the model's template decide.
+   */
+  reasoningFormat?: 'none' | 'auto' | 'deepseek' | 'deepseek_legacy';
+
+  /** Enable `<think>` blocks (default: true). Pairs with reasoningFormat. */
+  enableThinking?: boolean;
+
+  /**
+   * JSON schema for constrained output. Converted to GBNF grammar internally.
+   * Mutually exclusive with `grammar`.
+   *
+   * @see {@link SessionContext.jsonSchemaToGrammar}
+   */
+  jsonSchema?: string;
+
+  /**
+   * Explicit GBNF grammar string for constrained generation.
+   * Mutually exclusive with `jsonSchema`.
+   *
+   * @see {@link SessionContext.createSampler}
+   */
+  grammar?: string;
+
+  /**
+   * Append assistant prompt prefix (default: true).
+   * Set false when formatting partial conversations or for
+   * non-generation use cases like template validation.
+   */
+  addGenerationPrompt?: boolean;
+}
+
+/**
+ * Grammar trigger from format-aware chat template
+ *
+ * Defines conditions for lazy grammar activation. When `grammarLazy` is true
+ * in {@link FormattedChatResult}, generation runs unconstrained until one of
+ * these triggers fires, at which point the grammar is activated.
+ */
+export interface GrammarTrigger {
+  /** Trigger type */
+  type: GrammarTriggerType;
+  /** Trigger value (token text, word, or regex pattern depending on type) */
+  value: string;
+  /** Token ID (for TOKEN-type triggers, -1 when not applicable) */
+  token: number;
+}
+
+/**
  * Result from chat template formatting
+ *
+ * Includes format-awareness fields for proper output parsing.
+ * Pass `format` and `reasoningFormat` directly to
+ * {@link SessionContext.parseChatOutput | parseChatOutput()} to decode
+ * the model's response.
+ *
+ * @example Roundtrip: format -> generate -> parse
+ * ```typescript
+ * const fmt = await ctx.formatChat(messagesJson, { tools: toolsJson });
+ * // ... generate tokens using fmt.prompt and fmt.grammar ...
+ * const parsed = ctx.parseChatOutput(output, fmt.format, {
+ *   reasoningFormat: fmt.reasoningFormat,
+ *   thinkingForcedOpen: fmt.thinkingForcedOpen,
+ *   parser: fmt.parser,
+ * });
+ * ```
+ *
+ * @see {@link SessionContext.parseChatOutput}
  */
 export interface FormattedChatResult {
+  /** Formatted prompt string ready for tokenization */
   prompt: string;
+  /** Additional stop strings from the template */
   stopTokens: string[];
+
+  /**
+   * Detected chat format (pass to parseChatOutput)
+   * @see {@link SessionContext.parseChatOutput}
+   */
+  format: ChatFormat;
+
+  /** Grammar string for constrained generation (empty if no tools/schema) */
+  grammar: string;
+  /** Whether grammar should be applied lazily (only after triggers fire) */
+  grammarLazy: boolean;
+  /** Whether the thinking tag was forced open by the template */
+  thinkingForcedOpen: boolean;
+
+  /**
+   * Reasoning format (pass to parseChatOutput options)
+   * @see {@link ParseChatOutputOptions.reasoningFormat}
+   */
+  reasoningFormat: ReasoningFormat;
+
+  /** PEG parser definition for PEG format models (pass to parseChatOutput options) */
+  parser: string;
+  /** Grammar trigger conditions for lazy grammar activation */
+  grammarTriggers: GrammarTrigger[];
+  /** Token strings preserved from grammar masking */
+  preservedTokens: string[];
+}
+
+/**
+ * Options for parsing chat output
+ *
+ * All fields are optional. For correct parsing, pass through the corresponding
+ * fields from {@link FormattedChatResult}.
+ *
+ * @see {@link FormattedChatResult}
+ */
+export interface ParseChatOutputOptions {
+  /**
+   * Reasoning format (from {@link FormattedChatResult.reasoningFormat})
+   */
+  reasoningFormat?: ReasoningFormat;
+
+  /**
+   * True if output is incomplete (streaming).
+   * When true, the parser tolerates unterminated tool calls and open
+   * thinking blocks, returning partial content as-is rather than
+   * treating them as parse errors.
+   */
+  isPartial?: boolean;
+
+  /** Whether thinking tag was forced open (from {@link FormattedChatResult.thinkingForcedOpen}) */
+  thinkingForcedOpen?: boolean;
+
+  /** PEG parser definition for PEG format models (from {@link FormattedChatResult.parser}) */
+  parser?: string;
+}
+
+/**
+ * A tool call extracted from model output
+ *
+ * @example
+ * ```typescript
+ * for (const tc of result.toolCalls) {
+ *   const args = JSON.parse(tc.arguments);
+ *   await executeTool(tc.name, args);
+ * }
+ * ```
+ */
+export interface ParsedToolCall {
+  /** Tool/function name */
+  name: string;
+  /** JSON string of arguments */
+  arguments: string;
+  /** Tool call ID (may be empty depending on model format) */
+  id: string;
+}
+
+/**
+ * Result from parsing chat output
+ *
+ * @example
+ * ```typescript
+ * const result = ctx.parseChatOutput(output, fmt.format);
+ * if (result.toolCalls.length > 0) {
+ *   for (const tc of result.toolCalls) {
+ *     const args = JSON.parse(tc.arguments);
+ *     await executeTool(tc.name, args);
+ *   }
+ * } else {
+ *   console.log(result.content);
+ * }
+ * ```
+ */
+export interface ParseChatOutputResult {
+  /** Main response text */
+  content: string;
+  /** Extracted thinking/reasoning content (empty if none) */
+  reasoningContent: string;
+  /** Extracted tool calls (empty array if none) */
+  toolCalls: ParsedToolCall[];
 }
 
 /**
@@ -1074,15 +1344,21 @@ export interface SessionContext {
   /**
    * Format messages using model's chat template
    *
-   * Converts [{role, content}] → formatted prompt string.
+   * Converts [{role, content}] → formatted prompt string with full format awareness.
    * Uses model's built-in template (ChatML, Llama, Mistral, etc.).
+   *
+   * The returned `format` and `reasoningFormat` fields should be passed to
+   * `parseChatOutput()` after generation to correctly decode the response.
    *
    * Cost: ~1-5ms depending on message count
    *
    * @param messagesJson JSON string containing array of messages
-   * @param templateOverride Optional custom template string
-   * @returns Formatted prompt and stop tokens from template
-   * @example
+   * @param options Formatting options (tools, reasoning, grammar, etc.)
+   * @returns Formatted prompt with format-awareness metadata
+   *
+   * @see {@link parseChatOutput}
+   *
+   * @example Basic usage
    * ```typescript
    * const result = await ctx.formatChat(JSON.stringify([
    *   { role: "system", content: "You are a helpful assistant" },
@@ -1092,11 +1368,66 @@ export interface SessionContext {
    * const tokens = await ctx.tokenize(result.prompt);
    * await ctx.decode(tokens, 0);
    * ```
+   *
+   * @example With tools
+   * ```typescript
+   * const tools = [{ type: 'function', function: {
+   *   name: 'get_weather', description: 'Get weather',
+   *   parameters: { type: 'object', properties: { location: { type: 'string' } } }
+   * }}];
+   * const result = await ctx.formatChat(JSON.stringify(messages), {
+   *   tools: JSON.stringify(tools),
+   *   toolChoice: 'auto'
+   * });
+   * // result.grammar contains GBNF for constrained tool call generation
+   * // result.format identifies the chat format for output parsing
+   * ```
+   *
+   * @example Backward compatible (string as second arg)
+   * ```typescript
+   * const result = await ctx.formatChat(messagesJson, templateOverrideString);
+   * ```
    */
   formatChat(
     messagesJson: string,
-    templateOverride?: string
+    options?: FormatChatOptions | string
   ): Promise<FormattedChatResult>;
+
+  /**
+   * Parse model output into structured content
+   *
+   * Extracts plain text, reasoning/thinking blocks, and tool calls from
+   * raw model output. Uses the format detected by {@link formatChat} to apply
+   * the correct parser for the model's output format.
+   *
+   * Cost: <0.1ms (synchronous string parsing, no I/O)
+   *
+   * @param output Raw model output text
+   * @param format Chat format enum (from {@link FormattedChatResult.format})
+   * @param options Optional parsing parameters
+   * @returns Parsed content with tool calls and reasoning
+   *
+   * @see {@link formatChat}
+   *
+   * @example Basic parsing
+   * ```typescript
+   * const fmt = await ctx.formatChat(JSON.stringify(messages), { tools: toolsJson });
+   * // ... generate tokens ...
+   * const parsed = ctx.parseChatOutput(generatedText, fmt.format, {
+   *   reasoningFormat: fmt.reasoningFormat,
+   *   thinkingForcedOpen: fmt.thinkingForcedOpen,
+   *   parser: fmt.parser
+   * });
+   * if (parsed.toolCalls.length > 0) {
+   *   // Handle tool calls
+   * }
+   * ```
+   */
+  parseChatOutput(
+    output: string,
+    format: ChatFormat,
+    options?: ParseChatOutputOptions
+  ): ParseChatOutputResult;
 
   /**
    * Convert JSON schema to GBNF grammar
@@ -1307,6 +1638,12 @@ export interface SessionContext {
 
   /** @internal Reseed branch sampler PRNG for diversity after fork */
   _branchSamplerChainReseed(handle: number, seed: number): void;
+
+  /** @internal Set dynamic logit biases for a branch */
+  _branchSteer(handle: number, biases: Array<{ token: number; bias: number }>): void;
+
+  /** @internal Clear all dynamic logit biases from a branch */
+  _branchClearSteer(handle: number): void;
 }
 
 /**

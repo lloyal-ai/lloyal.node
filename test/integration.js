@@ -382,6 +382,260 @@ async function testBranchPrefill() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WARM vs COLD PARITY - Semantic proof that warm continuation == cold start
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testWarmColdParity() {
+  console.log('\n--- Warm vs Cold Parity ---');
+
+  const GEN_TOKENS = 10;
+  const userMessages = [
+    "What is the capital of France?",
+    " Tell me more about it."
+  ];
+
+  // === WARM PATH: decode turn 1, prefill turn 2 delta, generate ===
+  const warmCtx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 2048,
+    nBatch: 512,
+    nThreads: 4
+  });
+
+  let assistantContent;
+  let warmGen2;
+
+  try {
+    // Turn 1: format, decode, generate
+    const msgs1 = [{ role: 'user', content: userMessages[0] }];
+    const { prompt: prompt1 } = await warmCtx.formatChat(JSON.stringify(msgs1));
+    const toks1 = await warmCtx.tokenize(prompt1);
+    await warmCtx.decode(toks1, 0, 0);
+
+    const branch = Branch.create(warmCtx, 0, toks1.length, { temperature: 0 });
+    branch.captureLogits();
+
+    const gen1 = [];
+    for (let i = 0; i < GEN_TOKENS; i++) {
+      const { token, isStop } = branch.produce();
+      if (isStop) break;
+      branch.commit(token);
+      gen1.push(token);
+    }
+
+    assistantContent = await warmCtx.detokenize(gen1);
+    const lastText = prompt1 + assistantContent;
+
+    // Turn 2: prefill delta, generate
+    const msgs2 = [
+      { role: 'user', content: userMessages[0] },
+      { role: 'assistant', content: assistantContent },
+      { role: 'user', content: userMessages[1] }
+    ];
+    const { prompt: fullPrompt2 } = await warmCtx.formatChat(JSON.stringify(msgs2));
+    const delta = fullPrompt2.slice(lastText.length);
+    const deltaToks = await warmCtx.tokenize(delta);
+    branch.prefill(deltaToks);
+
+    warmGen2 = [];
+    for (let i = 0; i < GEN_TOKENS; i++) {
+      const { token, isStop } = branch.produce();
+      if (isStop) break;
+      branch.commit(token);
+      warmGen2.push(token);
+    }
+
+    branch.prune();
+  } finally {
+    warmCtx.dispose();
+  }
+
+  // === COLD PATH: decode full 2-turn conversation from scratch, generate ===
+  const coldCtx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 2048,
+    nBatch: 512,
+    nThreads: 4
+  });
+
+  let coldGen2;
+
+  try {
+    const msgs = [
+      { role: 'user', content: userMessages[0] },
+      { role: 'assistant', content: assistantContent },
+      { role: 'user', content: userMessages[1] }
+    ];
+    const { prompt: coldPrompt } = await coldCtx.formatChat(JSON.stringify(msgs));
+    const coldToks = await coldCtx.tokenize(coldPrompt);
+    await coldCtx.decode(coldToks, 0, 0);
+
+    const branch = Branch.create(coldCtx, 0, coldToks.length, { temperature: 0 });
+    branch.captureLogits();
+
+    coldGen2 = [];
+    for (let i = 0; i < GEN_TOKENS; i++) {
+      const { token, isStop } = branch.produce();
+      if (isStop) break;
+      branch.commit(token);
+      coldGen2.push(token);
+    }
+
+    branch.prune();
+  } finally {
+    coldCtx.dispose();
+  }
+
+  // === COMPARE ===
+  const warmStr = warmGen2.join(',');
+  const coldStr = coldGen2.join(',');
+  assert(warmStr === coldStr,
+    `Warm==Cold parity: ${warmGen2.length} tokens match`);
+
+  if (warmStr !== coldStr) {
+    // Diagnostic: show first divergence point
+    for (let i = 0; i < Math.max(warmGen2.length, coldGen2.length); i++) {
+      if (warmGen2[i] !== coldGen2[i]) {
+        console.log(`  First divergence at position ${i}: warm=${warmGen2[i]} cold=${coldGen2[i]}`);
+        break;
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WARM CONTINUATION SEMANTIC RECALL - Proves context survives delta-only prefill
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testWarmSemanticRecall() {
+  if (!EMBED_MODEL_PATH) {
+    console.log('\n--- Warm Semantic Recall (SKIPPED - no LLAMA_EMBED_MODEL) ---');
+    return;
+  }
+
+  console.log('\n--- Warm Semantic Recall ---');
+
+  const GEN_TOKENS = 40;
+
+  // Helper: cosine similarity
+  function cosine(a, b) {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      na += a[i] * a[i];
+      nb += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+  }
+
+  // Phase 1: Generate multi-turn conversation via warm continuation
+  let recallText;
+  {
+    const ctx = await addon.createContext({
+      modelPath: MODEL_PATH,
+      nCtx: 2048,
+      nBatch: 512,
+      nThreads: 4
+    });
+
+    try {
+      // Helper: warm-continue one turn (prefill delta, generate)
+      async function warmTurn(messages, lastText, userContent) {
+        messages.push({ role: 'user', content: userContent });
+        const { prompt: fullPrompt } = await ctx.formatChat(JSON.stringify(messages));
+        const delta = fullPrompt.slice(lastText.length);
+        const deltaToks = await ctx.tokenize(delta);
+        branch.prefill(deltaToks);
+
+        const gen = [];
+        for (let i = 0; i < GEN_TOKENS; i++) {
+          const { token, isStop } = branch.produce();
+          if (isStop) break;
+          branch.commit(token);
+          gen.push(token);
+        }
+        const assistantText = await ctx.detokenize(gen);
+        messages.push({ role: 'assistant', content: assistantText });
+        return { text: assistantText, lastText: fullPrompt + assistantText };
+      }
+
+      // Turn 1: Plant a specific, recallable fact
+      const messages = [{ role: 'user', content: 'Remember this: my dog is named Max.' }];
+      const { prompt } = await ctx.formatChat(JSON.stringify(messages));
+      const promptToks = await ctx.tokenize(prompt);
+      await ctx.decode(promptToks, 0, 0);
+
+      var branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      branch.captureLogits();
+
+      // Generate turn 1 response
+      const gen = [];
+      for (let i = 0; i < GEN_TOKENS; i++) {
+        const { token, isStop } = branch.produce();
+        if (isStop) break;
+        branch.commit(token);
+        gen.push(token);
+      }
+      const assistantText = await ctx.detokenize(gen);
+      messages.push({ role: 'assistant', content: assistantText });
+      let lastText = prompt + assistantText;
+
+      // Turn 2: Distractor
+      let turn;
+      turn = await warmTurn(messages, lastText, 'What is 2 + 2?');
+      lastText = turn.lastText;
+
+      // Turn 3: Another distractor
+      turn = await warmTurn(messages, lastText, 'Name three colors.');
+      lastText = turn.lastText;
+
+      // Turn 4: Recall — only answerable from turn 1 context
+      turn = await warmTurn(messages, lastText, 'What is my dog\'s name?');
+      recallText = turn.text;
+
+      branch.prune();
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  // Phase 2: Score via embedding similarity (chat model fully released)
+  {
+    const embedCtx = await addon.createContext({
+      modelPath: EMBED_MODEL_PATH,
+      nCtx: 512,
+      nBatch: 512,
+      nThreads: 4,
+      embeddings: true,
+      poolingType: 1  // MEAN
+    });
+
+    try {
+      async function embed(text) {
+        const tokens = await embedCtx.tokenize(text);
+        await embedCtx.kvCacheClear();
+        await embedCtx.encode(tokens);
+        return embedCtx.getEmbeddings(true);
+      }
+
+      console.log(`  Recall response: "${recallText.trim().slice(0, 120)}"`);
+
+      const embResponse = await embed(recallText);
+      const embCorrect = await embed('The dog is named Max.');
+      const embWrong = await embed('Red, blue, and green are three colors.');
+
+      const simCorrect = cosine(embResponse, embCorrect);
+      const simWrong = cosine(embResponse, embWrong);
+
+      assert(simCorrect > simWrong,
+        `Semantic recall: correct=${simCorrect.toFixed(3)} > wrong=${simWrong.toFixed(3)}`);
+    } finally {
+      embedCtx.dispose();
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BRANCH STEER TESTS - Dynamic per-sample logit manipulation
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -726,6 +980,62 @@ async function testDecodeAndCapture() {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
+async function testChatInOut(ctx) {
+  console.log('\n── chat_in / chat_out ──');
+
+  // formatChat with empty options object (new signature)
+  const messages = [{ role: 'user', content: 'Hello' }];
+  const result = await ctx.formatChat(JSON.stringify(messages), {});
+  assert(result.prompt.includes('Hello'), 'formatChat with options: prompt contains Hello');
+  assert(typeof result.format === 'number', 'formatChat returns format as number');
+  assert(typeof result.grammar === 'string', 'formatChat returns grammar as string');
+  assert(typeof result.grammarLazy === 'boolean', 'formatChat returns grammarLazy');
+  assert(typeof result.thinkingForcedOpen === 'boolean', 'formatChat returns thinkingForcedOpen');
+  assert(typeof result.reasoningFormat === 'number', 'formatChat returns reasoningFormat');
+  assert(Array.isArray(result.grammarTriggers), 'formatChat returns grammarTriggers array');
+  assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
+  ok('formatChat with options returns extended result');
+
+  // Backward compat: string second argument still works
+  const backCompat = await ctx.formatChat(JSON.stringify(messages));
+  assert(backCompat.prompt.includes('Hello'), 'formatChat backward compat works');
+  ok('formatChat backward compat (no second arg)');
+
+  // formatChat with tools
+  const tools = [{
+    type: 'function',
+    function: {
+      name: 'get_weather',
+      description: 'Get weather',
+      parameters: { type: 'object', properties: { location: { type: 'string' } } }
+    }
+  }];
+  const toolResult = await ctx.formatChat(JSON.stringify(messages), {
+    tools: JSON.stringify(tools),
+    toolChoice: 'auto'
+  });
+  assert(typeof toolResult.format === 'number', 'formatChat with tools returns format');
+  assert(typeof toolResult.grammar === 'string', 'formatChat with tools returns grammar');
+  ok('formatChat with tools');
+
+  // parseChatOutput
+  const parsed = ctx.parseChatOutput('Hello world', toolResult.format);
+  assert(typeof parsed.content === 'string', 'parseChatOutput returns content');
+  assert(parsed.content.includes('Hello'), 'parseChatOutput content contains Hello');
+  assert(typeof parsed.reasoningContent === 'string', 'parseChatOutput returns reasoningContent');
+  assert(Array.isArray(parsed.toolCalls), 'parseChatOutput returns toolCalls array');
+  ok('parseChatOutput basic');
+
+  // parseChatOutput with options
+  const parsedWithOpts = ctx.parseChatOutput('Some output', toolResult.format, {
+    reasoningFormat: toolResult.reasoningFormat,
+    isPartial: false,
+    thinkingForcedOpen: false
+  });
+  assert(typeof parsedWithOpts.content === 'string', 'parseChatOutput with options');
+  ok('parseChatOutput with options');
+}
+
 async function main() {
   let mainCtx = null;
 
@@ -743,11 +1053,14 @@ async function main() {
     await testKVCache(mainCtx);
     await testMetrics(mainCtx);
     await testTokenizer(mainCtx);
+    await testChatInOut(mainCtx);
 
     // Tests that create their own contexts
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
+    await testWarmColdParity();
+    await testWarmSemanticRecall();
     await testBranchSteer();
     await testNBatchAblation();
     await testDeterminism();

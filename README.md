@@ -82,7 +82,7 @@ CI integration testing (real inference):
 | Qwen         | Qwen 3 1.7B    | chatml   |
 | Gemma        | Gemma 3 1B     | gemma    |
 | SmolLM       | SmolLM2 1.7B   | chatml   |
-| TinyLlama    | TinyLlama 1.1B | zephyr   |
+| Ministral    | Ministral 3B   | mistral  |
 
 See [distribution.md](docs/distribution.md) for details.
 

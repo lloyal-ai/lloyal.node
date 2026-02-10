@@ -142,6 +142,7 @@ private:
    * Returns: Promise<{ prompt: string, stopTokens: string[] }>
    */
   Napi::Value formatChat(const Napi::CallbackInfo& info);
+  Napi::Value parseChatOutput(const Napi::CallbackInfo& info);
 
   /**
    * Get current KV cache position (number of tokens in cache)
