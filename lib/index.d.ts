@@ -382,7 +382,13 @@ export interface ParsedToolCall {
 export interface ParseChatOutputResult {
   /** Main response text */
   content: string;
-  /** Extracted thinking/reasoning content (empty if none) */
+  /**
+   * Extracted thinking/reasoning content (empty string if none).
+   * For thinking models (e.g. Qwen3), this contains the text inside
+   * `<think>...</think>` blocks. Store as `reasoning_content` in your
+   * messages array so formatChat() can reconstruct the template correctly
+   * on subsequent turns.
+   */
   reasoningContent: string;
   /** Extracted tool calls (empty array if none) */
   toolCalls: ParsedToolCall[];
@@ -1420,6 +1426,64 @@ export interface SessionContext {
    * });
    * if (parsed.toolCalls.length > 0) {
    *   // Handle tool calls
+   * }
+   * ```
+   *
+   * @example Multi-turn warm continuation with reasoning models
+   * ```typescript
+   * // parseChatOutput separates <think>...</think> blocks into reasoningContent.
+   * // This is REQUIRED for correct warm continuation on thinking models (e.g. Qwen3):
+   * // if raw output containing <think> tags is stored as content, re-formatting
+   * // the conversation produces different tokens, breaking cold/warm parity.
+   *
+   * const messages: Array<{role: string; content: string; reasoning_content?: string}> = [];
+   * const sep = ctx.getTurnSeparator();
+   * let branch: Branch | null = null;
+   * let fmt: FormattedChatResult;
+   *
+   * async function handleTurn(userContent: string) {
+   *   messages.push({ role: 'user', content: userContent });
+   *
+   *   if (!branch) {
+   *     // Cold path: format full conversation, tokenize with BOS, decode all
+   *     fmt = await ctx.formatChat(JSON.stringify(messages));
+   *     const tokens = await ctx.tokenize(fmt.prompt);
+   *     await ctx.decode(tokens, 0, 0);
+   *     branch = Branch.create(ctx, 0, tokens.length, { temperature: 0.7 });
+   *     branch.captureLogits();
+   *   } else {
+   *     // Warm path: string-diff for delta tokens
+   *     const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
+   *     const { prompt: prefix } = await ctx.formatChat(
+   *       JSON.stringify(messages.slice(0, -1)),
+   *       { addGenerationPrompt: false }
+   *     );
+   *     const delta = await ctx.tokenize(full.substring(prefix.length), false);
+   *     branch.prefill([...sep, ...delta]);
+   *   }
+   *
+   *   // Generate
+   *   let rawOutput = '';
+   *   while (true) {
+   *     const { token, text, isStop } = branch.produce();
+   *     if (isStop) break;
+   *     rawOutput += text;
+   *     branch.commit(token);
+   *   }
+   *
+   *   // Parse output: separates reasoning from content
+   *   const parsed = ctx.parseChatOutput(rawOutput, fmt.format, {
+   *     reasoningFormat: fmt.reasoningFormat,
+   *     thinkingForcedOpen: fmt.thinkingForcedOpen,
+   *     parser: fmt.parser
+   *   });
+   *
+   *   // Store parsed fields — formatChat reconstructs thinking blocks correctly
+   *   messages.push({
+   *     role: 'assistant',
+   *     content: parsed.content,
+   *     reasoning_content: parsed.reasoningContent || undefined
+   *   });
    * }
    * ```
    */

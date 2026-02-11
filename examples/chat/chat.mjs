@@ -8,8 +8,9 @@
  *
  * This example demonstrates:
  * - Branch API for token generation (produce/commit two-phase)
- * - Warm multi-turn continuation via string-diff formatChat() + getTurnSeparator()
- * - Cold/warm routing: full format on first turn, string-diff on subsequent turns
+ * - Warm multi-turn continuation via formatChat([newMsg]) + getTurnSeparator()
+ * - Cold/warm routing: full format on first turn, format-only-new on subsequent turns
+ * - parseChatOutput() for correct reasoning_content handling on thinking models
  */
 
 import * as readline from "node:readline";
@@ -20,7 +21,7 @@ import { createContext, Branch } from "../../lib/index.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
   __dirname,
-  "../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+  "../../models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
 );
 
 async function main() {
@@ -40,6 +41,7 @@ async function main() {
 
   const messages = [];
   let branch = null;
+  let fmt = null;
   const sep = ctx.getTurnSeparator();
 
   const rl = readline.createInterface({
@@ -80,8 +82,8 @@ async function main() {
 
     if (!branch) {
       // === COLD (position === 0): full format → tokenize with BOS → decode ===
-      const { prompt } = await ctx.formatChat(JSON.stringify(messages));
-      const tokens = await ctx.tokenize(prompt);
+      fmt = await ctx.formatChat(JSON.stringify(messages));
+      const tokens = await ctx.tokenize(fmt.prompt);
       await ctx.decode(tokens, 0, 0);
       branch = Branch.create(ctx, 0, tokens.length, {
         temperature: 0.7,
@@ -90,31 +92,40 @@ async function main() {
       });
       branch.captureLogits();
     } else {
-      // === WARM (position > 0): string-diff for delta tokens ===
-      const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
-      const { prompt: prefix } = await ctx.formatChat(
-        JSON.stringify(messages.slice(0, -1)),
-        { addGenerationPrompt: false },
+      // === WARM (position > 0): format only the new message ===
+      fmt = await ctx.formatChat(
+        JSON.stringify([{ role: "system", content: "" }, { role: "user", content: trimmed }]),
       );
-      const delta = await ctx.tokenize(full.substring(prefix.length), false);
+      const delta = await ctx.tokenize(fmt.prompt, false);
       branch.prefill([...sep, ...delta]);
     }
 
     // Generate: produce inspects, commit advances
     process.stdout.write("< ");
-    let response = "";
+    let rawOutput = "";
 
     while (true) {
       const { token, text, isStop } = branch.produce();
       if (isStop) break;
       process.stdout.write(text);
-      response += text;
+      rawOutput += text;
       branch.commit(token);
     }
 
     console.log("\n");
 
-    messages.push({ role: "assistant", content: response.trim() });
+    // Parse output: separates reasoning from content for thinking models
+    const parsed = ctx.parseChatOutput(rawOutput, fmt.format, {
+      reasoningFormat: fmt.reasoningFormat,
+      thinkingForcedOpen: fmt.thinkingForcedOpen,
+      parser: fmt.parser,
+    });
+
+    const msg = { role: "assistant", content: parsed.content };
+    if (parsed.reasoningContent) {
+      msg.reasoning_content = parsed.reasoningContent;
+    }
+    messages.push(msg);
 
     askUser();
   }

@@ -345,22 +345,20 @@ async function testBranchPrefill() {
     }
     assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
-    // Track assistant response for string-diff warm continuation
+    // Track assistant response
     const assistantText1 = await ctx.detokenize(gen1);
     messages.push({ role: 'assistant', content: assistantText1 });
 
-    // Warm continuation: string-diff formatChat() + turn separator
+    // Warm continuation: format only new message + turn separator
     const sep = ctx.getTurnSeparator();
 
-    // Turn 2-3: prefill using string-diff warm pattern + generate
+    // Turn 2-3: prefill using format-only-new pattern + generate
     for (let t = 1; t < turns.length; t++) {
       messages.push({ role: 'user', content: turns[t] });
-      const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
-      const { prompt: prefix } = await ctx.formatChat(
-        JSON.stringify(messages.slice(0, -1)),
-        { addGenerationPrompt: false }
-      );
-      const delta = await ctx.tokenize(full.substring(prefix.length), false);
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'user', content: turns[t] }
+      ]));
+      const delta = await ctx.tokenize(prompt, false);
       const prefillToks = [...sep, ...delta];
 
       const posBefore = branch.position;
@@ -432,19 +430,13 @@ async function testWarmColdParity() {
 
     assistantContent = await warmCtx.detokenize(gen1);
 
-    // Turn 2: string-diff warm continuation
+    // Turn 2: format-only-new warm continuation
     const sep = warmCtx.getTurnSeparator();
-    const allMessages = [
-      { role: 'user', content: userMessages[0] },
-      { role: 'assistant', content: assistantContent },
+    const { prompt: warmDelta } = await warmCtx.formatChat(JSON.stringify([
+      { role: 'system', content: '' },
       { role: 'user', content: userMessages[1] }
-    ];
-    const { prompt: full } = await warmCtx.formatChat(JSON.stringify(allMessages));
-    const { prompt: prefix } = await warmCtx.formatChat(
-      JSON.stringify(allMessages.slice(0, -1)),
-      { addGenerationPrompt: false }
-    );
-    const deltaToks = await warmCtx.tokenize(full.substring(prefix.length), false);
+    ]));
+    const deltaToks = await warmCtx.tokenize(warmDelta, false);
     branch.prefill([...sep, ...deltaToks]);
 
     warmGen2 = [];
@@ -471,16 +463,26 @@ async function testWarmColdParity() {
   let coldGen2;
 
   try {
-    const msgs = [
+    // History: all but last user message (with addGenerationPrompt=false)
+    const history = [
       { role: 'user', content: userMessages[0] },
-      { role: 'assistant', content: assistantContent },
-      { role: 'user', content: userMessages[1] }
+      { role: 'assistant', content: assistantContent }
     ];
-    const { prompt: coldPrompt } = await coldCtx.formatChat(JSON.stringify(msgs));
-    const coldToks = await coldCtx.tokenize(coldPrompt);
-    await coldCtx.decode(coldToks, 0, 0);
+    const { prompt: histPrompt } = await coldCtx.formatChat(
+      JSON.stringify(history), { addGenerationPrompt: false }
+    );
+    const histToks = await coldCtx.tokenize(histPrompt);
+    await coldCtx.decode(histToks, 0, 0);
 
-    const branch = Branch.create(coldCtx, 0, coldToks.length, { temperature: 0 });
+    // Delta: format-only-new (same as warm path)
+    const { prompt: coldDelta } = await coldCtx.formatChat(JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'user', content: userMessages[1] }
+    ]));
+    const deltaToks = await coldCtx.tokenize(coldDelta, false);
+    await coldCtx.decode(deltaToks, histToks.length, 0);
+
+    const branch = Branch.create(coldCtx, 0, histToks.length + deltaToks.length, { temperature: 0 });
     branch.captureLogits();
 
     coldGen2 = [];
@@ -556,15 +558,13 @@ async function testWarmSemanticRecall() {
       let branch;
       const messages = [];
 
-      // Helper: string-diff warm continuation
+      // Helper: format-only-new warm continuation
       async function warmTurn(userContent) {
         messages.push({ role: 'user', content: userContent });
-        const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
-        const { prompt: prefix } = await ctx.formatChat(
-          JSON.stringify(messages.slice(0, -1)),
-          { addGenerationPrompt: false }
-        );
-        const delta = await ctx.tokenize(full.substring(prefix.length), false);
+        const { prompt } = await ctx.formatChat(JSON.stringify([
+          { role: 'user', content: userContent }
+        ]));
+        const delta = await ctx.tokenize(prompt, false);
         branch.prefill([...sep, ...delta]);
 
         const gen = [];
