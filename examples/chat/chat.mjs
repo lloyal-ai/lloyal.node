@@ -8,8 +8,8 @@
  *
  * This example demonstrates:
  * - Branch API for token generation (produce/commit two-phase)
- * - Warm multi-turn continuation via getWarmTurnTokens() + branch.prefill()
- * - Cold/warm routing: formatChat() on first turn, probe-based prefill on subsequent turns
+ * - Warm multi-turn continuation via string-diff formatChat() + getTurnSeparator()
+ * - Cold/warm routing: full format on first turn, string-diff on subsequent turns
  */
 
 import * as readline from "node:readline";
@@ -40,7 +40,7 @@ async function main() {
 
   const messages = [];
   let branch = null;
-  const warm = ctx.getWarmTurnTokens();
+  const sep = ctx.getTurnSeparator();
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -90,14 +90,14 @@ async function main() {
       });
       branch.captureLogits();
     } else {
-      // === WARM (position > 0): probe-based prefill — no formatChat(), no BOS ===
-      const contentToks = await ctx.tokenize(trimmed, false);
-      branch.prefill([
-        ...warm.turnSeparator,
-        ...warm.userPrefix,
-        ...contentToks,
-        ...warm.userToAssistant,
-      ]);
+      // === WARM (position > 0): string-diff for delta tokens ===
+      const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
+      const { prompt: prefix } = await ctx.formatChat(
+        JSON.stringify(messages.slice(0, -1)),
+        { addGenerationPrompt: false },
+      );
+      const delta = await ctx.tokenize(full.substring(prefix.length), false);
+      branch.prefill([...sep, ...delta]);
     }
 
     // Generate: produce inspects, commit advances

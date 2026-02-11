@@ -345,18 +345,23 @@ async function testBranchPrefill() {
     }
     assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
-    // Warm turn tokens for probe-based prefill (no string diff, no BOS bug)
-    const warm = ctx.getWarmTurnTokens();
+    // Track assistant response for string-diff warm continuation
+    const assistantText1 = await ctx.detokenize(gen1);
+    messages.push({ role: 'assistant', content: assistantText1 });
 
-    // Turn 2-3: prefill using warm probe + generate
+    // Warm continuation: string-diff formatChat() + turn separator
+    const sep = ctx.getTurnSeparator();
+
+    // Turn 2-3: prefill using string-diff warm pattern + generate
     for (let t = 1; t < turns.length; t++) {
-      const contentToks = await ctx.tokenize(turns[t], false);
-      const prefillToks = [
-        ...warm.turnSeparator,
-        ...warm.userPrefix,
-        ...contentToks,
-        ...warm.userToAssistant,
-      ];
+      messages.push({ role: 'user', content: turns[t] });
+      const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
+      const { prompt: prefix } = await ctx.formatChat(
+        JSON.stringify(messages.slice(0, -1)),
+        { addGenerationPrompt: false }
+      );
+      const delta = await ctx.tokenize(full.substring(prefix.length), false);
+      const prefillToks = [...sep, ...delta];
 
       const posBefore = branch.position;
       branch.prefill(prefillToks);
@@ -371,6 +376,10 @@ async function testBranchPrefill() {
         gen.push(token);
       }
       assert(gen.length > 0, `Turn ${t + 1}: generated ${gen.length} tokens`);
+
+      // Track assistant response
+      const assistantText = await ctx.detokenize(gen);
+      messages.push({ role: 'assistant', content: assistantText });
     }
 
     branch.prune();
@@ -423,16 +432,20 @@ async function testWarmColdParity() {
 
     assistantContent = await warmCtx.detokenize(gen1);
 
-    // Turn 2: prefill using warm probe (no string diff, no BOS bug)
-    const warm = warmCtx.getWarmTurnTokens();
-    const contentToks = await warmCtx.tokenize(userMessages[1], false);
-    const prefillToks = [
-      ...warm.turnSeparator,
-      ...warm.userPrefix,
-      ...contentToks,
-      ...warm.userToAssistant,
+    // Turn 2: string-diff warm continuation
+    const sep = warmCtx.getTurnSeparator();
+    const allMessages = [
+      { role: 'user', content: userMessages[0] },
+      { role: 'assistant', content: assistantContent },
+      { role: 'user', content: userMessages[1] }
     ];
-    branch.prefill(prefillToks);
+    const { prompt: full } = await warmCtx.formatChat(JSON.stringify(allMessages));
+    const { prompt: prefix } = await warmCtx.formatChat(
+      JSON.stringify(allMessages.slice(0, -1)),
+      { addGenerationPrompt: false }
+    );
+    const deltaToks = await warmCtx.tokenize(full.substring(prefix.length), false);
+    branch.prefill([...sep, ...deltaToks]);
 
     warmGen2 = [];
     for (let i = 0; i < GEN_TOKENS; i++) {
@@ -486,11 +499,9 @@ async function testWarmColdParity() {
   // === COMPARE ===
   const warmStr = warmGen2.join(',');
   const coldStr = coldGen2.join(',');
-  assert(warmStr === coldStr,
-    `Warm==Cold parity: ${warmGen2.length} tokens match`);
 
+  // Log divergence diagnostics BEFORE assert (assert throws on failure)
   if (warmStr !== coldStr) {
-    // Diagnostic: show first divergence point
     for (let i = 0; i < Math.max(warmGen2.length, coldGen2.length); i++) {
       if (warmGen2[i] !== coldGen2[i]) {
         console.log(`  First divergence at position ${i}: warm=${warmGen2[i]} cold=${coldGen2[i]}`);
@@ -498,68 +509,11 @@ async function testWarmColdParity() {
       }
     }
   }
-}
 
-// ═══════════════════════════════════════════════════════════════════════════
-// WARM TURN TOKENS PROBE - Verifies template-extracted role wrappers
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function testWarmTurnTokens() {
-  console.log('\n--- Warm Turn Tokens Probe ---');
-
-  const ctx = await addon.createContext({
-    modelPath: MODEL_PATH,
-    nCtx: 512,
-    nThreads: 4
-  });
-
-  try {
-    const warm = ctx.getWarmTurnTokens();
-
-    assert(Array.isArray(warm.turnSeparator) && warm.turnSeparator.length > 0,
-      `turnSeparator: ${warm.turnSeparator.length} tokens`);
-    assert(Array.isArray(warm.userPrefix) && warm.userPrefix.length > 0,
-      `userPrefix: ${warm.userPrefix.length} tokens`);
-    assert(Array.isArray(warm.userToAssistant) && warm.userToAssistant.length > 0,
-      `userToAssistant: ${warm.userToAssistant.length} tokens`);
-
-    // All token IDs should be valid numbers
-    for (const tok of warm.turnSeparator) {
-      assert(typeof tok === 'number' && Number.isInteger(tok), `turnSeparator token ${tok} is integer`);
-    }
-    for (const tok of warm.userPrefix) {
-      assert(typeof tok === 'number' && Number.isInteger(tok), `userPrefix token ${tok} is integer`);
-    }
-    for (const tok of warm.userToAssistant) {
-      assert(typeof tok === 'number' && Number.isInteger(tok), `userToAssistant token ${tok} is integer`);
-    }
-
-    // turnSeparator should contain at least one EOG token
-    const hasEog = warm.turnSeparator.some(t => ctx.isStopToken(t));
-    assert(hasEog, 'turnSeparator contains at least one EOG token');
-
-    // userPrefix should NOT contain EOG tokens
-    const prefixHasEog = warm.userPrefix.some(t => ctx.isStopToken(t));
-    assert(!prefixHasEog, 'userPrefix contains no EOG tokens');
-
-    // Cached: second call returns same result
-    const warm2 = ctx.getWarmTurnTokens();
-    assert(
-      warm.turnSeparator.join(',') === warm2.turnSeparator.join(',') &&
-      warm.userPrefix.join(',') === warm2.userPrefix.join(',') &&
-      warm.userToAssistant.join(',') === warm2.userToAssistant.join(','),
-      'getWarmTurnTokens() is cached (idempotent)');
-
-    // Log for diagnostic visibility
-    const sepText = warm.turnSeparator.map(t => ctx.tokenToText(t)).join('');
-    const prefText = warm.userPrefix.map(t => ctx.tokenToText(t)).join('');
-    const u2aText = warm.userToAssistant.map(t => ctx.tokenToText(t)).join('');
-    console.log(`    separator: ${JSON.stringify(sepText)}`);
-    console.log(`    userPrefix: ${JSON.stringify(prefText)}`);
-    console.log(`    userToAssistant: ${JSON.stringify(u2aText)}`);
-  } finally {
-    ctx.dispose();
-  }
+  assert(warmStr === coldStr,
+    warmStr === coldStr
+      ? `Warm==Cold parity: ${warmGen2.length} tokens match`
+      : `Warm==Cold parity FAILED: warm=[${warmStr}] vs cold=[${coldStr}]`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -598,13 +552,20 @@ async function testWarmSemanticRecall() {
     });
 
     try {
-      // Helper: warm-continue one turn (prefill delta, generate)
-      async function warmTurn(messages, lastText, userContent) {
+      const sep = ctx.getTurnSeparator();
+      let branch;
+      const messages = [];
+
+      // Helper: string-diff warm continuation
+      async function warmTurn(userContent) {
         messages.push({ role: 'user', content: userContent });
-        const { prompt: fullPrompt } = await ctx.formatChat(JSON.stringify(messages));
-        const delta = fullPrompt.slice(lastText.length);
-        const deltaToks = await ctx.tokenize(delta);
-        branch.prefill(deltaToks);
+        const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
+        const { prompt: prefix } = await ctx.formatChat(
+          JSON.stringify(messages.slice(0, -1)),
+          { addGenerationPrompt: false }
+        );
+        const delta = await ctx.tokenize(full.substring(prefix.length), false);
+        branch.prefill([...sep, ...delta]);
 
         const gen = [];
         for (let i = 0; i < GEN_TOKENS; i++) {
@@ -613,18 +574,18 @@ async function testWarmSemanticRecall() {
           branch.commit(token);
           gen.push(token);
         }
-        const assistantText = await ctx.detokenize(gen);
-        messages.push({ role: 'assistant', content: assistantText });
-        return { text: assistantText, lastText: fullPrompt + assistantText };
+        const text = await ctx.detokenize(gen);
+        messages.push({ role: 'assistant', content: text });
+        return text;
       }
 
       // Turn 1: Plant a specific, recallable fact
-      const messages = [{ role: 'user', content: 'Remember this: my dog is named Max.' }];
+      messages.push({ role: 'user', content: 'Remember this: my dog is named Max.' });
       const { prompt } = await ctx.formatChat(JSON.stringify(messages));
       const promptToks = await ctx.tokenize(prompt);
       await ctx.decode(promptToks, 0, 0);
 
-      var branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
       branch.captureLogits();
 
       // Generate turn 1 response
@@ -635,22 +596,17 @@ async function testWarmSemanticRecall() {
         branch.commit(token);
         gen.push(token);
       }
-      const assistantText = await ctx.detokenize(gen);
-      messages.push({ role: 'assistant', content: assistantText });
-      let lastText = prompt + assistantText;
+      const turn1Response = await ctx.detokenize(gen);
+      messages.push({ role: 'assistant', content: turn1Response });
 
       // Turn 2: Distractor
-      let turn;
-      turn = await warmTurn(messages, lastText, 'What is 2 + 2?');
-      lastText = turn.lastText;
+      await warmTurn('What is 2 + 2?');
 
       // Turn 3: Another distractor
-      turn = await warmTurn(messages, lastText, 'Name three colors.');
-      lastText = turn.lastText;
+      await warmTurn('Name three colors.');
 
       // Turn 4: Recall — only answerable from turn 1 context
-      turn = await warmTurn(messages, lastText, 'What is my dog\'s name?');
-      recallText = turn.text;
+      recallText = await warmTurn('What is my dog\'s name?');
 
       branch.prune();
     } finally {
@@ -1118,7 +1074,6 @@ async function main() {
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
-    await testWarmTurnTokens();
     await testWarmColdParity();
     await testWarmSemanticRecall();
     await testBranchSteer();

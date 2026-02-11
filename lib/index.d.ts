@@ -389,23 +389,6 @@ export interface ParseChatOutputResult {
 }
 
 /**
- * Pre-tokenized wrapper tokens for warm multi-turn continuation
- *
- * Contains the three token sequences needed to inject a new user turn
- * into an existing conversation without re-formatting the full history.
- *
- * @see {@link SessionContext.getWarmTurnTokens}
- */
-export interface WarmTurnTokens {
-  /** Tokens that close the previous assistant turn (e.g., im_end + newline for ChatML) */
-  turnSeparator: number[];
-  /** Tokens that open a new user turn (e.g., im_start + "user" + newline for ChatML) */
-  userPrefix: number[];
-  /** Tokens that close the user turn and open assistant (e.g., im_end + newline + im_start + "assistant" + newline) */
-  userToAssistant: number[];
-}
-
-/**
  * Penalty parameters for repetition control
  */
 export interface PenaltyParams {
@@ -748,31 +731,6 @@ export interface SessionContext {
    * ```
    */
   getTurnSeparator(): number[];
-
-  /**
-   * Get warm turn wrapper tokens for template-aware warm continuation
-   *
-   * Returns pre-tokenized role wrappers extracted from the model's chat
-   * template. Use these to construct warm prefill tokens without
-   * re-formatting the full conversation (no BOS bug, O(1) per turn).
-   *
-   * Warm path: turnSeparator + userPrefix + tokenize(content, false) + userToAssistant
-   *
-   * @returns Cached wrapper tokens (computed once per model)
-   *
-   * @example
-   * ```typescript
-   * const warm = ctx.getWarmTurnTokens();
-   * const contentToks = await ctx.tokenize(userContent, false);
-   * branch.prefill([
-   *   ...warm.turnSeparator,     // closes previous assistant turn
-   *   ...warm.userPrefix,        // opens new user turn
-   *   ...contentToks,            // raw user content (no BOS)
-   *   ...warm.userToAssistant,   // closes user turn + opens assistant
-   * ]);
-   * ```
-   */
-  getWarmTurnTokens(): WarmTurnTokens;
 
   // ===== PROMPT PREPARATION =====
 

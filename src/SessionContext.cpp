@@ -598,7 +598,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
     InstanceMethod("getEogToken", &SessionContext::getEogToken),
     InstanceMethod("getTurnSeparator", &SessionContext::getTurnSeparator),
-    InstanceMethod("getWarmTurnTokens", &SessionContext::getWarmTurnTokens),
 
     // ===== PROMPT PREPARATION =====
     InstanceMethod("tokenize", &SessionContext::tokenize),
@@ -1153,34 +1152,6 @@ Napi::Value SessionContext::getTurnSeparator(const Napi::CallbackInfo& info) {
   for (size_t i = 0; i < _turnSeparatorCache.size(); i++) {
     result[i] = Napi::Number::New(env, static_cast<double>(_turnSeparatorCache[i]));
   }
-  return result;
-}
-
-Napi::Value SessionContext::getWarmTurnTokens(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Compute once, cache thereafter
-  if (!_warmTurnTokensCached) {
-    _warmTurnTokensCache = lloyal::chat_in::get_warm_turn_tokens(_model.get());
-    _warmTurnTokensCached = true;
-  }
-
-  // Return { turnSeparator: number[], userPrefix: number[], userToAssistant: number[] }
-  Napi::Object result = Napi::Object::New(env);
-
-  auto toArray = [&](const std::vector<llama_token>& tokens) {
-    Napi::Array arr = Napi::Array::New(env, tokens.size());
-    for (size_t i = 0; i < tokens.size(); i++) {
-      arr[i] = Napi::Number::New(env, static_cast<double>(tokens[i]));
-    }
-    return arr;
-  };
-
-  result.Set("turnSeparator", toArray(_warmTurnTokensCache.turn_separator));
-  result.Set("userPrefix", toArray(_warmTurnTokensCache.user_prefix));
-  result.Set("userToAssistant", toArray(_warmTurnTokensCache.user_to_assistant));
-
   return result;
 }
 
