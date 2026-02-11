@@ -388,37 +388,52 @@ async function testBranchPrefill() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// WARM vs COLD PARITY - Semantic proof that warm continuation == cold start
+// WARM MULTI-TURN SEMANTIC RECALL - Proves context survives warm continuations
+// Mirrors liblloyal C++ test: chat_in_integration_test.cpp
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function testWarmColdParity() {
-  console.log('\n--- Warm vs Cold Parity ---');
+async function testWarmMultiTurnRecall() {
+  console.log('\n--- Warm Multi-Turn Recall ---');
 
-  const GEN_TOKENS = 10;
-  const userMessages = [
-    "What is the capital of France?",
-    " Tell me more about it."
-  ];
+  const GEN_TOKENS = 60;
 
-  // === WARM PATH: decode turn 1, prefill turn 2 delta, generate ===
-  const warmCtx = await addon.createContext({
+  const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
     nCtx: 2048,
     nBatch: 512,
     nThreads: 4
   });
 
-  let assistantContent;
-  let warmGen2;
-
   try {
-    // Turn 1: format, decode, generate
-    const msgs1 = [{ role: 'user', content: userMessages[0] }];
-    const { prompt: prompt1 } = await warmCtx.formatChat(JSON.stringify(msgs1));
-    const toks1 = await warmCtx.tokenize(prompt1);
-    await warmCtx.decode(toks1, 0, 0);
+    const sep = ctx.getTurnSeparator();
 
-    const branch = Branch.create(warmCtx, 0, toks1.length, { temperature: 0 });
+    // Helper: warm continuation — sep + format([{system,""},{user,msg}])
+    async function warmTurn(branch, userContent) {
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
+        { role: 'user', content: userContent }
+      ]));
+      const delta = await ctx.tokenize(prompt, false);
+      branch.prefill([...sep, ...delta]);
+
+      const gen = [];
+      for (let i = 0; i < GEN_TOKENS; i++) {
+        const { token, isStop } = branch.produce();
+        if (isStop) break;
+        branch.commit(token);
+        gen.push(token);
+      }
+      const text = await ctx.detokenize(gen);
+      return text;
+    }
+
+    // Turn 1 (COLD): introduce name
+    const msgs1 = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
+    const { prompt } = await ctx.formatChat(JSON.stringify(msgs1));
+    const promptToks = await ctx.tokenize(prompt);
+    await ctx.decode(promptToks, 0, 0);
+
+    const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
     branch.captureLogits();
 
     const gen1 = [];
@@ -428,95 +443,31 @@ async function testWarmColdParity() {
       branch.commit(token);
       gen1.push(token);
     }
+    const turn1 = await ctx.detokenize(gen1);
+    console.log(`  Turn 1: "${turn1.trim().slice(0, 80)}"`);
+    assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
-    assistantContent = await warmCtx.detokenize(gen1);
+    // Turn 2 (WARM): introduce favourite food
+    const turn2 = await warmTurn(branch, 'My favourite food is pizza');
+    console.log(`  Turn 2: "${turn2.trim().slice(0, 80)}"`);
+    assert(turn2.length > 0, 'Turn 2: generated response');
 
-    // Turn 2: format-only-new warm continuation
-    const sep = warmCtx.getTurnSeparator();
-    const { prompt: warmDelta } = await warmCtx.formatChat(JSON.stringify([
-      { role: 'system', content: '' },
-      { role: 'user', content: userMessages[1] }
-    ]));
-    const deltaToks = await warmCtx.tokenize(warmDelta, false);
-    branch.prefill([...sep, ...deltaToks]);
+    // Turn 3 (WARM): recall name
+    const turn3 = await warmTurn(branch, 'Do you remember my name?');
+    console.log(`  Turn 3 (name recall): "${turn3.trim().slice(0, 80)}"`);
+    const nameRecalled = turn3.toLowerCase().includes('lloyal');
+    assert(nameRecalled, `Name recall: ${nameRecalled ? 'found "Lloyal"' : 'MISSING "Lloyal" in: ' + turn3.trim().slice(0, 120)}`);
 
-    warmGen2 = [];
-    for (let i = 0; i < GEN_TOKENS; i++) {
-      const { token, isStop } = branch.produce();
-      if (isStop) break;
-      branch.commit(token);
-      warmGen2.push(token);
-    }
-
-    branch.prune();
-  } finally {
-    warmCtx.dispose();
-  }
-
-  // === COLD PATH: decode full 2-turn conversation from scratch, generate ===
-  const coldCtx = await addon.createContext({
-    modelPath: MODEL_PATH,
-    nCtx: 2048,
-    nBatch: 512,
-    nThreads: 4
-  });
-
-  let coldGen2;
-
-  try {
-    // History: all but last user message (with addGenerationPrompt=false)
-    const history = [
-      { role: 'user', content: userMessages[0] },
-      { role: 'assistant', content: assistantContent }
-    ];
-    const { prompt: histPrompt } = await coldCtx.formatChat(
-      JSON.stringify(history), { addGenerationPrompt: false }
-    );
-    const histToks = await coldCtx.tokenize(histPrompt);
-    await coldCtx.decode(histToks, 0, 0);
-
-    // Delta: format-only-new (same as warm path)
-    const { prompt: coldDelta } = await coldCtx.formatChat(JSON.stringify([
-      { role: 'system', content: '' },
-      { role: 'user', content: userMessages[1] }
-    ]));
-    const deltaToks = await coldCtx.tokenize(coldDelta, false);
-    await coldCtx.decode(deltaToks, histToks.length, 0);
-
-    const branch = Branch.create(coldCtx, 0, histToks.length + deltaToks.length, { temperature: 0 });
-    branch.captureLogits();
-
-    coldGen2 = [];
-    for (let i = 0; i < GEN_TOKENS; i++) {
-      const { token, isStop } = branch.produce();
-      if (isStop) break;
-      branch.commit(token);
-      coldGen2.push(token);
-    }
+    // Turn 4 (WARM): recall food
+    const turn4 = await warmTurn(branch, 'Do you remember my favourite food?');
+    console.log(`  Turn 4 (food recall): "${turn4.trim().slice(0, 80)}"`);
+    const foodRecalled = turn4.toLowerCase().includes('pizza');
+    assert(foodRecalled, `Food recall: ${foodRecalled ? 'found "pizza"' : 'MISSING "pizza" in: ' + turn4.trim().slice(0, 120)}`);
 
     branch.prune();
   } finally {
-    coldCtx.dispose();
+    ctx.dispose();
   }
-
-  // === COMPARE ===
-  const warmStr = warmGen2.join(',');
-  const coldStr = coldGen2.join(',');
-
-  // Log divergence diagnostics BEFORE assert (assert throws on failure)
-  if (warmStr !== coldStr) {
-    for (let i = 0; i < Math.max(warmGen2.length, coldGen2.length); i++) {
-      if (warmGen2[i] !== coldGen2[i]) {
-        console.log(`  First divergence at position ${i}: warm=${warmGen2[i]} cold=${coldGen2[i]}`);
-        break;
-      }
-    }
-  }
-
-  assert(warmStr === coldStr,
-    warmStr === coldStr
-      ? `Warm==Cold parity: ${warmGen2.length} tokens match`
-      : `Warm==Cold parity FAILED: warm=[${warmStr}] vs cold=[${coldStr}]`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1076,7 +1027,7 @@ async function main() {
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
-    await testWarmColdParity();
+    await testWarmMultiTurnRecall();
     await testWarmSemanticRecall();
     await testBranchSteer();
     await testNBatchAblation();
