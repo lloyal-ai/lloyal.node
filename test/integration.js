@@ -23,6 +23,8 @@ const EMBED_MODEL_PATH = process.env.LLAMA_EMBED_MODEL ||
     ? path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf')
     : null);
 
+const CTX_SIZE = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
+
 if (!fs.existsSync(MODEL_PATH)) {
   console.error('Test model not found:', MODEL_PATH);
   process.exit(1);
@@ -314,7 +316,7 @@ async function testBranchPrefill() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 2048,
+    nCtx: CTX_SIZE,
     nBatch: 512,
     nThreads: 4
   });
@@ -397,7 +399,7 @@ async function testWarmMultiTurnRecall() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 2048,
+    nCtx: CTX_SIZE,
     nBatch: 512,
     nThreads: 4
   });
@@ -494,7 +496,7 @@ async function testWarmSemanticRecall() {
   {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 2048,
+      nCtx: CTX_SIZE,
       nBatch: 512,
       nThreads: 4
     });
@@ -1005,10 +1007,10 @@ async function main() {
     // Create main context for reusable tests
     mainCtx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 512,
+      nCtx: CTX_SIZE,
       nThreads: 4
     });
-    ok(`createContext() → vocabSize=${mainCtx.vocabSize}`);
+    ok(`createContext(nCtx=${CTX_SIZE}) → vocabSize=${mainCtx.vocabSize}`);
 
     // Run test suites
     await testCoreAPI(mainCtx);
