@@ -356,6 +356,7 @@ async function testBranchPrefill() {
     for (let t = 1; t < turns.length; t++) {
       messages.push({ role: 'user', content: turns[t] });
       const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
         { role: 'user', content: turns[t] }
       ]));
       const delta = await ctx.tokenize(prompt, false);
@@ -562,6 +563,7 @@ async function testWarmSemanticRecall() {
       async function warmTurn(userContent) {
         messages.push({ role: 'user', content: userContent });
         const { prompt } = await ctx.formatChat(JSON.stringify([
+          { role: 'system', content: '' },
           { role: 'user', content: userContent }
         ]));
         const delta = await ctx.tokenize(prompt, false);

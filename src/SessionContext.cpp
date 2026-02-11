@@ -14,6 +14,7 @@
 #include <lloyal/logits.hpp>
 #include <lloyal/metrics.hpp>
 #include <cmath>
+#include <iostream>
 
 namespace liblloyal_node {
 
