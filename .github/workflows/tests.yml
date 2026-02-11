@@ -41,12 +41,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Install build dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          # Xcode command line tools already installed on GitHub runners
-          brew install cmake ninja
-
       - name: Install build dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -117,95 +111,6 @@ jobs:
             build/CMakeFiles/CMakeError.log
           retention-days: 7
 
-  # Model architecture matrix - tests all models on Metal GPU
-  setup-model-matrix:
-    name: Setup Model Matrix
-    runs-on: ubuntu-latest
-    outputs:
-      models: ${{ steps.read-matrix.outputs.models }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Read model matrix
-        id: read-matrix
-        run: |
-          # Extract model names and files from test/matrix.json
-          models=$(jq -c '[.models[] | {name: .name, file: .file}]' test/matrix.json)
-          echo "models=$models" >> $GITHUB_OUTPUT
-          echo "Model matrix: $models"
-
-  test-model-matrix:
-    name: Examples - ${{ matrix.model.name }}
-    runs-on: macos-14  # Metal GPU
-    needs: setup-model-matrix
-
-    strategy:
-      fail-fast: false
-      matrix:
-        model: ${{ fromJson(needs.setup-model-matrix.outputs.models) }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Cache all test models
-        uses: actions/cache@v4
-        with:
-          path: models/
-          key: test-models-all-v1-${{ hashFiles('test/matrix.json') }}
-
-      - name: Download all test models
-        run: bash scripts/download-test-models.sh --all
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install build dependencies
-        run: brew install cmake ninja
-
-      - name: Install npm dependencies
-        run: npm install --ignore-scripts
-
-      # Build with CPU-only to avoid paravirtualized Metal GPU bugs
-      # (NeoX RoPE kernel returns zeros on Apple Paravirtual device)
-      - name: Build from submodules
-        run: npm run build
-        env:
-          LLOYAL_GPU: cpu
-
-      - name: Run integration tests
-        run: npm run test:integration
-        timeout-minutes: 10
-        env:
-          LLOYAL_LOCAL: '1'
-          MODEL_PATH: models/${{ matrix.model.file }}
-
-      # TODO: Enable example tests when self-hosted GPU runners are available
-      # GitHub's macos-14 uses paravirtualized Metal (~2.4s/token) which is too
-      # slow for example tests. Integration tests pass but examples timeout.
-      # - name: Run example tests
-      #   run: npm run test:examples
-      #   timeout-minutes: 15
-      #   env:
-      #     LLOYAL_LOCAL: '1'
-      #     MODEL_PATH: models/${{ matrix.model.file }}
-
-      - name: Display test info
-        if: always()
-        run: |
-          echo "================================"
-          echo "Model Matrix Test"
-          echo "================================"
-          echo "Model: ${{ matrix.model.name }}"
-          echo "File: ${{ matrix.model.file }}"
-          echo "Platform: Metal (macos-14)"
-
   verify-npm-package:
     name: Verify npm package contents
     runs-on: ubuntu-latest
@@ -264,7 +169,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [test-build, test-model-matrix, verify-npm-package]
+    needs: [test-build, verify-npm-package]
     if: always()
 
     steps:
@@ -273,12 +178,10 @@ jobs:
           echo "================================"
           echo "Test Results Summary"
           echo "================================"
-          echo "✓ Source builds tested on Linux, macOS, Windows"
+          echo "✓ Source builds tested on Linux and Windows"
           echo "✓ Node.js 24 (Active LTS) compatibility verified"
-          echo "✓ Model architecture matrix tested on Metal"
           echo "✓ npm package contents verified"
           echo "✓ Integration tests passed"
-          echo "✓ Example tests passed"
+          echo "✓ Model matrix tested on GPU (gpu-test.yml)"
           echo ""
           echo "Build & Test Status: ${{ needs.test-build.result }}"
-          echo "Model Matrix Status: ${{ needs.test-model-matrix.result }}"

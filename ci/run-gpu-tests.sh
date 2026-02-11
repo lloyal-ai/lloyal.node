@@ -36,7 +36,7 @@ fi
 
 echo ""
 echo "=== Downloading Test Models ==="
-./scripts/download-test-models.sh
+./scripts/download-test-models.sh --all
 
 echo ""
 echo "=== Verifying Backend ==="
@@ -55,16 +55,68 @@ try {
 "
 
 echo ""
-echo "=== Running Integration Tests ==="
-LLOYAL_GPU="${GPU_BACKEND}" \
-LLOYAL_NO_FALLBACK=1 \
-node test/integration.js
+echo "=== Running Model Matrix ==="
+
+# Read model list from matrix.json
+MODELS=$(jq -c '.models[]' test/matrix.json)
+
+# Per-model results tracking
+TOTAL=0
+PASS=0
+FAIL=0
+declare -a RESULTS=()
+
+# Don't exit on per-model failure — track results and report at end
+set +e
+
+while IFS= read -r model; do
+  name=$(echo "$model" | jq -r '.name')
+  file=$(echo "$model" | jq -r '.file')
+
+  echo ""
+  echo "══════════════════════════════════════"
+  echo "MODEL: $name ($file)"
+  echo "══════════════════════════════════════"
+
+  TOTAL=$((TOTAL + 1))
+
+  LLOYAL_GPU="${GPU_BACKEND}" \
+  LLOYAL_NO_FALLBACK=1 \
+  MODEL_PATH="models/$file" \
+  node test/integration.js
+
+  if [ $? -eq 0 ]; then
+    RESULTS+=("✅ $name")
+    PASS=$((PASS + 1))
+  else
+    RESULTS+=("❌ $name")
+    FAIL=$((FAIL + 1))
+  fi
+done <<< "$MODELS"
+
+set -e
 
 echo ""
-echo "=== Running Examples ==="
+echo "=== Running Examples (default model) ==="
 LLOYAL_GPU="${GPU_BACKEND}" \
 LLOYAL_NO_FALLBACK=1 \
 node test/examples.js
 
+# Final summary table
 echo ""
-echo "=== ✅ GPU Tests Passed ==="
+echo "══════════════════════════════════════"
+echo "MODEL MATRIX RESULTS"
+echo "══════════════════════════════════════"
+for r in "${RESULTS[@]}"; do echo "  $r"; done
+echo ""
+echo "Total: $PASS passed, $FAIL failed out of $TOTAL models"
+
+if [ $FAIL -eq 0 ]; then
+  echo ""
+  echo "=== ✅ GPU Tests Passed ==="
+  exit 0
+else
+  echo ""
+  echo "=== ❌ GPU Tests Failed ==="
+  exit 1
+fi

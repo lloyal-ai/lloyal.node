@@ -129,7 +129,7 @@ jobs:
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
               --set-env-vars=LLOYAL_GPU=cuda,LLOYAL_NO_FALLBACK=1 \
-              --task-timeout=10m \
+              --task-timeout=20m \
               --no-gpu-zonal-redundancy
           else
             gcloud run jobs create $JOB_NAME \
@@ -137,7 +137,7 @@ jobs:
               --image="${IMAGE}" \
               --service-account="${{ secrets.GCP_SA_EMAIL }}" \
               --set-env-vars=LLOYAL_GPU=cuda,LLOYAL_NO_FALLBACK=1 \
-              --task-timeout=10m \
+              --task-timeout=20m \
               --gpu=1 \
               --gpu-type=nvidia-l4 \
               --memory=16Gi \
