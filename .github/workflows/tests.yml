@@ -80,14 +80,14 @@ jobs:
         run: |
           $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
           npm run test:integration
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           LLOYAL_LOCAL: '1'
 
       - name: Run integration tests (Unix)
         if: runner.os != 'Windows'
         run: npm run test:integration
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           LLOYAL_LOCAL: '1'
 
@@ -181,7 +181,7 @@ jobs:
 
       - name: Run integration tests
         run: npm run test:integration
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           LLOYAL_LOCAL: '1'
           MODEL_PATH: models/${{ matrix.model.file }}

@@ -395,8 +395,6 @@ async function testBranchPrefill() {
 async function testWarmMultiTurnRecall() {
   console.log('\n--- Warm Multi-Turn Recall ---');
 
-  const GEN_TOKENS = 60;
-
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
     nCtx: 2048,
@@ -407,6 +405,18 @@ async function testWarmMultiTurnRecall() {
   try {
     const sep = ctx.getTurnSeparator();
 
+    // Helper: generate until EOG (matches C++ test pattern)
+    async function generate(branch) {
+      const gen = [];
+      for (;;) {
+        const { token, isStop } = branch.produce();
+        if (isStop) break;
+        branch.commit(token);
+        gen.push(token);
+      }
+      return ctx.detokenize(gen);
+    }
+
     // Helper: warm continuation — sep + format([{system,""},{user,msg}])
     async function warmTurn(branch, userContent) {
       const { prompt } = await ctx.formatChat(JSON.stringify([
@@ -415,16 +425,7 @@ async function testWarmMultiTurnRecall() {
       ]));
       const delta = await ctx.tokenize(prompt, false);
       branch.prefill([...sep, ...delta]);
-
-      const gen = [];
-      for (let i = 0; i < GEN_TOKENS; i++) {
-        const { token, isStop } = branch.produce();
-        if (isStop) break;
-        branch.commit(token);
-        gen.push(token);
-      }
-      const text = await ctx.detokenize(gen);
-      return text;
+      return generate(branch);
     }
 
     // Turn 1 (COLD): introduce name
@@ -436,16 +437,9 @@ async function testWarmMultiTurnRecall() {
     const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
     branch.captureLogits();
 
-    const gen1 = [];
-    for (let i = 0; i < GEN_TOKENS; i++) {
-      const { token, isStop } = branch.produce();
-      if (isStop) break;
-      branch.commit(token);
-      gen1.push(token);
-    }
-    const turn1 = await ctx.detokenize(gen1);
+    const turn1 = await generate(branch);
     console.log(`  Turn 1: "${turn1.trim().slice(0, 80)}"`);
-    assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
+    assert(turn1.length > 0, 'Turn 1: generated response');
 
     // Turn 2 (WARM): introduce favourite food
     const turn2 = await warmTurn(branch, 'My favourite food is pizza');
