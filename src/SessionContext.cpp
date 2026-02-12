@@ -6,13 +6,15 @@
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/common.hpp>
 #include <lloyal/model_registry.hpp>
-#include <lloyal/chat_template.hpp>
+#include <lloyal/chat_in.hpp>
+#include <lloyal/chat_out.hpp>
 #include <lloyal/grammar.hpp>
 #include <lloyal/kv.hpp>
 #include <lloyal/embedding.hpp>
 #include <lloyal/logits.hpp>
 #include <lloyal/metrics.hpp>
 #include <cmath>
+#include <iostream>
 
 namespace liblloyal_node {
 
@@ -510,27 +512,21 @@ private:
 class FormatChatWorker : public Napi::AsyncWorker {
 public:
   FormatChatWorker(Napi::Env env, std::shared_ptr<llama_model> model,
-                   const std::string& messagesJson, const std::string& templateOverride)
-    : AsyncWorker(env), _deferred(env), _model(model),
-      _messagesJson(messagesJson), _templateOverride(templateOverride) {}
+                   const lloyal::chat_in::FormatInputs& inputs)
+    : AsyncWorker(env), _deferred(env), _model(model), _inputs(inputs) {}
 
   void Execute() override {
     try {
-      // Use lloyal::chat_template::format() from liblloyal
-      lloyal::chat_template::FormatResult result = lloyal::chat_template::format(
-        _model.get(),
-        _messagesJson,
-        _templateOverride
+      lloyal::chat_in::FormatResult result = lloyal::chat_in::format(
+        _model.get(), _inputs
       );
 
-      // Check if formatting failed completely
       if (result.prompt.empty()) {
         SetError("Chat template formatting failed");
         return;
       }
 
-      _resultPrompt = result.prompt;
-      _resultStopTokens = result.additional_stops;
+      _result = result;
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -539,16 +535,41 @@ public:
   void OnOK() override {
     Napi::Env env = Env();
 
-    // Create result object { prompt: string, stopTokens: string[] }
     Napi::Object result = Napi::Object::New(env);
-    result.Set("prompt", Napi::String::New(env, _resultPrompt));
+    result.Set("prompt", Napi::String::New(env, _result.prompt));
 
-    // Convert stopTokens vector to JS array
-    Napi::Array stopTokens = Napi::Array::New(env, _resultStopTokens.size());
-    for (size_t i = 0; i < _resultStopTokens.size(); i++) {
-      stopTokens[i] = Napi::String::New(env, _resultStopTokens[i]);
+    // stopTokens (backward compat)
+    Napi::Array stopTokens = Napi::Array::New(env, _result.additional_stops.size());
+    for (size_t i = 0; i < _result.additional_stops.size(); i++) {
+      stopTokens[i] = Napi::String::New(env, _result.additional_stops[i]);
     }
     result.Set("stopTokens", stopTokens);
+
+    // Format awareness fields
+    result.Set("format", Napi::Number::New(env, static_cast<double>(_result.format)));
+    result.Set("grammar", Napi::String::New(env, _result.grammar));
+    result.Set("grammarLazy", Napi::Boolean::New(env, _result.grammar_lazy));
+    result.Set("thinkingForcedOpen", Napi::Boolean::New(env, _result.thinking_forced_open));
+    result.Set("reasoningFormat", Napi::Number::New(env, static_cast<double>(_result.reasoning_format)));
+    result.Set("parser", Napi::String::New(env, _result.parser));
+
+    // grammarTriggers: Array<{ type: number, value: string, token: number }>
+    Napi::Array triggers = Napi::Array::New(env, _result.grammar_triggers.size());
+    for (size_t i = 0; i < _result.grammar_triggers.size(); i++) {
+      Napi::Object trigger = Napi::Object::New(env);
+      trigger.Set("type", Napi::Number::New(env, static_cast<double>(_result.grammar_triggers[i].type)));
+      trigger.Set("value", Napi::String::New(env, _result.grammar_triggers[i].value));
+      trigger.Set("token", Napi::Number::New(env, static_cast<double>(_result.grammar_triggers[i].token)));
+      triggers[i] = trigger;
+    }
+    result.Set("grammarTriggers", triggers);
+
+    // preservedTokens: string[]
+    Napi::Array preserved = Napi::Array::New(env, _result.preserved_tokens.size());
+    for (size_t i = 0; i < _result.preserved_tokens.size(); i++) {
+      preserved[i] = Napi::String::New(env, _result.preserved_tokens[i]);
+    }
+    result.Set("preservedTokens", preserved);
 
     _deferred.Resolve(result);
   }
@@ -562,10 +583,8 @@ public:
 private:
   Napi::Promise::Deferred _deferred;
   std::shared_ptr<llama_model> _model;
-  std::string _messagesJson;
-  std::string _templateOverride;
-  std::string _resultPrompt;
-  std::vector<std::string> _resultStopTokens;
+  lloyal::chat_in::FormatInputs _inputs;
+  lloyal::chat_in::FormatResult _result;
 };
 
 // ===== SESSIONCONTEXT IMPLEMENTATION =====
@@ -612,6 +631,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
 
     // ===== HELPERS =====
     InstanceMethod("formatChat", &SessionContext::formatChat),
+    InstanceMethod("parseChatOutput", &SessionContext::parseChatOutput),
     InstanceMethod("jsonSchemaToGrammar", &SessionContext::jsonSchemaToGrammar),
     InstanceMethod("validateChatTemplate", &SessionContext::validateChatTemplate),
 
@@ -1125,7 +1145,7 @@ Napi::Value SessionContext::getTurnSeparator(const Napi::CallbackInfo& info) {
 
   // Compute once, cache thereafter
   if (!_turnSeparatorCached) {
-    _turnSeparatorCache = lloyal::chat_template::get_turn_separator(_model.get());
+    _turnSeparatorCache = lloyal::chat_in::get_turn_separator(_model.get());
     _turnSeparatorCached = true;
   }
 
@@ -1141,18 +1161,51 @@ Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (messagesJson: string[, templateOverride: string])");
+    throw Napi::TypeError::New(env, "Expected (messagesJson: string[, options: object])");
   }
 
-  std::string messagesJson = info[0].As<Napi::String>().Utf8Value();
-  std::string templateOverride = "";
+  lloyal::chat_in::FormatInputs inputs;
+  inputs.messages_json = info[0].As<Napi::String>().Utf8Value();
 
-  if (info.Length() >= 2 && info[1].IsString()) {
-    templateOverride = info[1].As<Napi::String>().Utf8Value();
+  // Second argument: options object (or string for backward compat)
+  if (info.Length() >= 2) {
+    if (info[1].IsString()) {
+      // Backward compat: formatChat(messagesJson, templateOverride)
+      inputs.template_override = info[1].As<Napi::String>().Utf8Value();
+    } else if (info[1].IsObject()) {
+      Napi::Object opts = info[1].As<Napi::Object>();
+
+      if (opts.Has("templateOverride") && opts.Get("templateOverride").IsString()) {
+        inputs.template_override = opts.Get("templateOverride").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("tools") && opts.Get("tools").IsString()) {
+        inputs.tools_json = opts.Get("tools").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("toolChoice") && opts.Get("toolChoice").IsString()) {
+        inputs.tool_choice = opts.Get("toolChoice").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("parallelToolCalls") && opts.Get("parallelToolCalls").IsBoolean()) {
+        inputs.parallel_tool_calls = opts.Get("parallelToolCalls").As<Napi::Boolean>().Value();
+      }
+      if (opts.Has("reasoningFormat") && opts.Get("reasoningFormat").IsString()) {
+        inputs.reasoning_format = opts.Get("reasoningFormat").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("enableThinking") && opts.Get("enableThinking").IsBoolean()) {
+        inputs.enable_thinking = opts.Get("enableThinking").As<Napi::Boolean>().Value();
+      }
+      if (opts.Has("jsonSchema") && opts.Get("jsonSchema").IsString()) {
+        inputs.json_schema = opts.Get("jsonSchema").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("grammar") && opts.Get("grammar").IsString()) {
+        inputs.grammar = opts.Get("grammar").As<Napi::String>().Utf8Value();
+      }
+      if (opts.Has("addGenerationPrompt") && opts.Get("addGenerationPrompt").IsBoolean()) {
+        inputs.add_generation_prompt = opts.Get("addGenerationPrompt").As<Napi::Boolean>().Value();
+      }
+    }
   }
 
-  // Run async
-  auto* worker = new FormatChatWorker(env, _model, messagesJson, templateOverride);
+  auto* worker = new FormatChatWorker(env, _model, inputs);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1742,9 +1795,9 @@ Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info)
       : AsyncWorker(env), _deferred(env), _templateString(templateStr) {}
 
     void Execute() override {
-      // Use lloyal::chat_template from liblloyal (handles error logging)
+      // Use lloyal::chat_in from liblloyal (handles error logging)
       // Pattern matches HybridSessionContext.cpp:365-372
-      _result = lloyal::chat_template::validate(_templateString);
+      _result = lloyal::chat_in::validate(_templateString);
     }
 
     void OnOK() override {
@@ -1766,6 +1819,66 @@ Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info)
   auto* worker = new ValidateChatTemplateWorker(env, templateString);
   worker->Queue();
   return worker->GetPromise();
+}
+
+// ===== CHAT OUTPUT PARSING =====
+
+Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  // Args: output (string), format (number), options? (object)
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected (output: string, format: number[, options: object])");
+  }
+
+  std::string output = info[0].As<Napi::String>().Utf8Value();
+  auto format = static_cast<common_chat_format>(info[1].As<Napi::Number>().Int32Value());
+
+  // Optional params
+  auto reasoning_format = COMMON_REASONING_FORMAT_NONE;
+  bool is_partial = false;
+  bool thinking_forced_open = false;
+  std::string parser_data;
+
+  if (info.Length() >= 3 && info[2].IsObject()) {
+    Napi::Object opts = info[2].As<Napi::Object>();
+
+    if (opts.Has("reasoningFormat") && opts.Get("reasoningFormat").IsNumber()) {
+      reasoning_format = static_cast<common_reasoning_format>(
+        opts.Get("reasoningFormat").As<Napi::Number>().Int32Value());
+    }
+    if (opts.Has("isPartial") && opts.Get("isPartial").IsBoolean()) {
+      is_partial = opts.Get("isPartial").As<Napi::Boolean>().Value();
+    }
+    if (opts.Has("thinkingForcedOpen") && opts.Get("thinkingForcedOpen").IsBoolean()) {
+      thinking_forced_open = opts.Get("thinkingForcedOpen").As<Napi::Boolean>().Value();
+    }
+    if (opts.Has("parser") && opts.Get("parser").IsString()) {
+      parser_data = opts.Get("parser").As<Napi::String>().Utf8Value();
+    }
+  }
+
+  // Synchronous — parsing is fast, no I/O
+  auto result = lloyal::chat_out::parse(output, format, reasoning_format,
+                                         is_partial, thinking_forced_open, parser_data);
+
+  // Build return object
+  Napi::Object obj = Napi::Object::New(env);
+  obj.Set("content", Napi::String::New(env, result.content));
+  obj.Set("reasoningContent", Napi::String::New(env, result.reasoning_content));
+
+  Napi::Array toolCalls = Napi::Array::New(env, result.tool_calls.size());
+  for (size_t i = 0; i < result.tool_calls.size(); i++) {
+    Napi::Object tc = Napi::Object::New(env);
+    tc.Set("name", Napi::String::New(env, result.tool_calls[i].name));
+    tc.Set("arguments", Napi::String::New(env, result.tool_calls[i].arguments));
+    tc.Set("id", Napi::String::New(env, result.tool_calls[i].id));
+    toolCalls[i] = tc;
+  }
+  obj.Set("toolCalls", toolCalls);
+
+  return obj;
 }
 
 // ===== KV CACHE OPERATIONS =====
@@ -1989,9 +2102,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   std::cout << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
 
   // Load model on main thread
-  // Note: With XCFramework build, this works reliably on main thread
-  // (async loading was failing with CMake build due to binary incompatibility)
-  std::cout << "[CreateContext] Loading model from XCFramework..." << std::endl;
+  std::cout << "[CreateContext] Loading model..." << std::endl;
 
   llama_model_params model_params = llama_model_default_params();
   // -1 = offload all layers to GPU (auto-detect), 0 = CPU only

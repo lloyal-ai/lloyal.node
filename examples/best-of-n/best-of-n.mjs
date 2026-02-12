@@ -89,9 +89,10 @@ async function main() {
 
   emit('start', { model: path.basename(modelPath), n: N, maxTokens: MAX_TOKENS, highTemp: HIGH_TEMP, lowTemp: LOW_TEMP });
 
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const ctx = await createContext({
     modelPath,
-    contextSize: 2048,
+    nCtx,
     nSeqMax: N + 2, // Need slots for N candidates + baseline + trunk
   });
 

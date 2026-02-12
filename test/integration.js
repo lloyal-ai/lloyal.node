@@ -6,7 +6,7 @@
  *
  * Usage:
  *   npm run test:integration
- *   MODEL_PATH=models/Llama-3.2-1B-Instruct-Q4_K_M.gguf npm run test:integration
+ *   LLAMA_TEST_MODEL=models/Llama-3.2-1B-Instruct-Q4_K_M.gguf npm run test:integration
  *
  * Optional embedding tests:
  *   LLAMA_EMBED_MODEL=models/nomic-embed-text-v1.5.Q4_K_M.gguf npm run test:integration
@@ -15,13 +15,15 @@
 const path = require('path');
 const fs = require('fs');
 
-const MODEL_PATH = process.env.MODEL_PATH
-  ? path.resolve(process.env.MODEL_PATH)
+const MODEL_PATH = process.env.LLAMA_TEST_MODEL
+  ? path.resolve(process.env.LLAMA_TEST_MODEL)
   : path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
 const EMBED_MODEL_PATH = process.env.LLAMA_EMBED_MODEL ||
   (fs.existsSync(path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'))
     ? path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf')
     : null);
+
+const CTX_SIZE = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
 
 if (!fs.existsSync(MODEL_PATH)) {
   console.error('Test model not found:', MODEL_PATH);
@@ -164,7 +166,7 @@ async function testMultiSequence() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4,
     nSeqMax: 4
   });
@@ -199,7 +201,7 @@ async function testGrammar() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 
@@ -314,7 +316,7 @@ async function testBranchPrefill() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 2048,
+    nCtx: CTX_SIZE,
     nBatch: 512,
     nThreads: 4
   });
@@ -345,22 +347,27 @@ async function testBranchPrefill() {
     }
     assert(gen1.length > 0, `Turn 1: generated ${gen1.length} tokens`);
 
-    let lastText = prompt + await ctx.detokenize(gen1);
-    let lastGen = gen1;  // Track last generation for multi-turn
+    // Track assistant response
+    const assistantText1 = await ctx.detokenize(gen1);
+    messages.push({ role: 'assistant', content: assistantText1 });
 
-    // Turn 2-3: prefill + generate
+    // Warm continuation: format only new message + turn separator
+    const sep = ctx.getTurnSeparator();
+
+    // Turn 2-3: prefill using format-only-new pattern + generate
     for (let t = 1; t < turns.length; t++) {
-      messages.push({ role: 'assistant', content: await ctx.detokenize(lastGen) });
       messages.push({ role: 'user', content: turns[t] });
-
-      const { prompt: fullPrompt } = await ctx.formatChat(JSON.stringify(messages));
-      const delta = fullPrompt.slice(lastText.length);
-      const deltaToks = await ctx.tokenize(delta);
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
+        { role: 'user', content: turns[t] }
+      ]));
+      const delta = await ctx.tokenize(prompt, false);
+      const prefillToks = [...sep, ...delta];
 
       const posBefore = branch.position;
-      branch.prefill(deltaToks);
-      assert(branch.position === posBefore + deltaToks.length,
-        `Turn ${t + 1}: prefill ${deltaToks.length} tokens → pos=${branch.position}`);
+      branch.prefill(prefillToks);
+      assert(branch.position === posBefore + prefillToks.length,
+        `Turn ${t + 1}: prefill ${prefillToks.length} tokens → pos=${branch.position}`);
 
       const gen = [];
       for (let i = 0; i < GEN_TOKENS; i++) {
@@ -371,13 +378,234 @@ async function testBranchPrefill() {
       }
       assert(gen.length > 0, `Turn ${t + 1}: generated ${gen.length} tokens`);
 
-      lastText = fullPrompt + await ctx.detokenize(gen);
-      lastGen = gen;  // Update for next turn
+      // Track assistant response
+      const assistantText = await ctx.detokenize(gen);
+      messages.push({ role: 'assistant', content: assistantText });
     }
 
     branch.prune();
   } finally {
     ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WARM MULTI-TURN SEMANTIC RECALL - Proves context survives warm continuations
+// Mirrors liblloyal C++ test: chat_in_integration_test.cpp
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testWarmMultiTurnRecall() {
+  console.log('\n--- Warm Multi-Turn Recall ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nBatch: 512,
+    nThreads: 4
+  });
+
+  try {
+    const sep = ctx.getTurnSeparator();
+
+    // Helper: generate until EOG (matches C++ test pattern)
+    async function generate(branch) {
+      const gen = [];
+      for (;;) {
+        const { token, isStop } = branch.produce();
+        if (isStop) break;
+        branch.commit(token);
+        gen.push(token);
+      }
+      return ctx.detokenize(gen);
+    }
+
+    // Helper: warm continuation — sep + format([{system,""},{user,msg}])
+    async function warmTurn(branch, userContent) {
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
+        { role: 'user', content: userContent }
+      ]), {});
+      const delta = await ctx.tokenize(prompt, false);
+      branch.prefill([...sep, ...delta]);
+      return generate(branch);
+    }
+
+    // Turn 1 (COLD): introduce name
+    const msgs1 = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
+    const { prompt, format, reasoningFormat } = await ctx.formatChat(JSON.stringify(msgs1), {});
+    const promptToks = await ctx.tokenize(prompt);
+    await ctx.decode(promptToks, 0, 0);
+
+    const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+    branch.captureLogits();
+
+    // Helper: parse output and check content (not reasoning) for a term
+    function checkRecall(rawText, term) {
+      const { content } = ctx.parseChatOutput(rawText, format, {
+        reasoningFormat,
+        isPartial: false,
+        thinkingForcedOpen: false
+      });
+      return (content || '').toLowerCase().includes(term.toLowerCase());
+    }
+
+    const turn1 = await generate(branch);
+    console.log(`  Turn 1: "${turn1.trim()}"`);
+    assert(turn1.length > 0, 'Turn 1: generated response');
+
+    // Turn 2 (WARM): introduce favourite food
+    const turn2 = await warmTurn(branch, 'My favourite food is pizza');
+    console.log(`  Turn 2: "${turn2.trim()}"`);
+    assert(turn2.length > 0, 'Turn 2: generated response');
+
+    // Turn 3 (WARM): recall name
+    const turn3 = await warmTurn(branch, 'Do you remember my name?');
+    console.log(`  Turn 3 (name recall): "${turn3.trim()}"`);
+    const nameRecalled = checkRecall(turn3, 'lloyal');
+    assert(nameRecalled, `Name recall: ${nameRecalled ? 'found "Lloyal"' : 'MISSING "Lloyal" in: ' + turn3.trim()}`);
+
+    // Turn 4 (WARM): recall food
+    const turn4 = await warmTurn(branch, 'Do you remember my favourite food?');
+    console.log(`  Turn 4 (food recall): "${turn4.trim()}"`);
+    const foodRecalled = checkRecall(turn4, 'pizza');
+    assert(foodRecalled, `Food recall: ${foodRecalled ? 'found "pizza"' : 'MISSING "pizza" in: ' + turn4.trim()}`);
+
+    branch.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WARM CONTINUATION SEMANTIC RECALL - Proves context survives delta-only prefill
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testWarmSemanticRecall() {
+  if (!EMBED_MODEL_PATH) {
+    console.log('\n--- Warm Semantic Recall (SKIPPED - no LLAMA_EMBED_MODEL) ---');
+    return;
+  }
+
+  console.log('\n--- Warm Semantic Recall ---');
+
+  const GEN_TOKENS = 40;
+
+  // Helper: cosine similarity
+  function cosine(a, b) {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      na += a[i] * a[i];
+      nb += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+  }
+
+  // Phase 1: Generate multi-turn conversation via warm continuation
+  let recallText;
+  {
+    const ctx = await addon.createContext({
+      modelPath: MODEL_PATH,
+      nCtx: CTX_SIZE,
+      nBatch: 512,
+      nThreads: 4
+    });
+
+    try {
+      const sep = ctx.getTurnSeparator();
+      let branch;
+      const messages = [];
+
+      // Helper: format-only-new warm continuation
+      async function warmTurn(userContent) {
+        messages.push({ role: 'user', content: userContent });
+        const { prompt } = await ctx.formatChat(JSON.stringify([
+          { role: 'system', content: '' },
+          { role: 'user', content: userContent }
+        ]));
+        const delta = await ctx.tokenize(prompt, false);
+        branch.prefill([...sep, ...delta]);
+
+        const gen = [];
+        for (let i = 0; i < GEN_TOKENS; i++) {
+          const { token, isStop } = branch.produce();
+          if (isStop) break;
+          branch.commit(token);
+          gen.push(token);
+        }
+        const text = await ctx.detokenize(gen);
+        messages.push({ role: 'assistant', content: text });
+        return text;
+      }
+
+      // Turn 1: Plant a specific, recallable fact
+      messages.push({ role: 'user', content: 'Remember this: my dog is named Max.' });
+      const { prompt } = await ctx.formatChat(JSON.stringify(messages));
+      const promptToks = await ctx.tokenize(prompt);
+      await ctx.decode(promptToks, 0, 0);
+
+      branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      branch.captureLogits();
+
+      // Generate turn 1 response
+      const gen = [];
+      for (let i = 0; i < GEN_TOKENS; i++) {
+        const { token, isStop } = branch.produce();
+        if (isStop) break;
+        branch.commit(token);
+        gen.push(token);
+      }
+      const turn1Response = await ctx.detokenize(gen);
+      messages.push({ role: 'assistant', content: turn1Response });
+
+      // Turn 2: Distractor
+      await warmTurn('What is 2 + 2?');
+
+      // Turn 3: Another distractor
+      await warmTurn('Name three colors.');
+
+      // Turn 4: Recall — only answerable from turn 1 context
+      recallText = await warmTurn('What is my dog\'s name?');
+
+      branch.prune();
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  // Phase 2: Score via embedding similarity (chat model fully released)
+  {
+    const embedCtx = await addon.createContext({
+      modelPath: EMBED_MODEL_PATH,
+      nCtx: 512,
+      nBatch: 512,
+      nThreads: 4,
+      embeddings: true,
+      poolingType: 1  // MEAN
+    });
+
+    try {
+      async function embed(text) {
+        const tokens = await embedCtx.tokenize(text);
+        await embedCtx.kvCacheClear();
+        await embedCtx.encode(tokens);
+        return embedCtx.getEmbeddings(true);
+      }
+
+      console.log(`  Recall response: "${recallText.trim()}"`);
+
+      const embResponse = await embed(recallText);
+      const embCorrect = await embed('The dog is named Max.');
+      const embWrong = await embed('Red, blue, and green are three colors.');
+
+      const simCorrect = cosine(embResponse, embCorrect);
+      const simWrong = cosine(embResponse, embWrong);
+
+      assert(simCorrect > simWrong,
+        `Semantic recall: correct=${simCorrect.toFixed(3)} > wrong=${simWrong.toFixed(3)}`);
+    } finally {
+      embedCtx.dispose();
+    }
   }
 }
 
@@ -390,7 +618,7 @@ async function testBranchSteer() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 
@@ -494,7 +722,7 @@ async function testNBatchAblation() {
   for (const nBatch of nBatchValues) {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 1024,
+      nCtx: CTX_SIZE,
       nBatch,
       nThreads: 4
     });
@@ -583,7 +811,7 @@ async function testDeterminism() {
   async function generate(prompt) {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 512,
+      nCtx: CTX_SIZE,
       nThreads: 4
     });
 
@@ -694,7 +922,7 @@ async function testDecodeAndCapture() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 
@@ -726,6 +954,62 @@ async function testDecodeAndCapture() {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
+async function testChatInOut(ctx) {
+  console.log('\n── chat_in / chat_out ──');
+
+  // formatChat with empty options object (new signature)
+  const messages = [{ role: 'user', content: 'Hello' }];
+  const result = await ctx.formatChat(JSON.stringify(messages), {});
+  assert(result.prompt.includes('Hello'), 'formatChat with options: prompt contains Hello');
+  assert(typeof result.format === 'number', 'formatChat returns format as number');
+  assert(typeof result.grammar === 'string', 'formatChat returns grammar as string');
+  assert(typeof result.grammarLazy === 'boolean', 'formatChat returns grammarLazy');
+  assert(typeof result.thinkingForcedOpen === 'boolean', 'formatChat returns thinkingForcedOpen');
+  assert(typeof result.reasoningFormat === 'number', 'formatChat returns reasoningFormat');
+  assert(Array.isArray(result.grammarTriggers), 'formatChat returns grammarTriggers array');
+  assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
+  ok('formatChat with options returns extended result');
+
+  // Backward compat: string second argument still works
+  const backCompat = await ctx.formatChat(JSON.stringify(messages));
+  assert(backCompat.prompt.includes('Hello'), 'formatChat backward compat works');
+  ok('formatChat backward compat (no second arg)');
+
+  // formatChat with tools
+  const tools = [{
+    type: 'function',
+    function: {
+      name: 'get_weather',
+      description: 'Get weather',
+      parameters: { type: 'object', properties: { location: { type: 'string' } } }
+    }
+  }];
+  const toolResult = await ctx.formatChat(JSON.stringify(messages), {
+    tools: JSON.stringify(tools),
+    toolChoice: 'auto'
+  });
+  assert(typeof toolResult.format === 'number', 'formatChat with tools returns format');
+  assert(typeof toolResult.grammar === 'string', 'formatChat with tools returns grammar');
+  ok('formatChat with tools');
+
+  // parseChatOutput
+  const parsed = ctx.parseChatOutput('Hello world', toolResult.format);
+  assert(typeof parsed.content === 'string', 'parseChatOutput returns content');
+  assert(parsed.content.includes('Hello'), 'parseChatOutput content contains Hello');
+  assert(typeof parsed.reasoningContent === 'string', 'parseChatOutput returns reasoningContent');
+  assert(Array.isArray(parsed.toolCalls), 'parseChatOutput returns toolCalls array');
+  ok('parseChatOutput basic');
+
+  // parseChatOutput with options
+  const parsedWithOpts = ctx.parseChatOutput('Some output', toolResult.format, {
+    reasoningFormat: toolResult.reasoningFormat,
+    isPartial: false,
+    thinkingForcedOpen: false
+  });
+  assert(typeof parsedWithOpts.content === 'string', 'parseChatOutput with options');
+  ok('parseChatOutput with options');
+}
+
 async function main() {
   let mainCtx = null;
 
@@ -733,21 +1017,24 @@ async function main() {
     // Create main context for reusable tests
     mainCtx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 512,
+      nCtx: CTX_SIZE,
       nThreads: 4
     });
-    ok(`createContext() → vocabSize=${mainCtx.vocabSize}`);
+    ok(`createContext(nCtx=${CTX_SIZE}) → vocabSize=${mainCtx.vocabSize}`);
 
     // Run test suites
     await testCoreAPI(mainCtx);
     await testKVCache(mainCtx);
     await testMetrics(mainCtx);
     await testTokenizer(mainCtx);
+    await testChatInOut(mainCtx);
 
     // Tests that create their own contexts
     await testMultiSequence();
     await testGrammar();
     await testBranchPrefill();
+    await testWarmMultiTurnRecall();
+    await testWarmSemanticRecall();
     await testBranchSteer();
     await testNBatchAblation();
     await testDeterminism();

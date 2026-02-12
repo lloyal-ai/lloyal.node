@@ -60,9 +60,10 @@ async function main() {
 
   emit('start', { model: path.basename(modelPath) });
 
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const ctx = await createContext({
     modelPath,
-    contextSize: 2048,
+    nCtx,
     nSeqMax: 4,
   });
 

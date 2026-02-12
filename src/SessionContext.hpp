@@ -4,6 +4,7 @@
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/metrics.hpp>
 #include <lloyal/branch.hpp>
+#include <lloyal/chat_in.hpp>
 #include <llama/llama.h>
 #include <memory>
 #include <mutex>
@@ -142,6 +143,7 @@ private:
    * Returns: Promise<{ prompt: string, stopTokens: string[] }>
    */
   Napi::Value formatChat(const Napi::CallbackInfo& info);
+  Napi::Value parseChatOutput(const Napi::CallbackInfo& info);
 
   /**
    * Get current KV cache position (number of tokens in cache)

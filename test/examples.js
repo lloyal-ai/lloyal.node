@@ -9,7 +9,7 @@
  *   node test/examples.js entropy   # Run specific example
  *
  * Environment variables:
- *   MODEL_PATH       - Path to chat/instruct model (default: SmolLM2)
+ *   LLAMA_TEST_MODEL  - Path to chat/instruct model (default: SmolLM2)
  *   EMBED_MODEL_PATH - Path to embedding model (default: nomic-embed)
  */
 
@@ -18,8 +18,8 @@ const path = require('path');
 const fs = require('fs');
 
 // Model paths - use env var or default (resolve to absolute path)
-const MODEL_PATH = process.env.MODEL_PATH
-  ? path.resolve(process.env.MODEL_PATH)
+const MODEL_PATH = process.env.LLAMA_TEST_MODEL
+  ? path.resolve(process.env.LLAMA_TEST_MODEL)
   : path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
 
 // Embedding model (separate from chat model, resolve to absolute path)
