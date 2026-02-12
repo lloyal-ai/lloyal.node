@@ -11,18 +11,11 @@ on:
       - 'test/**'
       - 'CMakeLists.txt'
   workflow_dispatch:
-    inputs:
-      skip_build:
-        description: 'Skip build step (use existing artifacts)'
-        type: boolean
-        default: false
 
 jobs:
-  # Build CUDA package for testing
-  # Skipped when called from release.yml (packages already built)
   build-cuda-package:
     name: Build linux-x64-cuda
-    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && inputs.skip_build != true }}
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -81,7 +74,7 @@ jobs:
   gpu-integration:
     name: GPU Tests (L4)
     needs: build-cuda-package
-    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && !cancelled() && (needs.build-cuda-package.result == 'success' || needs.build-cuda-package.result == 'skipped') }}
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && needs.build-cuda-package.result == 'success' }}
     uses: lloyal-ai/lloyal-infra/.github/workflows/gpu-integration.yml@main
     secrets: inherit
     permissions:
