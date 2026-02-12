@@ -90,7 +90,7 @@ while IFS= read -r model; do
 
   # --- Integration tests ---
   echo "── Integration Tests ──"
-  MODEL_PATH="models/$file" \
+  LLAMA_TEST_MODEL="models/$file" \
   node test/integration.js 2>&1 | tee "$MODEL_LOG"
   INT_EXIT=${PIPESTATUS[0]}
 
@@ -101,7 +101,7 @@ while IFS= read -r model; do
   # --- Example tests ---
   echo ""
   echo "── Example Tests ──"
-  MODEL_PATH="models/$file" \
+  LLAMA_TEST_MODEL="models/$file" \
   node test/examples.js 2>&1 | tee -a "$MODEL_LOG"
   EX_EXIT=${PIPESTATUS[0]}
 

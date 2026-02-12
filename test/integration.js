@@ -6,7 +6,7 @@
  *
  * Usage:
  *   npm run test:integration
- *   MODEL_PATH=models/Llama-3.2-1B-Instruct-Q4_K_M.gguf npm run test:integration
+ *   LLAMA_TEST_MODEL=models/Llama-3.2-1B-Instruct-Q4_K_M.gguf npm run test:integration
  *
  * Optional embedding tests:
  *   LLAMA_EMBED_MODEL=models/nomic-embed-text-v1.5.Q4_K_M.gguf npm run test:integration
@@ -15,8 +15,8 @@
 const path = require('path');
 const fs = require('fs');
 
-const MODEL_PATH = process.env.MODEL_PATH
-  ? path.resolve(process.env.MODEL_PATH)
+const MODEL_PATH = process.env.LLAMA_TEST_MODEL
+  ? path.resolve(process.env.LLAMA_TEST_MODEL)
   : path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
 const EMBED_MODEL_PATH = process.env.LLAMA_EMBED_MODEL ||
   (fs.existsSync(path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'))
@@ -424,7 +424,7 @@ async function testWarmMultiTurnRecall() {
       const { prompt } = await ctx.formatChat(JSON.stringify([
         { role: 'system', content: '' },
         { role: 'user', content: userContent }
-      ]));
+      ]), {});
       const delta = await ctx.tokenize(prompt, false);
       branch.prefill([...sep, ...delta]);
       return generate(branch);
@@ -439,38 +439,36 @@ async function testWarmMultiTurnRecall() {
     const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
     branch.captureLogits();
 
-    // Helper: parse output and check both content and reasoning for a term
-    // Handles thinking models (Qwen3, DeepSeek-R1) where answer may be in <think> blocks
+    // Helper: parse output and check content (not reasoning) for a term
     function checkRecall(rawText, term) {
-      const { content, reasoningContent } = ctx.parseChatOutput(rawText, format, {
+      const { content } = ctx.parseChatOutput(rawText, format, {
         reasoningFormat,
         isPartial: false,
         thinkingForcedOpen: false
       });
-      const fullText = (content || '') + ' ' + (reasoningContent || '');
-      return fullText.toLowerCase().includes(term.toLowerCase());
+      return (content || '').toLowerCase().includes(term.toLowerCase());
     }
 
     const turn1 = await generate(branch);
-    console.log(`  Turn 1: "${turn1.trim().slice(0, 80)}"`);
+    console.log(`  Turn 1: "${turn1.trim()}"`);
     assert(turn1.length > 0, 'Turn 1: generated response');
 
     // Turn 2 (WARM): introduce favourite food
     const turn2 = await warmTurn(branch, 'My favourite food is pizza');
-    console.log(`  Turn 2: "${turn2.trim().slice(0, 80)}"`);
+    console.log(`  Turn 2: "${turn2.trim()}"`);
     assert(turn2.length > 0, 'Turn 2: generated response');
 
     // Turn 3 (WARM): recall name
     const turn3 = await warmTurn(branch, 'Do you remember my name?');
-    console.log(`  Turn 3 (name recall): "${turn3.trim().slice(0, 80)}"`);
+    console.log(`  Turn 3 (name recall): "${turn3.trim()}"`);
     const nameRecalled = checkRecall(turn3, 'lloyal');
-    assert(nameRecalled, `Name recall: ${nameRecalled ? 'found "Lloyal"' : 'MISSING "Lloyal" in: ' + turn3.trim().slice(0, 120)}`);
+    assert(nameRecalled, `Name recall: ${nameRecalled ? 'found "Lloyal"' : 'MISSING "Lloyal" in: ' + turn3.trim()}`);
 
     // Turn 4 (WARM): recall food
     const turn4 = await warmTurn(branch, 'Do you remember my favourite food?');
-    console.log(`  Turn 4 (food recall): "${turn4.trim().slice(0, 80)}"`);
+    console.log(`  Turn 4 (food recall): "${turn4.trim()}"`);
     const foodRecalled = checkRecall(turn4, 'pizza');
-    assert(foodRecalled, `Food recall: ${foodRecalled ? 'found "pizza"' : 'MISSING "pizza" in: ' + turn4.trim().slice(0, 120)}`);
+    assert(foodRecalled, `Food recall: ${foodRecalled ? 'found "pizza"' : 'MISSING "pizza" in: ' + turn4.trim()}`);
 
     branch.prune();
   } finally {
@@ -594,7 +592,7 @@ async function testWarmSemanticRecall() {
         return embedCtx.getEmbeddings(true);
       }
 
-      console.log(`  Recall response: "${recallText.trim().slice(0, 120)}"`);
+      console.log(`  Recall response: "${recallText.trim()}"`);
 
       const embResponse = await embed(recallText);
       const embCorrect = await embed('The dog is named Max.');
