@@ -307,11 +307,11 @@ jobs:
           path: packages/${{ matrix.package }}/
           retention-days: 1
 
-  # GPU Integration Tests (reusable workflow from private infra repo)
+  # GPU Integration Tests (reusable workflow)
   gpu-tests:
     name: GPU Tests
     needs: build-and-test
-    uses: lloyal-ai/lloyal-infra/.github/workflows/gpu-integration.yml@main
+    uses: ./.github/workflows/gpu-test.yml
     secrets: inherit
     permissions:
       contents: read

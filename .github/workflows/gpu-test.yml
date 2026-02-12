@@ -11,11 +11,17 @@ on:
       - 'test/**'
       - 'CMakeLists.txt'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      skip_build:
+        description: 'Skip build step (packages already built by caller)'
+        type: boolean
+        default: true
 
 jobs:
   build-cuda-package:
     name: Build linux-x64-cuda
-    if: ${{ github.repository == 'lloyal-ai/lloyal.node' }}
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && inputs.skip_build != true }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -69,14 +75,54 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # GPU Integration Tests via Cloud Run (L4)
-  # Infrastructure details are in the private lloyal-infra repo
   gpu-integration:
     name: GPU Tests (L4)
     needs: build-cuda-package
-    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && needs.build-cuda-package.result == 'success' }}
-    uses: lloyal-ai/lloyal-infra/.github/workflows/gpu-integration.yml@main
-    secrets: inherit
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && !cancelled() && (needs.build-cuda-package.result == 'success' || needs.build-cuda-package.result == 'skipped') }}
+
     permissions:
       contents: read
       id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout infrastructure scripts
+        uses: actions/checkout@v4
+        with:
+          repository: lloyal-ai/lloyal-infra
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: ci
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-linux-x64-cuda
+          path: packages/package-linux-x64-cuda
+
+      - name: Build and push GPU test image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:${{ github.sha }}-cuda"
+          docker build -f ci/Dockerfile.gpu-tests -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy and run GPU tests
+        run: bash ci/deploy-gpu-tests.sh
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
