@@ -28,9 +28,36 @@ runs:
         method: 'network'
         sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
 
-    # Linux x64: Install from NVIDIA repos
-    - name: Install CUDA (Linux x64)
-      if: runner.os == 'Linux' && inputs.arch == 'x64'
+    # Linux: Compute version info for cache key
+    - name: Compute CUDA version info
+      id: cuda-info
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        echo "major-minor=$(echo $VERSION | cut -d. -f1,2)" >> $GITHUB_OUTPUT
+
+    # Linux: Cache CUDA toolkit directory (~2-3 GB, saves 3-5 min install)
+    - name: Cache CUDA toolkit
+      if: runner.os == 'Linux'
+      id: cuda-cache
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/cuda-${{ steps.cuda-info.outputs.major-minor }}
+        key: cuda-toolkit-${{ inputs.version }}-${{ inputs.arch }}
+
+    # Linux: Install build dependencies (always needed, fast from apt cache)
+    - name: Install build tools
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq build-essential cmake
+
+    # Linux x64: Install CUDA toolkit (cache miss only)
+    - name: Install CUDA toolkit (Linux x64)
+      if: runner.os == 'Linux' && inputs.arch == 'x64' && steps.cuda-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
@@ -42,18 +69,11 @@ runs:
         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update -qq
-        sudo apt-get install -y -qq cuda-toolkit-${version_slug} build-essential cmake
+        sudo apt-get install -y -qq cuda-toolkit-${version_slug}
 
-        cuda_path="/usr/local/cuda-${version_major_minor}"
-        echo "CUDA_PATH=${cuda_path}" >> $GITHUB_ENV
-        echo "${cuda_path}/bin" >> $GITHUB_PATH
-        echo "LD_LIBRARY_PATH=${cuda_path}/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-
-        echo "CUDA installed at: ${cuda_path}"
-
-    # Linux ARM64: Install from NVIDIA repos
-    - name: Install CUDA (Linux ARM64)
-      if: runner.os == 'Linux' && inputs.arch == 'arm64'
+    # Linux ARM64: Install CUDA toolkit (cache miss only)
+    - name: Install CUDA toolkit (Linux ARM64)
+      if: runner.os == 'Linux' && inputs.arch == 'arm64' && steps.cuda-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
@@ -65,14 +85,19 @@ runs:
         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/arm64/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update -qq
-        sudo apt-get install -y -qq cuda-toolkit-${version_slug} build-essential cmake
+        sudo apt-get install -y -qq cuda-toolkit-${version_slug}
 
-        cuda_path="/usr/local/cuda-${version_major_minor}"
+    # Linux: Set CUDA environment variables (always - cached or fresh install)
+    - name: Set CUDA environment
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        cuda_path="/usr/local/cuda-${{ steps.cuda-info.outputs.major-minor }}"
         echo "CUDA_PATH=${cuda_path}" >> $GITHUB_ENV
         echo "${cuda_path}/bin" >> $GITHUB_PATH
         echo "LD_LIBRARY_PATH=${cuda_path}/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
-        echo "CUDA installed at: ${cuda_path}"
+        echo "CUDA ready at: ${cuda_path}"
 
     # Set output
     - name: Set CUDA path output

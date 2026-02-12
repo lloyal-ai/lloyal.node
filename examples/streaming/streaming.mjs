@@ -42,7 +42,7 @@ function emit(event, data) {
 
 async function main() {
   // BlinkKV paper parameters: 2048 context, 4 sinks, 256 tail
-  const nCtx = 2048;
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const SINK_COUNT = 4;
   const TAIL_SIZE = 256;
 
@@ -54,7 +54,7 @@ async function main() {
 
   const ctx = await createContext({
     modelPath,
-    contextSize: nCtx,
+    nCtx,
   });
 
   const prompt = `Write a comprehensive guide to machine learning, covering the following topics in extreme detail with examples, code snippets, and mathematical formulas:

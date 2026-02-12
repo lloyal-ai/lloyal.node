@@ -160,9 +160,10 @@ async function main() {
 
   emit('start', { model: path.basename(modelPath), T0, N, THETA });
 
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const ctx = await createContext({
     modelPath,
-    contextSize: 2048,
+    nCtx,
   });
 
   // Test 1: Factual question (expect low entropy, EDT should use low temp)

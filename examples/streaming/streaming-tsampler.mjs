@@ -133,7 +133,7 @@ class NgramTracker {
 
 async function main() {
   // BlinkKV parameters
-  const nCtx = 2048;
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const TAIL_SIZE = 256;
   const NGRAM_SIZE = 6; // Track 6-grams for sequence detection
   const BLOCK_THRESHOLD = 2; // Only block after seeing same pattern K times
@@ -146,7 +146,7 @@ async function main() {
 
   const ctx = await createContext({
     modelPath,
-    contextSize: nCtx,
+    nCtx,
   });
 
   const prompt = `Write a comprehensive guide to machine learning, covering the following topics in extreme detail with examples, code snippets, and mathematical formulas:

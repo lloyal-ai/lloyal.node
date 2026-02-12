@@ -193,7 +193,7 @@ function buildProgressSink(anchor, outline, allGeneratedText, summaryChain) {
 
 async function main() {
   // Constants
-  const nCtx = 2048;
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const TAIL_SIZE = 256;
   const MAX_SINK_RATIO = 0.4;
   const MAX_SINK_TOKENS = Math.floor(nCtx * MAX_SINK_RATIO);
@@ -218,7 +218,7 @@ async function main() {
 
   const ctx = await createContext({
     modelPath,
-    contextSize: nCtx,
+    nCtx,
   });
 
   // Summary sidecar — preload in background (overlaps with prompt decode + generation)
@@ -232,20 +232,20 @@ async function main() {
     // Sidecar mode: use slim-summarize.gguf
     const summaryModelAvailable = fs.existsSync(SUMMARY_MODEL);
     if (summaryModelAvailable) {
-      summaryCtxPromise = createContext({ modelPath: SUMMARY_MODEL, contextSize: 4096 });
+      summaryCtxPromise = createContext({ modelPath: SUMMARY_MODEL, nCtx: 4096 });
     } else {
       if (!jsonlMode) {
         console.log('Sidecar model not found - falling back to self-summary');
       }
       emit('sidecar_missing', { message: 'slim-summarize.gguf not found, using self-summary' });
       // Fall back to self mode
-      summaryCtxPromise = createContext({ modelPath, contextSize: 4096 });
+      summaryCtxPromise = createContext({ modelPath, nCtx: 4096 });
       actualSummaryFormat = 'self';
     }
   } else {
     // Self mode (default): second context from same model
     // Weights are shared via model_registry — only KV cache is duplicated
-    summaryCtxPromise = createContext({ modelPath, contextSize: 4096 });
+    summaryCtxPromise = createContext({ modelPath, nCtx: 4096 });
   }
 
   const prompt = `Write a comprehensive guide to machine learning, covering the following topics in extreme detail with examples, code snippets, and mathematical formulas:

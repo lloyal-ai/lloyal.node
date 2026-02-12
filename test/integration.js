@@ -166,7 +166,7 @@ async function testMultiSequence() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4,
     nSeqMax: 4
   });
@@ -201,7 +201,7 @@ async function testGrammar() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 
@@ -432,12 +432,24 @@ async function testWarmMultiTurnRecall() {
 
     // Turn 1 (COLD): introduce name
     const msgs1 = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
-    const { prompt } = await ctx.formatChat(JSON.stringify(msgs1));
+    const { prompt, format, reasoningFormat } = await ctx.formatChat(JSON.stringify(msgs1), {});
     const promptToks = await ctx.tokenize(prompt);
     await ctx.decode(promptToks, 0, 0);
 
     const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
     branch.captureLogits();
+
+    // Helper: parse output and check both content and reasoning for a term
+    // Handles thinking models (Qwen3, DeepSeek-R1) where answer may be in <think> blocks
+    function checkRecall(rawText, term) {
+      const { content, reasoningContent } = ctx.parseChatOutput(rawText, format, {
+        reasoningFormat,
+        isPartial: false,
+        thinkingForcedOpen: false
+      });
+      const fullText = (content || '') + ' ' + (reasoningContent || '');
+      return fullText.toLowerCase().includes(term.toLowerCase());
+    }
 
     const turn1 = await generate(branch);
     console.log(`  Turn 1: "${turn1.trim().slice(0, 80)}"`);
@@ -451,13 +463,13 @@ async function testWarmMultiTurnRecall() {
     // Turn 3 (WARM): recall name
     const turn3 = await warmTurn(branch, 'Do you remember my name?');
     console.log(`  Turn 3 (name recall): "${turn3.trim().slice(0, 80)}"`);
-    const nameRecalled = turn3.toLowerCase().includes('lloyal');
+    const nameRecalled = checkRecall(turn3, 'lloyal');
     assert(nameRecalled, `Name recall: ${nameRecalled ? 'found "Lloyal"' : 'MISSING "Lloyal" in: ' + turn3.trim().slice(0, 120)}`);
 
     // Turn 4 (WARM): recall food
     const turn4 = await warmTurn(branch, 'Do you remember my favourite food?');
     console.log(`  Turn 4 (food recall): "${turn4.trim().slice(0, 80)}"`);
-    const foodRecalled = turn4.toLowerCase().includes('pizza');
+    const foodRecalled = checkRecall(turn4, 'pizza');
     assert(foodRecalled, `Food recall: ${foodRecalled ? 'found "pizza"' : 'MISSING "pizza" in: ' + turn4.trim().slice(0, 120)}`);
 
     branch.prune();
@@ -608,7 +620,7 @@ async function testBranchSteer() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 
@@ -712,7 +724,7 @@ async function testNBatchAblation() {
   for (const nBatch of nBatchValues) {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 1024,
+      nCtx: CTX_SIZE,
       nBatch,
       nThreads: 4
     });
@@ -801,7 +813,7 @@ async function testDeterminism() {
   async function generate(prompt) {
     const ctx = await addon.createContext({
       modelPath: MODEL_PATH,
-      nCtx: 512,
+      nCtx: CTX_SIZE,
       nThreads: 4
     });
 
@@ -912,7 +924,7 @@ async function testDecodeAndCapture() {
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
-    nCtx: 512,
+    nCtx: CTX_SIZE,
     nThreads: 4
   });
 

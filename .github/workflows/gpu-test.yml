@@ -48,25 +48,29 @@ jobs:
         run: node scripts/sync-llama-cpp.js --check
         shell: bash
 
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake
-
       # CUDA 12.2.2 required for Cloud Run L4 GPU (driver 535.x)
+      # provision-cuda also installs build-essential + cmake
       - name: Provision CUDA toolkit
         uses: ./.github/actions/provision-cuda
         with:
           version: '12.2.2'
           arch: x64
 
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cuda-build-${{ runner.os }}
+
       - name: Install npm dependencies
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       - name: Build native module
         run: npm run build
         env:
           LLOYAL_GPU: cuda
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
 
       - name: Create platform package
         run: node scripts/create-platform-package.js linux-x64-cuda ubuntu-22.04 x64
@@ -77,6 +81,7 @@ jobs:
           name: package-linux-x64-cuda
           path: packages/linux-x64-cuda/
           retention-days: 1
+          compression-level: 0
 
   # GPU Integration Tests via Cloud Run
   # Runs real GPU tests on NVIDIA L4

@@ -30,9 +30,10 @@ async function main() {
   console.log(`Loading model: ${modelPath}`);
   console.log("This may take a moment...\n");
 
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const ctx = await createContext({
     modelPath,
-    contextSize: 2048,
+    nCtx,
     threads: 4,
   });
 

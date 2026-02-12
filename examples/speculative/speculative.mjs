@@ -92,9 +92,10 @@ async function main() {
     generationLength: GENERATION_LENGTH,
   });
 
+  const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
   const ctx = await createContext({
     modelPath,
-    contextSize: 2048,
+    nCtx,
     nSeqMax: 4, // Enable multi-sequence for fork/verify pattern
   });
 

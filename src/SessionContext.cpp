@@ -2102,9 +2102,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   std::cout << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
 
   // Load model on main thread
-  // Note: With XCFramework build, this works reliably on main thread
-  // (async loading was failing with CMake build due to binary incompatibility)
-  std::cout << "[CreateContext] Loading model from XCFramework..." << std::endl;
+  std::cout << "[CreateContext] Loading model..." << std::endl;
 
   llama_model_params model_params = llama_model_default_params();
   // -1 = offload all layers to GPU (auto-detect), 0 = CPU only
