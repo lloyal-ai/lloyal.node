@@ -9,7 +9,6 @@ on:
       - 'lib/**'
       - 'src/**'
       - 'test/**'
-      - 'ci/**'
       - 'CMakeLists.txt'
   workflow_dispatch:
     inputs:
@@ -17,19 +16,13 @@ on:
         description: 'Skip build step (use existing artifacts)'
         type: boolean
         default: false
-  workflow_call:
-    inputs:
-      skip_build:
-        description: 'Skip build step (packages already built by caller)'
-        type: boolean
-        default: true
 
 jobs:
   # Build CUDA package for testing
   # Skipped when called from release.yml (packages already built)
   build-cuda-package:
     name: Build linux-x64-cuda
-    if: ${{ inputs.skip_build != true }}
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && inputs.skip_build != true }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -83,155 +76,14 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # GPU Integration Tests via Cloud Run
-  # Runs real GPU tests on NVIDIA L4
-  #
-  # L4 GPU Requirements (as of 2024):
-  #   - Driver: 535.216.03 (supports CUDA 12.2.2 max)
-  #   - Minimum: 4 CPU, 16 GiB memory
-  #   - Regions: us-central1, us-east4, europe-west1, europe-west4, asia-southeast1
-  #   - Quota: 3 L4 GPUs per region (default)
+  # GPU Integration Tests via Cloud Run (L4)
+  # Infrastructure details are in the private lloyal-infra repo
   gpu-integration:
     name: GPU Tests (L4)
     needs: build-cuda-package
-    runs-on: ubuntu-latest
-    # Run if build succeeded OR was skipped (packages from caller)
-    if: ${{ !cancelled() && (needs.build-cuda-package.result == 'success' || needs.build-cuda-package.result == 'skipped') }}
-
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' && !cancelled() && (needs.build-cuda-package.result == 'success' || needs.build-cuda-package.result == 'skipped') }}
+    uses: lloyal-ai/lloyal-infra/.github/workflows/gpu-integration.yml@main
+    secrets: inherit
     permissions:
       contents: read
-      id-token: write  # Required for Workload Identity Federation
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SA_EMAIL }}
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker us-east4-docker.pkg.dev --quiet
-
-      - name: Download package artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: package-linux-x64-cuda
-          path: packages/package-linux-x64-cuda
-
-      - name: Build GPU test image
-        run: |
-          IMAGE="us-east4-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lloyal-ci/gpu-tests:${{ github.sha }}-cuda"
-          docker build \
-            -f ci/Dockerfile.gpu-tests \
-            -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-
-      - name: Deploy Cloud Run Job
-        run: |
-          JOB_NAME="lloyal-gpu-test-cuda"
-
-          # Check if job exists
-          if gcloud run jobs describe $JOB_NAME --region=us-east4 2>/dev/null; then
-            gcloud run jobs update $JOB_NAME \
-              --region=us-east4 \
-              --image="${IMAGE}" \
-              --service-account="${{ secrets.GCP_SA_EMAIL }}" \
-              --set-env-vars=LLOYAL_GPU=cuda,LLOYAL_NO_FALLBACK=1 \
-              --task-timeout=20m \
-              --no-gpu-zonal-redundancy
-          else
-            gcloud run jobs create $JOB_NAME \
-              --region=us-east4 \
-              --image="${IMAGE}" \
-              --service-account="${{ secrets.GCP_SA_EMAIL }}" \
-              --set-env-vars=LLOYAL_GPU=cuda,LLOYAL_NO_FALLBACK=1 \
-              --task-timeout=20m \
-              --gpu=1 \
-              --gpu-type=nvidia-l4 \
-              --memory=16Gi \
-              --cpu=4 \
-              --max-retries=0 \
-              --no-gpu-zonal-redundancy
-          fi
-
-      - name: Run GPU tests
-        run: |
-          JOB_NAME="lloyal-gpu-test-cuda"
-          REGION="us-east4"
-
-          # Launch job asynchronously so we can stream logs
-          EXEC=$(gcloud run jobs execute $JOB_NAME \
-            --region=$REGION \
-            --async \
-            --format='value(metadata.name)')
-
-          echo "Execution: $EXEC"
-          echo "Streaming logs (container startup may take ~30s)..."
-          echo ""
-
-          # Filter for this specific execution's logs
-          LOG_FILTER="resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB_NAME\" AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\""
-
-          # Poll loop: stream new log lines + check for completion
-          SEEN=0
-          while true; do
-            # Check if execution has completed
-            COMPLETION=$(gcloud run jobs executions describe "$EXEC" \
-              --region="$REGION" \
-              --format='value(status.completionTime)' 2>/dev/null || true)
-
-            # Fetch all logs for this execution in chronological order
-            LOGS=$(gcloud logging read "$LOG_FILTER" \
-              --limit=10000 \
-              --order=asc \
-              --format='value(textPayload)' 2>/dev/null || true)
-
-            # Print only lines we haven't seen yet
-            if [ -n "$LOGS" ]; then
-              TOTAL=$(echo "$LOGS" | wc -l | tr -d ' ')
-              if [ "$TOTAL" -gt "$SEEN" ]; then
-                echo "$LOGS" | tail -n +$((SEEN + 1))
-                SEEN=$TOTAL
-              fi
-            fi
-
-            # If done, do one final fetch for stragglers then break
-            if [ -n "$COMPLETION" ]; then
-              sleep 5
-              LOGS=$(gcloud logging read "$LOG_FILTER" \
-                --limit=10000 \
-                --order=asc \
-                --format='value(textPayload)' 2>/dev/null || true)
-              if [ -n "$LOGS" ]; then
-                TOTAL=$(echo "$LOGS" | wc -l | tr -d ' ')
-                if [ "$TOTAL" -gt "$SEEN" ]; then
-                  echo "$LOGS" | tail -n +$((SEEN + 1))
-                fi
-              fi
-              break
-            fi
-
-            sleep 10
-          done
-
-          # Determine pass/fail from execution status
-          SUCCEEDED=$(gcloud run jobs executions describe "$EXEC" \
-            --region="$REGION" \
-            --format=json 2>/dev/null | \
-            jq -r '.status.conditions[] | select(.type == "Completed") | .status')
-
-          if [ "$SUCCEEDED" = "True" ]; then
-            echo ""
-            echo "✅ GPU Tests Passed"
-          else
-            echo ""
-            echo "❌ GPU Tests Failed"
-            exit 1
-          fi
+      id-token: write
