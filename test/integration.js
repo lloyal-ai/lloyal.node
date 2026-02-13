@@ -34,7 +34,7 @@ console.log('=== lloyal.node Integration Tests ===\n');
 console.log(`Model: ${path.basename(MODEL_PATH)}`);
 console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(1)} MB\n`);
 
-const { loadBinary, Branch, withLogits } = require('..');
+const { loadBinary, Branch, BranchStore, withLogits } = require('..');
 let addon;
 try {
   addon = require('../build/Release/lloyal.node');
@@ -1010,6 +1010,289 @@ async function testChatInOut(ctx) {
   ok('parseChatOutput with options');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// BRANCH STORE TESTS
+// Production patterns for the JS BranchStore API. Low-level primitive
+// correctness (batch index mapping, scatter chunking, scratch reuse) is
+// verified in liblloyal C++ integration tests — these focus on the JS
+// wrapper surface and real-world workflows.
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testBranchStore() {
+  console.log('\n--- BranchStore ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 4
+  });
+
+  try {
+    const promptToks = await ctx.tokenize("The quick brown fox jumps over the lazy");
+    const store = new BranchStore(ctx);
+
+    // ── Test A: Best-of-N generation ──
+    // Fork 3 greedy branches, advance all with store.commit(), select by perplexity.
+    // Tests: batched generation loop, perplexity accumulation through accept_token,
+    // Branch.perplexity accessor after store ops.
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const root = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      root.captureLogits();
+      const branches = [root, root.fork(1), root.fork(2)];
+
+      for (let step = 0; step < 10; step++) {
+        const live = branches.map(b => [b, b.produce()])
+          .filter(([, p]) => !p.isStop);
+        if (!live.length) break;
+        store.commit(live.map(([b, p]) => [b, p.token]));
+      }
+
+      // All branches should have valid perplexity (metrics tracked through _storeCommit)
+      const ppls = branches.map(b => b.perplexity);
+      console.log(`  best-of-N perplexities: [${ppls.map(p => p.toFixed(2)).join(', ')}]`);
+      assert(ppls.every(p => isFinite(p) && p >= 1.0),
+        `best-of-N: all perplexities valid [${ppls.map(p => p.toFixed(2))}]`);
+
+      // Greedy forks from same root → same perplexity (sanity check)
+      assert(Math.abs(ppls[0] - ppls[1]) < 0.01,
+        `best-of-N: greedy forks have equal perplexity`);
+
+      branches.forEach(b => b.prune());
+    }
+
+    // ── Test B: Rehydrate + Generate pipeline ──
+    // Restore divergent conversation histories via store.prefill(), then continue
+    // generating with store.commit(). This is the persistence/replay pattern.
+    // Tests: prefill→commit lifecycle, metrics across phase transition, getLogits().
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      b1.captureLogits();
+      const b2 = b1.fork(1);
+
+      // Phase 1: Rehydrate from "saved" histories
+      const history1 = await ctx.tokenize(" dog. The weather is nice today and I want to go", false);
+      const history2 = await ctx.tokenize(" cat. Let me explain how quantum entanglement works in", false);
+      store.prefill([[b1, history1], [b2, history2]]);
+
+      // Branches should be at different-length positions? No — same length coincidentally.
+      // But logits must differ (different KV contents)
+      const logitsAfterPrefill1 = b1.getLogits();
+      const logitsAfterPrefill2 = b2.getLogits();
+      let prefillDiffer = false;
+      for (let i = 0; i < logitsAfterPrefill1.length; i++) {
+        if (logitsAfterPrefill1[i] !== logitsAfterPrefill2[i]) { prefillDiffer = true; break; }
+      }
+      assert(prefillDiffer,
+        `rehydrate: different histories → different logits after prefill`);
+
+      // Phase 2: Generate continuations
+      const gen1 = [], gen2 = [];
+      for (let i = 0; i < 5; i++) {
+        const live = [[b1, b1.produce()], [b2, b2.produce()]]
+          .filter(([, p]) => !p.isStop);
+        if (!live.length) break;
+        store.commit(live.map(([b, p]) => [b, p.token]));
+        for (const [b, p] of live) {
+          (b === b1 ? gen1 : gen2).push(p.token);
+        }
+      }
+
+      const text1 = await ctx.detokenize(gen1);
+      const text2 = await ctx.detokenize(gen2);
+      console.log(`  rehydrate "weather" → "${text1}"`);
+      console.log(`  rehydrate "quantum" → "${text2}"`);
+
+      // Perplexity valid after prefill→commit transition
+      // (metrics only count accept_token calls, so only the 5 commit steps)
+      assert(isFinite(b1.perplexity) && isFinite(b2.perplexity),
+        `rehydrate: perplexity valid after prefill→commit (b1=${b1.perplexity.toFixed(2)}, b2=${b2.perplexity.toFixed(2)})`);
+
+      b1.prune(); b2.prune();
+    }
+
+    // ── Test C: getLogits() → modelEntropy() integration ──
+    // Verifies Branch.getLogits() returns a Float32Array consumable by the
+    // existing metrics API. This tests the JS API surface of the new exposure.
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      b1.captureLogits();
+
+      const logits = b1.getLogits();
+      assert(logits instanceof Float32Array,
+        `getLogits: returns Float32Array`);
+      assert(logits.length === ctx.vocabSize,
+        `getLogits: length=${logits.length} === vocabSize=${ctx.vocabSize}`);
+
+      // Feed branch logits into ctx.modelEntropy() — proves the returned
+      // buffer is a valid logits distribution consumable by metrics API
+      const entropyFromBranch = ctx.modelEntropy("nats", logits);
+      const entropyFromCtx = ctx.modelEntropy("nats");
+      assert(isFinite(entropyFromBranch) && entropyFromBranch > 0,
+        `getLogits→modelEntropy: ${entropyFromBranch.toFixed(4)} nats`);
+
+      // Branch logits (captured from same decode) should match context logits
+      assert(Math.abs(entropyFromBranch - entropyFromCtx) < 1e-4,
+        `getLogits→modelEntropy: branch=${entropyFromBranch.toFixed(4)} ≈ ctx=${entropyFromCtx.toFixed(4)}`);
+
+      // After store.commit, logits change — getLogits() reflects new state
+      const p = b1.produce();
+      assert(!p.isStop, `getLogits: produce() should not hit EOG on first token`);
+      store.commit([[b1, p.token]]);
+      const logitsAfter = b1.getLogits();
+      const entropyAfter = ctx.modelEntropy("nats", logitsAfter);
+      assert(isFinite(entropyAfter),
+        `getLogits after commit: entropy=${entropyAfter.toFixed(4)} nats`);
+
+      b1.prune();
+    }
+
+    // ── Test D: produce() → store.commit() interop ──
+    // Real workflow: use produce() to inspect candidates, then batch-commit winners.
+    // Tests: produce() reads from branch snapshot, store.commit() advances state,
+    // produce() on next iteration reads from updated snapshot.
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      b1.captureLogits();
+      const b2 = b1.fork(1);
+
+      const output = [];
+      for (let i = 0; i < 5; i++) {
+        // Inspect with produce() — does NOT advance state
+        const p1 = b1.produce(), p2 = b2.produce();
+
+        // Can inspect text and isStop before committing
+        assert(typeof p1.text === 'string' && typeof p2.text === 'string',
+          `produce→commit: produce() returns text at step ${i}`);
+
+        if (p1.isStop || p2.isStop) break;
+
+        // Batch-commit the inspected tokens
+        store.commit([[b1, p1.token], [b2, p2.token]]);
+        output.push(p1.text);
+      }
+
+      console.log(`  produce→commit: "${output.join('')}"`);
+      assert(output.length > 0,
+        `produce→commit: generated ${output.length} tokens via inspect-then-batch pattern`);
+
+      b1.prune(); b2.prune();
+    }
+
+    // ── Test E: Mixed single/batched operations ──
+    // Mix Branch.commit() (single) with BranchStore.commit() (batched) on same branches.
+    // Tests: both paths write to the same branch state correctly, no corruption when
+    // alternating between decode::one and decode::each on the same sequence.
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      b1.captureLogits();
+      const b2 = b1.fork(1);
+
+      // Step 1-3: single-branch commit (decode::one path)
+      for (let i = 0; i < 3; i++) {
+        const live = [[b1, b1.produce()], [b2, b2.produce()]]
+          .filter(([, p]) => !p.isStop);
+        if (!live.length) break;
+        for (const [b, p] of live) b.commit(p.token);
+      }
+      const posAfterSingle = b1.position;
+
+      // Step 4-6: batched commit (decode::each path)
+      for (let i = 0; i < 3; i++) {
+        const live = [[b1, b1.produce()], [b2, b2.produce()]]
+          .filter(([, p]) => !p.isStop);
+        if (!live.length) break;
+        store.commit(live.map(([b, p]) => [b, p.token]));
+      }
+      const posAfterBatched = b1.position;
+      assert(posAfterBatched === posAfterSingle + 3,
+        `mixed ops: position correct after single→batched (${posAfterSingle}→${posAfterBatched})`);
+
+      // Step 7-9: back to single-branch commit
+      for (let i = 0; i < 3; i++) {
+        const live = [[b1, b1.produce()], [b2, b2.produce()]]
+          .filter(([, p]) => !p.isStop);
+        if (!live.length) break;
+        for (const [b, p] of live) b.commit(p.token);
+      }
+
+      // 9 total steps, perplexity must reflect all of them
+      assert(isFinite(b1.perplexity) && b1.perplexity >= 1.0,
+        `mixed ops: perplexity valid after 9 mixed steps (${b1.perplexity.toFixed(2)})`);
+
+      b1.prune(); b2.prune();
+    }
+
+    // ── Test F: Independent EOG — one branch stops, other continues ──
+    // Steer b1 to produce EOG at step 3 while b2 keeps generating.
+    // Tests: per-branch EOG filtering, store.commit with shrinking branch set,
+    // surviving branch generates correct output after sibling stops.
+    {
+      await ctx.decode(promptToks, 0, 0);
+      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      b1.captureLogits();
+      const b2 = b1.fork(1);
+
+      const eog = ctx.getEogToken();
+      const gen1 = [], gen2 = [];
+      const stopped = [false, false];
+
+      for (let step = 0; step < 8; step++) {
+        // At step 3, force b1 to hit EOG
+        if (step === 3 && !stopped[0]) {
+          b1.steer([{ token: eog, bias: 100.0 }]);
+        }
+
+        const pairs = [
+          ...(!stopped[0] ? [[b1, b1.produce()]] : []),
+          ...(!stopped[1] ? [[b2, b2.produce()]] : []),
+        ];
+
+        const live = pairs.filter(([, p]) => !p.isStop);
+        const dead = pairs.filter(([, p]) => p.isStop);
+
+        // Mark stopped branches
+        for (const [b] of dead) {
+          if (b === b1) stopped[0] = true;
+          if (b === b2) stopped[1] = true;
+        }
+
+        if (!live.length) break;
+        store.commit(live.map(([b, p]) => [b, p.token]));
+
+        for (const [b, p] of live) {
+          (b === b1 ? gen1 : gen2).push(p.token);
+        }
+
+        // Clean up steer after use
+        if (step === 3 && stopped[0]) b1.clearSteer();
+      }
+
+      assert(stopped[0], `independent EOG: b1 hit EOG (steered at step 3)`);
+      assert(gen1.length === 3, `independent EOG: b1 generated 3 tokens before EOG (got ${gen1.length})`);
+      assert(gen2.length > gen1.length,
+        `independent EOG: b2 continued past b1's EOG (b1=${gen1.length}, b2=${gen2.length})`);
+
+      const text2 = await ctx.detokenize(gen2);
+      console.log(`  independent EOG: b1 stopped at step 3, b2 continued → "${text2}"`);
+
+      // b2's position should reflect all its tokens, not be truncated by b1's stop
+      assert(b2.position === promptToks.length + gen2.length,
+        `independent EOG: b2 position correct (${b2.position} === ${promptToks.length} + ${gen2.length})`);
+
+      b1.prune(); b2.prune();
+    }
+  } finally {
+    ctx.dispose();
+  }
+}
+
 async function main() {
   let mainCtx = null;
 
@@ -1039,6 +1322,7 @@ async function main() {
     await testNBatchAblation();
     await testDeterminism();
     await testDecodeAndCapture();
+    await testBranchStore();
     await testEmbeddings();
 
     // Summary
