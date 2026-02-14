@@ -61,7 +61,21 @@ export enum PoolingType {
 }
 
 /**
- * Options for creating an inference context
+ * Configuration for context creation
+ *
+ * Controls the resource envelope for inference: context window size (`nCtx`),
+ * batch throughput (`nBatch`), compute parallelism (`nThreads`), and
+ * multi-sequence capacity (`nSeqMax`). These map directly to
+ * `llama_context_params` and are fixed for the context's lifetime.
+ *
+ * Key tradeoffs:
+ * - **nCtx**: Larger = longer conversations, but linear KV memory growth.
+ * - **nBatch**: Larger = faster prompt prefill (more tokens per GPU dispatch),
+ *   but higher peak memory. Also sets the bin-packing capacity for
+ *   {@link BranchStore.prefill}.
+ * - **nSeqMax**: Set ≥ your max concurrent branch count + 1 (root sequence).
+ *   Each sequence shares the same KV cache memory pool — cost is metadata only
+ *   under unified KV, not a per-sequence memory multiplier.
  */
 export interface ContextOptions {
   /** Path to .gguf model file */
@@ -486,10 +500,24 @@ export interface AdvancedSamplingParams {
 /**
  * Sampling parameters for token generation
  *
+ * Configures the sampler chain — a pipeline of composable filters and
+ * transforms applied to raw logits before token selection. The chain is
+ * built once at branch/context creation and persists across decode steps
+ * (penalty state accumulates, PRNG advances).
+ *
+ * **Chain order**: penalties → top_k → typical_p → top_p → min_p →
+ * temperature → dist (stochastic) or greedy (temperature ≤ 0).
+ *
+ * For tree search, each {@link Branch} owns an independent clone of the
+ * chain. `reseedSampler()` replaces the terminal dist sampler's PRNG seed
+ * so forked branches diverge. Greedy chains (temperature ≤ 0) are
+ * deterministic and unaffected by reseeding.
+ *
  * Common presets:
- * - Factual/Precise: { temperature: 0.1 }
- * - Balanced: { temperature: 0.7 }
- * - Creative: { temperature: 1.0 }
+ * - Factual/Precise: `{ temperature: 0.1 }`
+ * - Balanced: `{ temperature: 0.7 }`
+ * - Creative: `{ temperature: 1.0 }`
+ * - Deterministic greedy: `{ temperature: 0, topK: 0, topP: 1.0, minP: 0 }`
  */
 export interface SamplingParams {
   // ===== COMMON CONTROLS =====
@@ -522,10 +550,38 @@ export interface SamplingParams {
 }
 
 /**
- * A llama.cpp context for text generation
+ * Inference context — the runtime surface for a loaded model
  *
- * Represents a loaded model with KV cache for maintaining conversation state.
- * Use createContext() to initialize, and dispose() when done to free memory.
+ * A SessionContext owns a llama_context (KV cache + compute graph) bound to a
+ * shared model. All inference flows through this interface: tokenization,
+ * forward passes, logit access, sampling, KV cache management, chat template
+ * formatting, and embedding extraction.
+ *
+ * The core generation loop is three steps, repeated:
+ * 1. **decode()** — Feed tokens through the transformer, populating KV cache.
+ * 2. **getLogits()** — Zero-copy view into the model's output distribution.
+ * 3. **sample()** — Select the next token via the configured sampler chain.
+ *
+ * For tree-structured generation (best-of-N, beam search, speculative
+ * decoding), use the {@link Branch} and {@link BranchStore} APIs instead —
+ * they manage per-branch KV sequences, sampler chains, and logits snapshots
+ * with O(1) GPU dispatches via batched decode.
+ *
+ * **Logits lifetime**: `getLogits()` returns a zero-copy Float32Array wrapping
+ * llama.cpp's internal buffer. It is invalidated (ArrayBuffer detached) on
+ * the next `decode()`, `encode()`, or `dispose()`. Use {@link withLogits} for
+ * safe scoped access.
+ *
+ * **KV cache**: Supports multi-sequence operation (`nSeqMax > 1`), per-sequence
+ * copy/clear/eviction, file-based persistence, and context compression via
+ * `clearAndReseed()`.
+ *
+ * **Chat templates**: `formatChat()` and `parseChatOutput()` handle the full
+ * round-trip of chat formatting, including tool calls, reasoning blocks, and
+ * grammar-constrained generation — using the model's native Jinja template.
+ *
+ * Use {@link createContext} to initialize, and `dispose()` when done to free
+ * GPU/CPU memory.
  */
 export interface SessionContext {
   // ===== THE GENERATION LOOP =====
@@ -563,61 +619,62 @@ export interface SessionContext {
   decode(tokens: number[], position: number, seqId?: number): Promise<void>;
 
   /**
-   * STEP 2a: Get token scores for custom sampling (zero-copy, mutable)
+   * STEP 2: Get logits (zero-copy view into model memory)
    *
    * Returns unnormalized scores for every possible next token.
    * Higher score = model thinks this token is more likely.
+   * The returned Float32Array wraps llama.cpp's internal buffer directly
+   * (zero-copy). It is mutable — you can write to it for custom sampling
+   * (e.g., setting banned tokens to -Infinity before calling sample()).
    *
-   * Use this for custom sampling logic or grammar-constrained generation.
-   * For reading scores (entropy computation), use getLogits() instead.
+   * Memoized per decode step: calling getLogits() twice between decodes
+   * returns the same Float32Array backed by the same ArrayBuffer.
    *
-   * ⚠️ CRITICAL LIFETIME CONSTRAINTS:
-   * - This is a zero-copy buffer (points directly to model memory)
-   * - Valid ONLY until next decode() call
-   * - NOT thread-safe - use only on JS thread
-   * - DO NOT retain reference across async boundaries
-   * - Buffer is invalidated by: decode(), sample() with grammar
+   * LIFETIME CONSTRAINTS:
+   * - Valid ONLY until the next decode(), encode(), or dispose() call
+   * - The ArrayBuffer is detached on invalidation — accessing a stale
+   *   buffer throws a TypeError
+   * - DO NOT retain references across async boundaries
    *
-   * Cost: ~0.5ms (zero-copy pointer)
+   * For a safe scoped access pattern, use {@link withLogits} instead.
    *
-   * @returns Buffer containing vocabSize floats (Float32Array compatible)
-   * @example Safe usage
-   * ```typescript
-   * const buffer = ctx.getTokenScores();
-   * const scores = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
+   * NOTE: This is the context-level logits view. For branch-level logits,
+   * use {@link Branch.getLogits} which returns an independent copy of the
+   * branch's snapshot (safe to hold, not invalidated by decode).
    *
-   * // Modify immediately (safe - still on JS thread)
-   * scores[BANNED_TOKEN] = -Infinity;
-   *
-   * // Use immediately
-   * const token = customSample(scores);
-   *
-   * // Now decode invalidates the buffer
-   * await ctx.decode([token], position++);
-   * // Buffer is now INVALID - do not access!
-   * ```
-   */
-  getTokenScores(): Buffer;
-
-  /**
-   * STEP 2b: Get logits for reading (zero-copy, readonly usage pattern)
-   *
-   * Returns Float32Array for computational tasks like entropy calculation.
-   * For custom sampling or grammar, use getTokenScores() instead.
-   *
-   * WARNING: Buffer is only valid until next decode() call!
+   * Cost: ~0.5ms (zero-copy pointer, no data copied)
    *
    * @returns Float32Array of unnormalized logits (vocabSize elements)
+   * @example
+   * ```typescript
+   * await ctx.decode(tokens, 0);
+   *
+   * // Read logits for analysis
+   * const logits = ctx.getLogits();
+   * const entropy = ctx.modelEntropy("bits", logits);
+   *
+   * // Or modify in-place for custom sampling
+   * logits[BANNED_TOKEN] = -Infinity;
+   * const token = ctx.sample({ temperature: 0.7 });
+   *
+   * // Next decode invalidates the buffer
+   * await ctx.decode([token], position++);
+   * // logits is now DETACHED - do not access!
+   * ```
    */
   getLogits(): Float32Array;
 
   /**
-   * STEP 3: Sample a token from scores
+   * STEP 3: Sample a token from logits
    *
-   * Converts raw scores into a token decision using:
+   * Converts raw logits into a token decision using:
    * - Temperature: controls randomness
    * - Top-K/Top-P: filters unlikely tokens
-   * - Grammar: enforces format constraints (if grammar initialized)
+   * - Repeat/frequency/presence penalties (tracked across calls)
+   *
+   * NOTE: Grammar constraints are NOT applied by sample(). For grammar-
+   * constrained generation, use the handle-based API (createSampler /
+   * applySampler) or the Branch API which integrates grammar natively.
    *
    * This is where generation strategy happens.
    *
@@ -789,24 +846,25 @@ export interface SessionContext {
   // ===== KV CACHE MANAGEMENT =====
 
   /**
-   * Get current sequence length (number of decoded tokens)
+   * Get max position in the KV cache for a sequence
    *
-   * The KV cache stores model state for all decoded tokens.
-   * This tells you how many tokens are currently in memory.
+   * Returns the highest position index in the specified sequence,
+   * or -1 if the sequence is empty. This is the same value as
+   * {@link kvSeqPosMax}. To get the token count, add 1.
    *
    * Think of this as: "How much has the model read so far?"
    *
    * Cost: <0.01ms (fast sync operation - safe to call frequently)
    *
    * @param sequenceId Sequence ID (defaults to 0 for single conversation)
-   * @returns Number of tokens in cache, or -1 if empty
+   * @returns Highest position index, or -1 if empty
    * @example
    * ```typescript
    * const tokens = await ctx.tokenize("Hello world");
    * await ctx.decode(tokens, 0);
    *
-   * const length = ctx.kvCacheSize(0);
-   * console.log(length); // 2 (number of tokens)
+   * const maxPos = ctx.kvCacheSize(0);
+   * console.log(`${maxPos + 1} tokens in cache`);
    * ```
    */
   kvCacheSize(sequenceId?: number): number;
@@ -916,43 +974,88 @@ export interface SessionContext {
   kvCacheClear(): Promise<void>;
 
   /**
-   * Atomic clear+reseed operation
+   * Blink KV — cache-local reconstruction for bounded-memory streaming
    *
-   * Implements a KV cache compression strategy:
-   * 1. Clear entire KV cache
-   * 2. Re-decode original sinks (first N tokens from conversation start)
-   * 3. Re-decode tail (last M recent tokens)
+   * Implements the [Blink KV](https://github.com/lloyal-ai/blink-kv/blob/main/blink_kv.pdf)
+   * protocol (Naqvi, 2026): when the KV cache fills, clear it entirely and
+   * re-decode retained tokens at contiguous positions `[0, 1, ..., N-1]`.
+   * This achieves cache-local position IDs — the operative requirement for
+   * stable bounded-memory streaming — without backend-specific knowledge of
+   * key storage format. Works on post-RoPE engines (where StreamingLLM's
+   * pos-shift is unavailable) and any backend exposing `clear()` + `decode()`.
    *
+   * **Why not naive eviction?** Selective eviction (`kvCacheRemove`) preserves
+   * original position IDs, which grow without bound. Across 5 architectures,
+   * naive eviction produces PPL spanning 3 orders of magnitude — ranging from
+   * 1.15× baseline (Llama, lucky config) to 198× (Phi, sinks present).
+   * Under Blink KV reconstruction, all 5 converge to 3–16% of baseline.
    *
-   * @param sinks - ORIGINAL first N tokens from conversation start (typically 4)
-   * @param tail - Recent M tokens to preserve (typically 508-1020)
-   * @returns Promise that resolves when reseed completes
+   * **Sinks are optional.** Under reconstruction, the 0+N (sinkless) config
+   * matches 4+N (with sinks) within <2% across all tested architectures.
+   * Pass an empty sinks array if you don't need them.
    *
-   * @example
+   * **Algorithm:**
+   * 1. Clear entire KV cache (zero fragmentation)
+   * 2. Re-decode `sinks` at position 0 (optional attention anchors)
+   * 3. Re-decode `tail` at position `sinks.length` (recent context)
+   *
+   * **Cost:** Re-decodes `sinks.length + tail.length` tokens. At per-boundary
+   * trigger (reconstruct when cache reaches `nCtx`), amortized cost is
+   * O(cacheSize / interval) decode ops per token — ~0.14 at typical settings.
+   *
+   * @param sinks First N tokens from conversation start (typically 4, or empty).
+   *   Must be the same tokens every reseed — reusing different tokens degrades
+   *   any attention-sink patterns the model may have learned for early positions.
+   * @param tail Recent M tokens to preserve (typically 252–1020)
+   * @returns Promise that resolves when reconstruction completes.
+   *   Next decode continues at position `sinks.length + tail.length`.
+   *
+   * @example Per-boundary reconstruction
    * ```typescript
-   * const ORIGINAL_SINKS = allTokens.slice(0, 4);
+   * // Capture sinks once at conversation start
+   * const SINKS = allTokens.slice(0, 4);
    *
-   * const tail = allTokens.slice(-508);  // Last 508 tokens
-   * await ctx.clearAndReseed(ORIGINAL_SINKS, tail);
-   *
-   * const nextToken = ctx.greedySample();
-   * await ctx.decode([nextToken], 512);
+   * // On cache fill: compress to 512 tokens (4 sinks + 508 tail)
+   * if (position >= ctx.nCtx) {
+   *   const tail = allTokens.slice(-508);
+   *   await ctx.clearAndReseed(SINKS, tail);
+   *   position = 512;  // sinks.length + tail.length
+   * }
    * ```
+   *
+   * @example Sinkless reconstruction (equally effective)
+   * ```typescript
+   * const tail = allTokens.slice(-256);
+   * await ctx.clearAndReseed([], tail);  // No sinks needed
+   * position = 256;
+   * ```
+   *
+   * @see [Blink KV paper](https://github.com/lloyal-ai/blink-kv/blob/main/blink_kv.pdf)
    */
   clearAndReseed(sinks: number[], tail: number[]): Promise<void>;
 
   // ===== KV SEQUENCE OPERATIONS =====
 
   /**
-   * Copy KV cache from one sequence to another
+   * Fork a KV cache sequence — the primitive behind {@link Branch.fork}
    *
-   * Duplicates the KV cache state from source to destination sequence.
-   * After copying, both sequences can continue independently.
+   * Copies all KV cache entries from `srcSeqId` to `dstSeqId`. Under
+   * llama.cpp's unified KV cache, this is a **metadata-only operation** —
+   * no key/value tensors are copied. Both sequences reference the same
+   * physical KV entries for the shared prefix; only tokens decoded after
+   * the fork point allocate new storage. This is what makes tree-structured
+   * generation (best-of-N, beam search, speculative decoding) memory-efficient:
+   * N branches sharing a 1000-token prefix cost ~1000 KV entries, not N×1000.
    *
-   * NOTE: Only full sequence copies are currently supported.
-   * The p0/p1 parameters must use default values (0 and -1).
+   * The higher-level {@link Branch.fork} wraps this and additionally clones
+   * the sampler chain, grammar state, logits snapshot, and perplexity tracker.
+   * Use `kvSeqCopy` directly when you need raw sequence management without
+   * the Branch abstraction.
    *
-   * Cost: ~1-5ms depending on sequence length
+   * NOTE: Only full-sequence copies are supported. The p0/p1 parameters
+   * must use default values (0 and -1).
+   *
+   * Cost: O(1) metadata — no tensor copy under unified KV
    *
    * @param srcSeqId Source sequence to copy from
    * @param dstSeqId Destination sequence to copy to
@@ -960,15 +1063,16 @@ export interface SessionContext {
    * @param p1 End position (must be -1 for full copy, default: -1)
    * @example
    * ```typescript
-   * // Decode initial prompt to seq 0
+   * // Decode shared prompt to seq 0
    * await ctx.decode(promptTokens, 0);
    *
-   * // Copy seq 0 -> seq 1
+   * // Fork to seq 1 and seq 2 (metadata-only, instant)
    * ctx.kvSeqCopy(0, 1);
+   * ctx.kvSeqCopy(0, 2);
    *
-   * // Now both sequences can continue independently
-   * await ctx.decode([tokenA], position, 0);
-   * await ctx.decode([tokenB], position, 1);
+   * // Divergent generation — only new tokens allocate KV entries
+   * await ctx.decode([tokenA], position, 1);
+   * await ctx.decode([tokenB], position, 2);
    * ```
    */
   kvSeqCopy(srcSeqId: number, dstSeqId: number, p0?: number, p1?: number): void;
@@ -1140,7 +1244,7 @@ export interface SessionContext {
    * Call after decode() to analyze the current prediction distribution,
    * or pass captured logits for offline analysis.
    *
-   * @param base - Logarithm base: "nats" (default), "bits", or "base10"
+   * @param base - Logarithm base: "nats" (default) or "bits"
    * @param logits - Optional Float32Array of logits (uses current context logits if omitted)
    * @returns Entropy value in specified base
    *
@@ -1640,7 +1744,7 @@ export interface SessionContext {
   /**
    * Model vocabulary size (number of possible tokens)
    *
-   * This is the length of the scores buffer from getTokenScores().
+   * This is the length of the logits array from getLogits().
    */
   readonly vocabSize: number;
 
@@ -1724,8 +1828,22 @@ export interface SessionContext {
 /**
  * Create a new inference context
  *
- * Loads the appropriate native binary (with automatic GPU fallback) and
- * creates an inference context for the specified model.
+ * Entry point for all inference. Resolves the correct native binary (see
+ * {@link loadBinary} for the platform/GPU fallback chain), loads the model
+ * via a reference-counted registry (multiple contexts can share one model's
+ * weight tensors in memory), and allocates a `llama_context` with its own
+ * KV cache and compute scratch buffers.
+ *
+ * **What gets allocated:**
+ * - KV cache: `nCtx * 2 * nLayers * dHead` bytes per KV type (fp16 default).
+ *   For a 7B model with `nCtx: 4096`, expect ~1-2 GB of KV memory.
+ * - Compute scratch: temporary buffers for the forward pass, sized to `nBatch`.
+ * - Sampler state: penalty tracking window, PRNG state.
+ *
+ * **Model sharing:** If two contexts use the same `modelPath`, the model
+ * weights are loaded once and shared. Only the KV cache and compute buffers
+ * are per-context. This makes multi-context setups (e.g., one context per
+ * conversation) memory-efficient.
  *
  * @param options Context creation options
  * @param loadOptions Optional binary loading options (GPU variant selection)
@@ -1748,20 +1866,22 @@ export interface SessionContext {
  * }
  * ```
  *
+ * @example Multi-branch context (tree search, best-of-N)
+ * ```typescript
+ * const ctx = await createContext({
+ *   modelPath: './model.gguf',
+ *   nCtx: 8192,
+ *   nBatch: 512,     // Bin-packing capacity for BranchStore.prefill
+ *   nSeqMax: 33,     // 32 branches + 1 root sequence
+ * });
+ * ```
+ *
  * @example With GPU variant selection
  * ```typescript
- * // Request CUDA - falls back to CPU if unavailable
  * const ctx = await createContext(
  *   { modelPath: './model.gguf', nCtx: 4096 },
  *   { gpuVariant: 'cuda' }
  * );
- * ```
- *
- * @example Using environment variable
- * ```typescript
- * // Set LLOYAL_GPU=cuda before running
- * // createContext will automatically use CUDA if available
- * const ctx = await createContext({ modelPath: './model.gguf' });
  * ```
  */
 export function createContext(
@@ -1772,13 +1892,30 @@ export function createContext(
 /**
  * Load native binary for a specific GPU variant
  *
- * Loads the appropriate platform-specific binary with automatic fallback:
- * 1. Try requested GPU variant (if specified)
- * 2. Fall back to default (CPU) platform package
- * 3. Fall back to local build (development: build/Release/lloyal.node)
+ * lloyal.node ships as a family of platform-specific npm packages, each
+ * containing a prebuilt native addon:
+ * `@lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]`
+ * (e.g., `darwin-arm64`, `linux-x64-cuda`, `win32-x64-vulkan`).
  *
- * Use this for advanced scenarios where you need direct binary access
- * or want to check variant availability before creating a context.
+ * `loadBinary()` resolves the correct package at runtime with a prioritized
+ * fallback chain:
+ *
+ * 1. Requested GPU variant package (if `variant` or `LLOYAL_GPU` env var set)
+ * 2. Local development build (`build/Release/lloyal.node`)
+ * 3. Default CPU platform package
+ *
+ * Most callers should use {@link createContext} directly — it calls
+ * `loadBinary()` internally. Use this function when you need to:
+ * - Pre-check whether a GPU variant is available before creating contexts
+ * - Share one loaded binary across multiple context creations
+ * - Inspect or test the binary loading logic in isolation
+ *
+ * **Environment variables:**
+ * - `LLOYAL_LOCAL=1` — Force local build only; throws if not found
+ *   (use during development to test local C++ changes)
+ * - `LLOYAL_GPU=cuda|vulkan` — Request GPU variant (equivalent to `variant` param)
+ * - `LLOYAL_NO_FALLBACK=1` — Disable silent CPU fallback; throws if GPU
+ *   variant fails (use in CI to catch missing runtime libraries)
  *
  * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
  * @returns Native binary module with createContext method
@@ -1962,7 +2099,13 @@ export class Branch {
    * Returns n_vocab floats — the raw logit distribution from the last
    * decode_and_capture or captureLogits() call.
    *
-   * @returns Copy of the logits snapshot (n_vocab elements)
+   * Unlike {@link SessionContext.getLogits} (zero-copy view into shared
+   * model memory, invalidated by next decode), this returns an independent
+   * copy of the branch's internal snapshot. The returned Float32Array is
+   * safe to hold across async boundaries and is not affected by subsequent
+   * decode operations.
+   *
+   * @returns Independent copy of the logits snapshot (n_vocab elements)
    * @throws If no logits have been captured yet
    */
   getLogits(): Float32Array;
@@ -2127,23 +2270,55 @@ export class Branch {
 }
 
 /**
- * Batched multi-branch decode operations
+ * High-throughput multi-branch decode operations
  *
- * Packs multiple branches into a single llama_decode() call, reducing
- * GPU dispatch overhead from N dispatches to 1.
+ * The naive approach to N-branch generation is N sequential llama_decode()
+ * calls — each paying full GPU kernel launch overhead, memory barrier, and
+ * PCIe round-trip. BranchStore eliminates this by packing all branches into
+ * a single llama_batch and dispatching once: O(1) GPU round-trips regardless
+ * of branch count. The GPU parallelizes across sequences within the batch,
+ * so N branches approach the wall-time cost of 1.
  *
- * Both methods take an array of **`[branch, token(s)]` tuples** — the
- * branch-to-token binding is structural, not positional. Each branch
- * receives exactly the token(s) paired with it.
+ * Two operations, two packing strategies:
  *
- * - `commit()` calls accept_token per branch (updating repeat-penalty windows)
- *   before the batched decode. Use for model-generated tokens.
- * - `prefill()` does NOT accept — use for external/replayed tokens where
- *   penalty tracking is unwanted.
+ * **commit()** — Generation step. Each branch contributes exactly 1 token.
+ * Packs N tokens into a single batch via `decode_each` (one row per sequence,
+ * all at their respective positions). Single `llama_decode()` call. Logits
+ * captured per-branch at batch index `i`. O(N) total work, O(1) GPU
+ * dispatches, O(1) amortized dispatch overhead per branch. Post-decode,
+ * accepts each token into its branch's repeat-penalty window. Decode-first
+ * ordering ensures sampler state stays consistent if decode throws.
  *
- * After either call, each branch's logits snapshot is updated with the
- * output distribution from its decoded token(s), ready for the next
- * `produce()`/`sample()` call.
+ * **prefill()** — Bulk token injection. Each branch contributes a
+ * variable-length token array. Uses a two-pass bin-packing algorithm:
+ *
+ * - *Pass 1 (planning)*: Greedy first-fit packs items into chunks ≤ nBatch.
+ *   Items larger than nBatch get a dedicated chunk and fall through to
+ *   decode_many's internal auto-chunking (ceil(nTokens / nBatch) calls).
+ * - *Pass 2 (dispatch)*: Normal chunks dispatch via `decode_scatter` (one
+ *   `llama_decode` per chunk). Logits are indexed by flattened cursor
+ *   position: for item k in a chunk, logits live at `cursor + nTokens[k] - 1`.
+ *
+ * For T total tokens across N branches with batch capacity B:
+ * - Best case (T ≤ B): 1 GPU dispatch, all branches in one batch.
+ * - Worst case: ceil(T / B) dispatches. Each dispatch is fully packed.
+ * - Amortized per-token GPU overhead: O(1/B) — vanishes as batch fills.
+ *
+ * Does NOT accept tokens into the sampler penalty window — use for
+ * external/replayed tokens where repeat-penalty tracking is unwanted.
+ * For model-generated tokens, use {@link commit} instead.
+ *
+ * Both methods take `[branch, token(s)]` tuples — the branch-to-token
+ * binding is structural, not positional. After either call, each branch's
+ * logits snapshot is updated with the output distribution from its decoded
+ * token(s), ready for the next `produce()`/`sample()` call.
+ *
+ * @example 32-branch generation step — one GPU dispatch
+ * ```typescript
+ * const store = new BranchStore(ctx);
+ * const entries = branches.map(b => [b, b.produce().token] as [Branch, number]);
+ * store.commit(entries);  // 32 tokens, 1 llama_decode()
+ * ```
  *
  * @example Best-of-N with batched commit
  * ```typescript
@@ -2158,10 +2333,14 @@ export class Branch {
  * }
  * ```
  *
- * @example Rehydrate divergent histories with batched prefill
+ * @example Asymmetric prefill — variable-length injections, auto-chunked
  * ```typescript
- * const store = new BranchStore(ctx);
- * store.prefill([[b1, historyA], [b2, historyB]]);
+ * store.prefill([
+ *   [branchA, systemPromptTokens],   // 200 tokens
+ *   [branchB, shortQueryTokens],     //  12 tokens
+ *   [branchC, longDocumentTokens],   // 800 tokens
+ * ]);
+ * // Bin-packed into ceil(1012 / nBatch) GPU dispatches
  * ```
  */
 export class BranchStore {
@@ -2171,9 +2350,10 @@ export class BranchStore {
    * Batched single-token commit for model-generated tokens
    *
    * Each tuple `[branch, token]` binds one token to one branch.
-   * Accepts each token into its branch's repeat-penalty window,
-   * then decodes all N tokens in a single llama_decode() call via decode_each.
-   * Logits are captured per-branch after decode.
+   * Decodes all N tokens in a single llama_decode() call via decode_each,
+   * captures logits per-branch, then accepts each token into its branch's
+   * repeat-penalty window. Decode-first ordering ensures sampler state
+   * stays consistent if decode throws.
    *
    * @param entries - Array of `[branch, token]` tuples (branches must not be disposed)
    * @throws If any branch is disposed
