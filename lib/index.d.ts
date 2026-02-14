@@ -1694,6 +1694,9 @@ export interface SessionContext {
   /** @internal Get branch's perplexity */
   _branchGetPerplexity(handle: number): number;
 
+  /** @internal Get copy of branch's logits snapshot */
+  _branchGetLogits(handle: number): Float32Array;
+
   /** @internal Prune branch (remove KV cache entries and free handle) */
   _branchPrune(handle: number): void;
 
@@ -1708,6 +1711,14 @@ export interface SessionContext {
 
   /** @internal Clear all dynamic logit biases from a branch */
   _branchClearSteer(handle: number): void;
+
+  // ===== STORE API (internal, wrapped by BranchStore) =====
+
+  /** @internal Batched accept + decode_each + capture for N branches */
+  _storeCommit(handles: number[], tokens: number[]): void;
+
+  /** @internal Batched decode_scatter + capture for N branches with variable token counts */
+  _storePrefill(handles: number[], tokenArrays: number[][]): void;
 }
 
 /**
@@ -1945,6 +1956,17 @@ export class Branch {
   /** Freeze the current logit distribution into this branch. Essential before fork(). */
   captureLogits(): void;
 
+  /**
+   * Get a copy of this branch's captured logits snapshot.
+   *
+   * Returns n_vocab floats — the raw logit distribution from the last
+   * decode_and_capture or captureLogits() call.
+   *
+   * @returns Copy of the logits snapshot (n_vocab elements)
+   * @throws If no logits have been captured yet
+   */
+  getLogits(): Float32Array;
+
   /** Decode a single token, write to KV, and capture resulting logits */
   decodeAndCaptureOne(token: number): void;
 
@@ -2102,4 +2124,75 @@ export class Branch {
 
   /** Whether this branch has been disposed */
   readonly disposed: boolean;
+}
+
+/**
+ * Batched multi-branch decode operations
+ *
+ * Packs multiple branches into a single llama_decode() call, reducing
+ * GPU dispatch overhead from N dispatches to 1.
+ *
+ * Both methods take an array of **`[branch, token(s)]` tuples** — the
+ * branch-to-token binding is structural, not positional. Each branch
+ * receives exactly the token(s) paired with it.
+ *
+ * - `commit()` calls accept_token per branch (updating repeat-penalty windows)
+ *   before the batched decode. Use for model-generated tokens.
+ * - `prefill()` does NOT accept — use for external/replayed tokens where
+ *   penalty tracking is unwanted.
+ *
+ * After either call, each branch's logits snapshot is updated with the
+ * output distribution from its decoded token(s), ready for the next
+ * `produce()`/`sample()` call.
+ *
+ * @example Best-of-N with batched commit
+ * ```typescript
+ * const store = new BranchStore(ctx);
+ * const branches = [1, 2, 3].map(id => root.fork(id));
+ *
+ * for (let step = 0; step < 50; step++) {
+ *   const live = branches.map(b => [b, b.produce()] as const)
+ *     .filter(([, p]) => !p.isStop);
+ *   if (!live.length) break;
+ *   store.commit(live.map(([b, p]) => [b, p.token]));
+ * }
+ * ```
+ *
+ * @example Rehydrate divergent histories with batched prefill
+ * ```typescript
+ * const store = new BranchStore(ctx);
+ * store.prefill([[b1, historyA], [b2, historyB]]);
+ * ```
+ */
+export class BranchStore {
+  constructor(ctx: SessionContext);
+
+  /**
+   * Batched single-token commit for model-generated tokens
+   *
+   * Each tuple `[branch, token]` binds one token to one branch.
+   * Accepts each token into its branch's repeat-penalty window,
+   * then decodes all N tokens in a single llama_decode() call via decode_each.
+   * Logits are captured per-branch after decode.
+   *
+   * @param entries - Array of `[branch, token]` tuples (branches must not be disposed)
+   * @throws If any branch is disposed
+   */
+  commit(entries: [Branch, number][]): void;
+
+  /**
+   * Batched variable-length prefill for external tokens
+   *
+   * Each tuple `[branch, tokens]` binds a token array to one branch.
+   * Each branch can receive a different number of tokens — decode_scatter
+   * handles variable-length runs and auto-chunks to fit nBatch.
+   *
+   * Does NOT call accept_token — use for external/replayed tokens where
+   * repeat-penalty tracking is unwanted. For model-generated tokens,
+   * use {@link commit} instead.
+   *
+   * @param entries - Array of `[branch, tokens]` tuples (branches must not be disposed)
+   * @throws If any branch is disposed
+   */
+  prefill(entries: [Branch, number[]][]): void;
 }

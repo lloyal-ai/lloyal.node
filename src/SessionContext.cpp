@@ -1,7 +1,7 @@
 #include "SessionContext.hpp"
 #include "BackendManager.hpp"
 #include "FileSystem.h"
-#include <lloyal/decoder.hpp>
+#include <lloyal/decode.hpp>
 #include <lloyal/sampler.hpp>
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/common.hpp>
@@ -417,7 +417,7 @@ public:
 
   void Execute() override {
     try {
-      lloyal::decoder::decode_tokens(_ctx, _tokens, _pos, _nBatch, _seqId);
+      lloyal::decode::many(_ctx, _tokens, _pos, _nBatch, _seqId);
     } catch (const std::exception& e) {
       SetError(e.what());
     }
@@ -669,11 +669,16 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchGetSeqId", &SessionContext::_branchGetSeqId),
     InstanceMethod("_branchGetPosition", &SessionContext::_branchGetPosition),
     InstanceMethod("_branchGetPerplexity", &SessionContext::_branchGetPerplexity),
+    InstanceMethod("_branchGetLogits", &SessionContext::_branchGetLogits),
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchDestroy", &SessionContext::_branchDestroy),
     InstanceMethod("_branchSamplerChainReseed", &SessionContext::_branchSamplerChainReseed),
     InstanceMethod("_branchSteer", &SessionContext::_branchSteer),
     InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
+
+    // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
+    InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
+    InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
 
     // ===== PROPERTIES =====
     InstanceAccessor("vocabSize", &SessionContext::getVocabSize, nullptr),
@@ -1475,7 +1480,11 @@ Napi::Value SessionContext::acceptSamplerToken(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Invalid sampler handle");
   }
 
-  llama_sampler_accept(it->second, token);
+  try {
+    llama_sampler_accept(it->second, token);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
   return env.Undefined();
 }
 
@@ -1729,7 +1738,7 @@ Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
     _decodeStepId++;
 
     // Decode
-    lloyal::decoder::decode_tokens(_context, tokens, position, _nBatch, seqId);
+    lloyal::decode::many(_context, tokens, position, _nBatch, seqId);
 
     // Capture logits immediately
     float* logits = lloyal::logits::get(_context, -1);
@@ -2361,6 +2370,28 @@ Napi::Value SessionContext::_branchGetPerplexity(const Napi::CallbackInfo& info)
   return Napi::Number::New(env, ppl);
 }
 
+Napi::Value SessionContext::_branchGetLogits(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchGetLogits requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  const float* logits = lloyal::branch::get_logits(handle, &_branchStore);
+
+  if (!logits) {
+    throw Napi::Error::New(env, "_branchGetLogits: no logits captured");
+  }
+
+  int n_vocab = lloyal::branch::get_n_vocab(handle, &_branchStore);
+  Napi::Float32Array result = Napi::Float32Array::New(env, n_vocab);
+  std::memcpy(result.Data(), logits, n_vocab * sizeof(float));
+
+  return result;
+}
+
 Napi::Value SessionContext::_branchPrune(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -2480,6 +2511,87 @@ Napi::Value SessionContext::_branchClearSteer(const Napi::CallbackInfo& info) {
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
 
   lloyal::branch::clear_steer(handle, &_branchStore);
+
+  return env.Undefined();
+}
+
+// ===== STORE API =====
+
+Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
+    throw Napi::Error::New(env, "_storeCommit requires (handles[], tokens[])");
+  }
+
+  Napi::Array jsHandles = info[0].As<Napi::Array>();
+  Napi::Array jsTokens = info[1].As<Napi::Array>();
+  uint32_t n = jsHandles.Length();
+
+  if (jsTokens.Length() != n) {
+    throw Napi::Error::New(env, "_storeCommit: handles and tokens must have same length");
+  }
+
+  if (n == 0) return env.Undefined();
+
+  std::vector<lloyal::branch::DecodeEachItem> items(n);
+
+  for (uint32_t i = 0; i < n; i++) {
+    items[i].handle = static_cast<lloyal::branch::BranchHandle>(
+      jsHandles.Get(i).As<Napi::Number>().Uint32Value());
+    items[i].token = static_cast<llama_token>(
+      jsTokens.Get(i).As<Napi::Number>().Int32Value());
+  }
+
+  // Batched decode first: if it throws, sampler state remains consistent
+  _branchStore.decode_each(items);
+
+  // Accept tokens into sampler penalty windows (CPU, per-branch)
+  for (uint32_t i = 0; i < n; i++) {
+    lloyal::branch::accept_token(items[i].handle, items[i].token, &_branchStore);
+  }
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
+    throw Napi::Error::New(env, "_storePrefill requires (handles[], tokenArrays[][])");
+  }
+
+  Napi::Array jsHandles = info[0].As<Napi::Array>();
+  Napi::Array jsTokenArrays = info[1].As<Napi::Array>();
+  uint32_t n = jsHandles.Length();
+
+  if (jsTokenArrays.Length() != n) {
+    throw Napi::Error::New(env, "_storePrefill: handles and tokenArrays must have same length");
+  }
+
+  if (n == 0) return env.Undefined();
+
+  std::vector<std::vector<llama_token>> tokenStorage(n);
+  std::vector<lloyal::branch::DecodeScatterItem> items(n);
+
+  for (uint32_t i = 0; i < n; i++) {
+    items[i].handle = static_cast<lloyal::branch::BranchHandle>(
+      jsHandles.Get(i).As<Napi::Number>().Uint32Value());
+
+    Napi::Array jsArr = jsTokenArrays.Get(i).As<Napi::Array>();
+    uint32_t len = jsArr.Length();
+    tokenStorage[i].resize(len);
+    for (uint32_t j = 0; j < len; j++) {
+      tokenStorage[i][j] = static_cast<llama_token>(
+        jsArr.Get(j).As<Napi::Number>().Int32Value());
+    }
+    items[i].tokens = tokenStorage[i];
+  }
+
+  // Batched decode: variable tokens per branch, auto-chunked
+  _branchStore.decode_scatter(items);
 
   return env.Undefined();
 }
