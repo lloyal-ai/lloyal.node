@@ -2544,13 +2544,13 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
       jsTokens.Get(i).As<Napi::Number>().Int32Value());
   }
 
+  // Batched decode first: if it throws, sampler state remains consistent
+  _branchStore.decode_each(items);
+
   // Accept tokens into sampler penalty windows (CPU, per-branch)
   for (uint32_t i = 0; i < n; i++) {
     lloyal::branch::accept_token(items[i].handle, items[i].token, &_branchStore);
   }
-
-  // Batched decode: one token per branch, single llama_decode dispatch
-  _branchStore.decode_each(items);
 
   return env.Undefined();
 }
