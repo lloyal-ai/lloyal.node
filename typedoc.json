@@ -17,23 +17,18 @@
   ],
   "navigation": {
     "includeCategories": true,
-    "includeGroups": true
+    "includeGroups": false
   },
-  "categorizeByGroup": true,
+  "categorizeByGroup": false,
   "defaultCategory": "Core",
   "categoryOrder": [
     "Core",
-    "Configuration",
     "Sampling",
+    "Chat",
+    "Branching",
     "*"
   ],
   "sort": ["kind", "instance-first", "required-first", "alphabetical"],
-  "kindSortOrder": [
-    "Function",
-    "Interface",
-    "Enum",
-    "TypeAlias"
-  ],
   "excludePrivate": true,
   "excludeProtected": false,
   "excludeExternals": false,

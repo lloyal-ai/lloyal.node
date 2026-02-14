@@ -2,6 +2,18 @@
  * liblloyal-node TypeScript Definitions
  *
  * N-API bindings for liblloyal - Node.js native addon for llama.cpp inference
+ *
+ * @categoryDescription Core
+ * Entry points, context lifecycle, and the main inference interface.
+ *
+ * @categoryDescription Sampling
+ * Sampler chain configuration — temperature, penalties, nucleus sampling, and advanced filters.
+ *
+ * @categoryDescription Chat
+ * Chat template formatting, output parsing, tool calls, and reasoning extraction.
+ *
+ * @categoryDescription Branching
+ * Parallel and tree-structured generation with batched GPU dispatch.
  */
 
 /**
@@ -14,6 +26,8 @@
  *
  * If the requested variant is unavailable (package not installed or
  * runtime libraries missing), loading automatically falls back to CPU.
+ *
+ * @category Core
  */
 export type GpuVariant = 'default' | 'cuda' | 'vulkan';
 
@@ -22,6 +36,8 @@ export type GpuVariant = 'default' | 'cuda' | 'vulkan';
  *
  * Controls which native binary variant is loaded when creating a context.
  * Use this for explicit GPU variant selection with automatic fallback.
+ *
+ * @category Core
  */
 export interface LoadOptions {
   /**
@@ -48,6 +64,8 @@ export interface LoadOptions {
 
 /**
  * Pooling type for embedding extraction
+ *
+ * @category Core
  */
 export enum PoolingType {
   /** No pooling - raw per-token embeddings */
@@ -76,6 +94,8 @@ export enum PoolingType {
  * - **nSeqMax**: Set ≥ your max concurrent branch count + 1 (root sequence).
  *   Each sequence shares the same KV cache memory pool — cost is metadata only
  *   under unified KV, not a per-sequence memory multiplier.
+ *
+ * @category Core
  */
 export interface ContextOptions {
   /** Path to .gguf model file */
@@ -137,6 +157,8 @@ export interface ContextOptions {
  *
  * Only commonly-used values are listed. The full set matches llama.cpp's
  * `common_chat_format` enum (30+ formats).
+ *
+ * @category Chat
  */
 export enum ChatFormat {
   /** Plain content, no special formatting */
@@ -152,6 +174,8 @@ export enum ChatFormat {
  *
  * @see {@link FormatChatOptions.reasoningFormat} for input-side usage
  * @see {@link ParseChatOutputOptions.reasoningFormat} for output-side usage
+ *
+ * @category Chat
  */
 export enum ReasoningFormat {
   /** No reasoning extraction (default) */
@@ -171,6 +195,8 @@ export enum ReasoningFormat {
  *
  * @see {@link GrammarTrigger}
  * @see {@link FormattedChatResult.grammarTriggers}
+ *
+ * @category Chat
  */
 export enum GrammarTriggerType {
   /** Trigger on a specific token ID */
@@ -197,6 +223,8 @@ export enum GrammarTriggerType {
  *   reasoningFormat: 'auto',
  * });
  * ```
+ *
+ * @category Chat
  */
 export interface FormatChatOptions {
   /** Custom Jinja2 template override (bypasses model's built-in template) */
@@ -264,6 +292,8 @@ export interface FormatChatOptions {
  * Defines conditions for lazy grammar activation. When `grammarLazy` is true
  * in {@link FormattedChatResult}, generation runs unconstrained until one of
  * these triggers fires, at which point the grammar is activated.
+ *
+ * @category Chat
  */
 export interface GrammarTrigger {
   /** Trigger type */
@@ -294,6 +324,8 @@ export interface GrammarTrigger {
  * ```
  *
  * @see {@link SessionContext.parseChatOutput}
+ *
+ * @category Chat
  */
 export interface FormattedChatResult {
   /** Formatted prompt string ready for tokenization */
@@ -335,6 +367,8 @@ export interface FormattedChatResult {
  * fields from {@link FormattedChatResult}.
  *
  * @see {@link FormattedChatResult}
+ *
+ * @category Chat
  */
 export interface ParseChatOutputOptions {
   /**
@@ -367,6 +401,8 @@ export interface ParseChatOutputOptions {
  *   await executeTool(tc.name, args);
  * }
  * ```
+ *
+ * @category Chat
  */
 export interface ParsedToolCall {
   /** Tool/function name */
@@ -392,6 +428,8 @@ export interface ParsedToolCall {
  *   console.log(result.content);
  * }
  * ```
+ *
+ * @category Chat
  */
 export interface ParseChatOutputResult {
   /** Main response text */
@@ -410,6 +448,8 @@ export interface ParseChatOutputResult {
 
 /**
  * Penalty parameters for repetition control
+ *
+ * @category Sampling
  */
 export interface PenaltyParams {
   /** Repetition penalty (1.0 = disabled, >1.0 = penalize repeats) */
@@ -433,6 +473,8 @@ export interface PenaltyParams {
  * where temperature alone produces inconsistent quality.
  *
  * Use Mirostat v2 (mode: 2) for most cases - it's more stable than v1.
+ *
+ * @category Sampling
  */
 export interface MirostatParams {
   /** Mirostat mode (0 = disabled, 1 = v1, 2 = v2). Recommended: 2 */
@@ -451,6 +493,8 @@ export interface MirostatParams {
  * Penalizes repetition of token sequences, more sophisticated than
  * simple repetition penalty. Useful for reducing loops and redundancy
  * in generated text.
+ *
+ * @category Sampling
  */
 export interface DryParams {
   /** Penalty strength (0.0 = disabled, higher = stronger penalty) */
@@ -471,6 +515,8 @@ export interface DryParams {
  *
  * Excludes very high probability tokens to increase output diversity.
  * Useful when model is overly confident and produces repetitive text.
+ *
+ * @category Sampling
  */
 export interface XtcParams {
   /** Probability of applying XTC (0.0 = disabled, 1.0 = always). Typical: 0.1 */
@@ -482,6 +528,8 @@ export interface XtcParams {
 
 /**
  * Advanced sampling parameters
+ *
+ * @category Sampling
  */
 export interface AdvancedSamplingParams {
   /** Locally typical sampling (1.0 = disabled) */
@@ -518,6 +566,8 @@ export interface AdvancedSamplingParams {
  * - Balanced: `{ temperature: 0.7 }`
  * - Creative: `{ temperature: 1.0 }`
  * - Deterministic greedy: `{ temperature: 0, topK: 0, topP: 1.0, minP: 0 }`
+ *
+ * @category Sampling
  */
 export interface SamplingParams {
   // ===== COMMON CONTROLS =====
@@ -582,6 +632,8 @@ export interface SamplingParams {
  *
  * Use {@link createContext} to initialize, and `dispose()` when done to free
  * GPU/CPU memory.
+ *
+ * @category Core
  */
 export interface SessionContext {
   // ===== THE GENERATION LOOP =====
@@ -1883,6 +1935,8 @@ export interface SessionContext {
  *   { gpuVariant: 'cuda' }
  * );
  * ```
+ *
+ * @category Core
  */
 export function createContext(
   options: ContextOptions,
@@ -1932,6 +1986,8 @@ export function createContext(
  * // Create context from loaded binary
  * const ctx = await binary.createContext({ modelPath: './model.gguf' });
  * ```
+ *
+ * @category Core
  */
 export function loadBinary(variant?: GpuVariant): {
   createContext(options: ContextOptions): Promise<SessionContext>;
@@ -1993,6 +2049,8 @@ export function loadBinary(variant?: GpuVariant): {
  *   return logits[0];
  * });
  * ```
+ *
+ * @category Core
  */
 export function withLogits<T>(
   ctx: SessionContext,
@@ -2001,6 +2059,8 @@ export function withLogits<T>(
 
 /**
  * Result from Branch.produce()
+ *
+ * @category Branching
  */
 export interface Produced {
   /** Sampled token ID */
@@ -2051,6 +2111,8 @@ export interface Produced {
  * const best = candidates.reduce((a, b) => a.perplexity < b.perplexity ? a : b);
  * for (const c of candidates) { if (c !== best) c.prune(); }
  * ```
+ *
+ * @category Branching
  */
 export class Branch {
   /**
@@ -2342,6 +2404,8 @@ export class Branch {
  * ]);
  * // Bin-packed into ceil(1012 / nBatch) GPU dispatches
  * ```
+ *
+ * @category Branching
  */
 export class BranchStore {
   constructor(ctx: SessionContext);
