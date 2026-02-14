@@ -42,7 +42,7 @@ function* tokenGenerator(ctx, grammarHandle, maxTokens = 100) {
     const logits = ctx.getLogits();
     ctx.applySampler(grammarHandle, logits);
 
-    const token = ctx.sample({ temperature: 0.7 });
+    const token = ctx.sample();
     if (ctx.isStopToken(token)) return;
 
     // Advance grammar state

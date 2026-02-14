@@ -1480,7 +1480,11 @@ Napi::Value SessionContext::acceptSamplerToken(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Invalid sampler handle");
   }
 
-  llama_sampler_accept(it->second, token);
+  try {
+    llama_sampler_accept(it->second, token);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
+  }
   return env.Undefined();
 }
 
