@@ -415,7 +415,6 @@ private:
 
   // ===== BRANCH STORE =====
   lloyal::branch::BranchStore _branchStore{16};  // capacity 16
-  lloyal::decode::Scratch _decodeScratch;  // reusable scratch for batched decode
 
   // ===== TURN SEPARATOR CACHE =====
   std::vector<llama_token> _turnSeparatorCache;

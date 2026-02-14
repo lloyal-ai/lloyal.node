@@ -2531,24 +2531,22 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
 
   if (n == 0) return env.Undefined();
 
-  std::vector<lloyal::branch::BranchHandle> handles(n);
-  std::vector<llama_token> tokens(n);
+  std::vector<lloyal::branch::DecodeEachItem> items(n);
 
   for (uint32_t i = 0; i < n; i++) {
-    handles[i] = static_cast<lloyal::branch::BranchHandle>(
+    items[i].handle = static_cast<lloyal::branch::BranchHandle>(
       jsHandles.Get(i).As<Napi::Number>().Uint32Value());
-    tokens[i] = static_cast<llama_token>(
+    items[i].token = static_cast<llama_token>(
       jsTokens.Get(i).As<Napi::Number>().Int32Value());
   }
 
   // Accept tokens into sampler penalty windows (CPU, per-branch)
   for (uint32_t i = 0; i < n; i++) {
-    lloyal::branch::accept_token(handles[i], tokens[i], &_branchStore);
+    lloyal::branch::accept_token(items[i].handle, items[i].token, &_branchStore);
   }
 
   // Batched decode: one token per branch, single llama_decode dispatch
-  _branchStore.decode_each(handles.data(), tokens.data(),
-                           static_cast<int32_t>(n), _decodeScratch);
+  _branchStore.decode_each(items);
 
   return env.Undefined();
 }
@@ -2571,13 +2569,11 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
 
   if (n == 0) return env.Undefined();
 
-  std::vector<lloyal::branch::BranchHandle> handles(n);
   std::vector<std::vector<llama_token>> tokenStorage(n);
-  std::vector<const llama_token*> tokenPtrs(n);
-  std::vector<int32_t> tokenCounts(n);
+  std::vector<lloyal::branch::DecodeScatterItem> items(n);
 
   for (uint32_t i = 0; i < n; i++) {
-    handles[i] = static_cast<lloyal::branch::BranchHandle>(
+    items[i].handle = static_cast<lloyal::branch::BranchHandle>(
       jsHandles.Get(i).As<Napi::Number>().Uint32Value());
 
     Napi::Array jsArr = jsTokenArrays.Get(i).As<Napi::Array>();
@@ -2587,14 +2583,11 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
       tokenStorage[i][j] = static_cast<llama_token>(
         jsArr.Get(j).As<Napi::Number>().Int32Value());
     }
-    tokenPtrs[i] = tokenStorage[i].data();
-    tokenCounts[i] = static_cast<int32_t>(len);
+    items[i].tokens = tokenStorage[i];
   }
 
   // Batched decode: variable tokens per branch, auto-chunked
-  _branchStore.decode_scatter(handles.data(), tokenPtrs.data(),
-                              tokenCounts.data(), static_cast<int32_t>(n),
-                              _decodeScratch);
+  _branchStore.decode_scatter(items);
 
   return env.Undefined();
 }
