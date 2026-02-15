@@ -86,7 +86,7 @@ async function main() {
       fmt = await ctx.formatChat(JSON.stringify(messages));
       const tokens = await ctx.tokenize(fmt.prompt);
       await ctx.decode(tokens, 0, 0);
-      branch = Branch.create(ctx, 0, tokens.length, {
+      branch = Branch.create(ctx, tokens.length, {
         temperature: 0.7,
         topK: 40,
         topP: 0.9,

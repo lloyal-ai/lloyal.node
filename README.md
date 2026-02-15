@@ -1,58 +1,117 @@
 # lloyal.node
 
-**Covalent inference for Node.js**
+[![Build & Test](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml)
+[![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
+[![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-b6870-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b6870)
 
-Forkable inference state for llama.cpp — Branch a generation into a tree — prefix sharing is the bond across branches while each owns its own machinery (sampler chain, seed, grammar, logits snapshot, perplexity tracker) enabling controlled divergence at decode time.
+**Covalent Inference for Node.js**
 
-## Branch API
+Composable inference primitives for forkable decode state, shared-prefix KV branching, and continuous tree batching. Branches share a KV prefix while keeping independent machinery — sampler chain, grammar, logits snapshot, perplexity tracker — for controlled divergence at decode time. `BranchStore` packs tokens from N branches (each at a different position, different seq_id, each needing independent logits captured) into a single `llama_batch` and dispatches once. `kv::tenancy` manages seq_id leases automatically — acquired on `create()`/`fork()`, evicted on `prune()`, rebuilt on `retainOnly()`.
 
-Fork from root for best-of-N, fork from children for MCTS/beam search, fork from a draft for speculative decoding. The produce/commit protocol separates sampling from state advancement — sample without writing to KV, inspect the result, then decide whether to commit.
+Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
+
+## The Branch API
 
 ```javascript
-import { createContext, Branch } from "@lloyal-labs/lloyal.node";
+import { createContext, Branch, BranchStore } from "@lloyal-labs/lloyal.node";
 
-const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 8 });
-const tokens = await ctx.tokenize("Once upon a time");
-await ctx.decode(tokens, 0, 0);
+const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 6 });
+const store = new BranchStore(ctx);
 
-// Create root branch, freeze logits from prefill
-const root = Branch.create(ctx, 0, tokens.length, { temperature: 0.8 });
+// Shared prompt: "Explain quantum entanglement"
+const prompt = await ctx.tokenize("Explain quantum entanglement");
+await ctx.decode(prompt, 0, 0);
+
+const root = Branch.create(ctx, prompt.length, { temperature: 0.8 });
 root.captureLogits();
 
-// Fork N candidates — KV prefix shared, sampler/grammar/logits/perplexity cloned
-const candidates = [1, 2, 3, 4, 5].map((seqId, i) => {
-  const branch = root.fork(seqId);
-  branch.reseedSampler(1000 + i);
-  return branch;
-});
+// Fork 4 branches — each gets a different reasoning prefix
+const analogy  = root.fork();
+const formal   = root.fork();
+const socratic = root.fork();
+const visual   = root.fork();
 
-// Generate (interleaved round-robin)
-for (let t = 0; t < 50; t++) {
-  for (const branch of candidates) {
-    const { token, isStop } = branch.produce(); // Sample, no KV write
-    if (isStop) continue;
-    branch.commit(token); // Accept + forward pass + capture
-  }
+// Scatter-prefill: inject divergent prefixes in one batched dispatch
+// 4 branches × variable lengths → auto bin-packed into minimal GPU calls
+store.prefill([
+  [analogy,  await ctx.tokenize("Think of it like two coins...")],    // 12 tokens
+  [formal,   await ctx.tokenize("In quantum mechanics, the...")],     // 8 tokens
+  [socratic, await ctx.tokenize("What happens when you measure...")], // 10 tokens
+  [visual,   await ctx.tokenize("Imagine two particles...")],         // 7 tokens
+]);
+
+// Generate — all 4 in lockstep, 1 GPU call per step
+const branches = [analogy, formal, socratic, visual];
+for (;;) {
+  const live = branches.filter(b => !b.disposed);
+  if (!live.length) break;
+  const produced = live.map(b => ({ b, ...b.produce() }));
+
+  // Prune branches that hit stop tokens
+  produced.filter(p => p.isStop).forEach(p => p.b.prune());
+
+  // Commit survivors — accept + decode in one GPU dispatch
+  const items = produced
+    .filter(p => !p.isStop)
+    .map(p => { p.b.accept(p.token); return [p.b, p.token]; });
+  store.commit(items);
 }
 
-// Select by perplexity, prune losers
-const best = candidates.reduce((a, b) => (a.perplexity < b.perplexity ? a : b));
-for (const c of candidates) {
-  if (c !== best) c.prune();
-}
+// Winner takes all — one seq_keep pass, losers vaporized
+const winner = branches
+  .filter(b => !b.disposed)
+  .reduce((a, b) => (a.perplexity < b.perplexity ? a : b));
+store.retainOnly(winner);
+// store.available === nSeqMax - 1 — all leases recovered
 ```
 
-**What `fork()` shares:** KV cache prefix (metadata-only under unified KV — no tensor buffers copied).
+## Continuous Tree Batching
 
-**What `fork()` clones:** Logits snapshot, sampler chain (penalties + PRNG), grammar state, logit bias, perplexity tracker.
+Tree search with N branches means N calls to `llama_decode()` — each paying GPU dispatch overhead, memory barriers, and PCIe round-trips. `BranchStore` eliminates this: tokens from N branches — each at a different position, different seq_id, each needing independent logits captured — are packed into a single `llama_batch` and dispatched once. N branches, 1 GPU call.
 
-**Key methods:**
+Two packing strategies for different access patterns:
 
-- `produce()` / `commit()` — two-phase: sample without KV write, then advance
-- `prune()` — discard loser and its divergent KV entries
-- `destroy()` — release handle, keep KV (for winners continuing with raw ops)
-- `reseedSampler()` — unique PRNG per fork for stochastic diversity
-- `perplexity` — rolling PPL per branch for quality-based selection
+```javascript
+// commit: 1 token per branch — synchronous tree expansion
+store.commit([[branch1, tok1], [branch2, tok2], [branch3, tok3]]);
+
+// prefill: variable tokens per branch — asymmetric injection
+store.prefill([
+  [branchA, systemTokens],  // 200 tokens
+  [branchB, queryTokens],   //  12 tokens
+  [branchC, docTokens],     // 800 tokens
+]);
+// Greedy bin-packed into ceil(total / nBatch) dispatches
+```
+
+## KV Tenancy
+
+Two resources, two scales. Slots (65K) are how many branches can *exist* — cheap CPU state. Leases (`nSeqMax`) are how many can *decode* — scarce KV cache residency. Tenancy manages the scarce resource automatically: leases are acquired on `create()`/`fork()`, evicted on `prune()`, rebuilt on `retainOnly()`. No manual seq_id tracking, ever.
+
+```javascript
+store.available;             // leases remaining — use for width/depth budget
+store.retainOnly(winner);    // nuclear: 1 seq_keep, rebuild vacancy
+```
+
+The turn lifecycle: search is surgical (N × `prune()`), promotion is nuclear (1 × `retainOnly()`). Per turn, fork → expand → evaluate → prune losers → repeat. Between turns, promote winner → tree is gone → next turn starts fresh.
+
+## Topology
+
+Parent/child edges are always-on. Simple chat → best-of-N → deep search is one continuum.
+
+```javascript
+branch.parent;       // handle or null if root
+branch.children;     // child handles
+branch.isLeaf;       // no children?
+branch.isActive;     // holds a KV lease?
+```
+
+| Method | FK analogy | Behavior |
+|--------|-----------|----------|
+| `prune()` | RESTRICT | Throws if children exist |
+| `pruneSubtree()` | CASCADE | Iterative post-order traversal |
 
 ---
 

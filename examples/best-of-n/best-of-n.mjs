@@ -105,7 +105,7 @@ async function main() {
     console.log(`\nPrompt: "${userPrompt}"`);
   }
 
-  // Prefill prompt on seq 0
+  // Prefill prompt
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
 
@@ -115,7 +115,7 @@ async function main() {
 
   // CRITICAL: Create root branch IMMEDIATELY after prefill to capture logits
   // The root branch stores a snapshot of the logits for fork operations
-  const root = Branch.create(ctx, 0, promptTokens.length, {
+  const root = Branch.create(ctx, promptTokens.length, {
     temperature: HIGH_TEMP,
     topP: 0.95,
   });
@@ -124,20 +124,12 @@ async function main() {
   // === Baseline: Single generation with low temperature ===
   if (!jsonlMode) {
     console.log('\n' + '='.repeat(70));
-    console.log('BASELINE: Single generation (T=0.3)');
+    console.log('BASELINE: Single generation (forked from root)');
     console.log('='.repeat(70));
   }
 
-  // Create baseline branch on seq 1 with LOW temperature
-  // We capture logits now (they're still the prefill logits in context)
-  const baselineBranch = Branch.create(ctx, 1, promptTokens.length, {
-    temperature: LOW_TEMP,
-    topP: 0.95,
-  });
-  baselineBranch.captureLogits();
-
-  // Copy KV cache from seq 0 (prompt) to seq 1 (baseline)
-  ctx.kvSeqCopy(0, 1);
+  // Fork baseline from root — inherits KV prefix + logits snapshot
+  const baselineBranch = root.fork();
 
   const baseline = await generateWithBranch(baselineBranch, MAX_TOKENS, ctx);
 
@@ -161,8 +153,7 @@ async function main() {
   // CRITICAL: Reseed each branch's sampler for diversity (otherwise all produce identical output)
   const branches = [];
   for (let i = 0; i < N; i++) {
-    const seqId = i + 2;  // seqIds: 2, 3, 4, 5, 6 (baseline used 1)
-    const branch = root.fork(seqId);
+    const branch = root.fork();
     branch.reseedSampler(1000 + i);  // Unique seed per branch
     branches.push(branch);
   }

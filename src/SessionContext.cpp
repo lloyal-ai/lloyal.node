@@ -666,12 +666,15 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchDecodeAndCaptureBatch", &SessionContext::_branchDecodeAndCaptureBatch),
     InstanceMethod("_branchSample", &SessionContext::_branchSample),
     InstanceMethod("_branchAccept", &SessionContext::_branchAccept),
-    InstanceMethod("_branchGetSeqId", &SessionContext::_branchGetSeqId),
     InstanceMethod("_branchGetPosition", &SessionContext::_branchGetPosition),
     InstanceMethod("_branchGetPerplexity", &SessionContext::_branchGetPerplexity),
     InstanceMethod("_branchGetLogits", &SessionContext::_branchGetLogits),
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
-    InstanceMethod("_branchDestroy", &SessionContext::_branchDestroy),
+    InstanceMethod("_branchPruneSubtree", &SessionContext::_branchPruneSubtree),
+    InstanceMethod("_branchParent", &SessionContext::_branchParent),
+    InstanceMethod("_branchChildren", &SessionContext::_branchChildren),
+    InstanceMethod("_branchIsLeaf", &SessionContext::_branchIsLeaf),
+    InstanceMethod("_branchIsActive", &SessionContext::_branchIsActive),
     InstanceMethod("_branchSamplerChainReseed", &SessionContext::_branchSamplerChainReseed),
     InstanceMethod("_branchSteer", &SessionContext::_branchSteer),
     InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
@@ -679,6 +682,8 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
     InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
+    InstanceMethod("_storeRetainOnly", &SessionContext::_storeRetainOnly),
+    InstanceMethod("_storeAvailable", &SessionContext::_storeAvailable),
 
     // ===== PROPERTIES =====
     InstanceAccessor("vocabSize", &SessionContext::getVocabSize, nullptr),
@@ -741,6 +746,7 @@ void SessionContext::initializeContext(
   _model = std::move(model);
   _context = context;
   _nBatch = nBatch;
+  _branchStore.init_tenancy(_context);
 
   std::cerr << "[SessionContext::initializeContext] Initialized:" << std::endl;
   std::cerr << "  Model ptr: " << static_cast<void*>(_model.get()) << std::endl;
@@ -1326,6 +1332,9 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
       lloyal::sampler::free_chain(_samplerChain);
       _samplerChain = nullptr;
     }
+
+    // Drain branch store while context is still alive
+    _branchStore.drain();
 
     // Free context
     if (_context) {
@@ -2167,44 +2176,41 @@ Napi::Value SessionContext::_branchCreate(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
-  if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchCreate requires (seqId, position[, params[, nBatch[, grammar]]])");
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchCreate requires (position[, params[, nBatch[, grammar]]])");
   }
 
-  auto seqId = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());
-  auto position = static_cast<llama_pos>(info[1].As<Napi::Number>().Int32Value());
+  auto position = static_cast<llama_pos>(info[0].As<Napi::Number>().Int32Value());
 
-  // Extract sampling params from JS object (optional third arg)
+  // Extract sampling params from JS object (optional 2nd arg)
   LloyalSamplingParams params;
-  if (info.Length() >= 3 && info[2].IsObject()) {
-    params = adaptSamplingParamsFromJS(info[2].As<Napi::Object>());
+  if (info.Length() >= 2 && info[1].IsObject()) {
+    params = adaptSamplingParamsFromJS(info[1].As<Napi::Object>());
   }
 
-  // Per-branch nBatch override (optional 4th arg), falls back to context default
+  // Per-branch nBatch override (optional 3rd arg), falls back to context default
   int32_t nBatch = _nBatch;
-  if (info.Length() >= 4 && info[3].IsNumber()) {
-    nBatch = info[3].As<Napi::Number>().Int32Value();
+  if (info.Length() >= 3 && info[2].IsNumber()) {
+    nBatch = info[2].As<Napi::Number>().Int32Value();
   }
 
-  // Grammar string (optional 5th arg)
+  // Grammar string (optional 4th arg)
   const char* grammar_str = nullptr;
-  std::string grammar_storage;  // Keep string alive for duration of create()
-  if (info.Length() >= 5 && info[4].IsString()) {
-    grammar_storage = info[4].As<Napi::String>().Utf8Value();
+  std::string grammar_storage;
+  if (info.Length() >= 4 && info[3].IsString()) {
+    grammar_storage = info[3].As<Napi::String>().Utf8Value();
     grammar_str = grammar_storage.c_str();
   }
 
-  // Create branch using lloyal::branch::create
+  // Create branch — seq_id allocated internally by tenancy
   auto handle = lloyal::branch::create(
     _context,
     _model.get(),
-    seqId,
+    _branchStore,
     position,
     params,
-    nBatch,       // per-branch override or context default
-    grammar_str,  // grammar GBNF string (or nullptr)
-    nullptr,      // boundary_tracker
-    &_branchStore
+    nBatch,
+    grammar_str
   );
 
   if (handle == lloyal::branch::INVALID_HANDLE) {
@@ -2218,14 +2224,13 @@ Napi::Value SessionContext::_branchFork(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
-  if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchFork requires (handle, newSeqId)");
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchFork requires (handle)");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto newSeqId = static_cast<llama_seq_id>(info[1].As<Napi::Number>().Int32Value());
 
-  auto newHandle = lloyal::branch::fork(handle, newSeqId, &_branchStore);
+  auto newHandle = lloyal::branch::fork(handle, _branchStore);
 
   if (newHandle == lloyal::branch::INVALID_HANDLE) {
     throw Napi::Error::New(env, "Failed to fork branch");
@@ -2243,7 +2248,7 @@ Napi::Value SessionContext::_branchCaptureLogits(const Napi::CallbackInfo& info)
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  lloyal::branch::capture_logits(handle, &_branchStore);
+  lloyal::branch::capture_logits(handle, _branchStore);
 
   return env.Undefined();
 }
@@ -2259,7 +2264,7 @@ Napi::Value SessionContext::_branchDecodeAndCaptureOne(const Napi::CallbackInfo&
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
   auto token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
 
-  lloyal::branch::decode_and_capture_one(handle, token, &_branchStore);
+  lloyal::branch::decode_and_capture_one(handle, token, _branchStore);
 
   return env.Undefined();
 }
@@ -2292,7 +2297,7 @@ Napi::Value SessionContext::_branchDecodeAndCaptureBatch(const Napi::CallbackInf
   }
 
   if (!tokens.empty()) {
-    lloyal::branch::decode_and_capture_batch(handle, tokens.data(), tokens.size(), &_branchStore);
+    lloyal::branch::decode_and_capture_batch(handle, tokens.data(), tokens.size(), _branchStore);
   }
 
   return env.Undefined();
@@ -2307,7 +2312,7 @@ Napi::Value SessionContext::_branchSample(const Napi::CallbackInfo& info) {
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto token = lloyal::branch::sample(handle, &_branchStore);
+  auto token = lloyal::branch::sample(handle, _branchStore);
 
   return Napi::Number::New(env, token);
 }
@@ -2323,24 +2328,11 @@ Napi::Value SessionContext::_branchAccept(const Napi::CallbackInfo& info) {
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
   auto token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
 
-  lloyal::branch::accept_token(handle, token, &_branchStore);
+  lloyal::branch::accept_token(handle, token, _branchStore);
 
   return env.Undefined();
 }
 
-Napi::Value SessionContext::_branchGetSeqId(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchGetSeqId requires (handle)");
-  }
-
-  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto seqId = lloyal::branch::get_seq_id(handle, &_branchStore);
-
-  return Napi::Number::New(env, seqId);
-}
 
 Napi::Value SessionContext::_branchGetPosition(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -2351,7 +2343,7 @@ Napi::Value SessionContext::_branchGetPosition(const Napi::CallbackInfo& info) {
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto position = lloyal::branch::get_position(handle, &_branchStore);
+  auto position = lloyal::branch::get_position(handle, _branchStore);
 
   return Napi::Number::New(env, position);
 }
@@ -2365,7 +2357,7 @@ Napi::Value SessionContext::_branchGetPerplexity(const Napi::CallbackInfo& info)
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto ppl = lloyal::branch::get_perplexity(handle, &_branchStore);
+  auto ppl = lloyal::branch::get_perplexity(handle, _branchStore);
 
   return Napi::Number::New(env, ppl);
 }
@@ -2379,13 +2371,13 @@ Napi::Value SessionContext::_branchGetLogits(const Napi::CallbackInfo& info) {
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  const float* logits = lloyal::branch::get_logits(handle, &_branchStore);
+  const float* logits = lloyal::branch::get_logits(handle, _branchStore);
 
   if (!logits) {
     throw Napi::Error::New(env, "_branchGetLogits: no logits captured");
   }
 
-  int n_vocab = lloyal::branch::get_n_vocab(handle, &_branchStore);
+  int n_vocab = lloyal::branch::get_n_vocab(handle, _branchStore);
   Napi::Float32Array result = Napi::Float32Array::New(env, n_vocab);
   std::memcpy(result.Data(), logits, n_vocab * sizeof(float));
 
@@ -2401,24 +2393,11 @@ Napi::Value SessionContext::_branchPrune(const Napi::CallbackInfo& info) {
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  lloyal::branch::prune(handle, &_branchStore);
+  lloyal::branch::prune(handle, _branchStore);
 
   return env.Undefined();
 }
 
-Napi::Value SessionContext::_branchDestroy(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchDestroy requires (handle)");
-  }
-
-  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  lloyal::branch::destroy(handle, &_branchStore);
-
-  return env.Undefined();
-}
 
 Napi::Value SessionContext::_branchSamplerChainReseed(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -2495,7 +2474,7 @@ Napi::Value SessionContext::_branchSteer(const Napi::CallbackInfo& info) {
         }
       }
     }
-  }, &_branchStore);
+  }, _branchStore);
 
   return env.Undefined();
 }
@@ -2510,7 +2489,7 @@ Napi::Value SessionContext::_branchClearSteer(const Napi::CallbackInfo& info) {
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
 
-  lloyal::branch::clear_steer(handle, &_branchStore);
+  lloyal::branch::clear_steer(handle, _branchStore);
 
   return env.Undefined();
 }
@@ -2549,7 +2528,7 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
 
   // Accept tokens into sampler penalty windows (CPU, per-branch)
   for (uint32_t i = 0; i < n; i++) {
-    lloyal::branch::accept_token(items[i].handle, items[i].token, &_branchStore);
+    lloyal::branch::accept_token(items[i].handle, items[i].token, _branchStore);
   }
 
   return env.Undefined();
@@ -2594,6 +2573,100 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
   _branchStore.decode_scatter(items);
 
   return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchPruneSubtree(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchPruneSubtree requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  lloyal::branch::pruneSubtree(handle, _branchStore);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchParent(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchParent requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  auto parent = _branchStore.parent(handle);
+
+  return Napi::Number::New(env, parent);
+}
+
+Napi::Value SessionContext::_branchChildren(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchChildren requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  const auto& children = _branchStore.children(handle);
+
+  Napi::Array result = Napi::Array::New(env, children.size());
+  for (size_t i = 0; i < children.size(); i++) {
+    result.Set(static_cast<uint32_t>(i), Napi::Number::New(env, children[i]));
+  }
+
+  return result;
+}
+
+Napi::Value SessionContext::_branchIsLeaf(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchIsLeaf requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  return Napi::Boolean::New(env, _branchStore.isLeaf(handle));
+}
+
+Napi::Value SessionContext::_branchIsActive(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchIsActive requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  return Napi::Boolean::New(env, _branchStore.isActive(handle));
+}
+
+Napi::Value SessionContext::_storeRetainOnly(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_storeRetainOnly requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  _branchStore.retainOnly(handle);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_storeAvailable(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  return Napi::Number::New(env, static_cast<double>(_branchStore.available()));
 }
 
 } // namespace liblloyal_node

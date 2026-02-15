@@ -238,7 +238,7 @@ ws ::= [ \\t\\n]*`;
     const prompt = await ctx.tokenize("Output: ");
     await ctx.decode(prompt, 0, 0);
 
-    const branch = Branch.create(ctx, 0, prompt.length, { temperature: 0 }, undefined, grammar);
+    const branch = Branch.create(ctx, prompt.length, { temperature: 0 }, undefined, grammar);
     branch.captureLogits();
 
     const output = [];
@@ -334,7 +334,7 @@ async function testBranchPrefill() {
     const promptToks = await ctx.tokenize(prompt);
     await ctx.decode(promptToks, 0, 0);
 
-    const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
     branch.captureLogits();
 
     // Turn 1
@@ -436,7 +436,7 @@ async function testWarmMultiTurnRecall() {
     const promptToks = await ctx.tokenize(prompt);
     await ctx.decode(promptToks, 0, 0);
 
-    const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
     branch.captureLogits();
 
     // Helper: parse output and check content (not reasoning) for a term
@@ -544,7 +544,7 @@ async function testWarmSemanticRecall() {
       const promptToks = await ctx.tokenize(prompt);
       await ctx.decode(promptToks, 0, 0);
 
-      branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
       branch.captureLogits();
 
       // Generate turn 1 response
@@ -619,7 +619,8 @@ async function testBranchSteer() {
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
     nCtx: CTX_SIZE,
-    nThreads: 4
+    nThreads: 4,
+    nSeqMax: 8
   });
 
   try {
@@ -627,7 +628,7 @@ async function testBranchSteer() {
     await ctx.decode(tokens, 0, 0);
 
     // Use greedy sampling for deterministic tests
-    const branch = Branch.create(ctx, 0, tokens.length, { temperature: 0 });
+    const branch = Branch.create(ctx, tokens.length, { temperature: 0 });
     branch.captureLogits();
 
     // Get the greedy token (what would be sampled without steer)
@@ -670,7 +671,7 @@ async function testBranchSteer() {
     const tokens2 = await ctx.tokenize("Hello world");
     await ctx.decode(tokens2, 0, 0);
 
-    const parent = Branch.create(ctx, 0, tokens2.length, { temperature: 0 });
+    const parent = Branch.create(ctx, tokens2.length, { temperature: 0 });
     parent.captureLogits();
 
     const parentGreedy = parent.sample();
@@ -681,7 +682,7 @@ async function testBranchSteer() {
     assert(parentSteered !== parentGreedy, `Parent steered: ${parentSteered} ≠ ${parentGreedy}`);
 
     // Fork from parent - child should NOT inherit steer
-    const child = parent.fork(1);
+    const child = parent.fork();
     const childSample = child.sample();
     assert(childSample === parentGreedy,
       `Fork does NOT inherit steer: child=${childSample} === greedy=${parentGreedy}`);
@@ -733,7 +734,7 @@ async function testNBatchAblation() {
       const promptToks = await ctx.tokenize(prompt);
       await ctx.decode(promptToks, 0, 0);
 
-      const branch = Branch.create(ctx, 0, promptToks.length, { temperature: 0 }, nBatch);
+      const branch = Branch.create(ctx, promptToks.length, { temperature: 0 }, nBatch);
       branch.captureLogits();
 
       const followUp = await ctx.tokenize(" What else?");
@@ -1026,7 +1027,7 @@ async function testBranchStore() {
     nCtx: CTX_SIZE,
     nBatch: 512,
     nThreads: 4,
-    nSeqMax: 4
+    nSeqMax: 8
   });
 
   try {
@@ -1040,9 +1041,9 @@ async function testBranchStore() {
     // Branch.perplexity accessor after store ops, reseedSampler diversity.
     {
       await ctx.decode(promptToks, 0, 0);
-      const root = Branch.create(ctx, 0, promptToks.length, { temperature: 0.8 });
+      const root = Branch.create(ctx, promptToks.length, { temperature: 0.8 });
       root.captureLogits();
-      const branches = [root, root.fork(1), root.fork(2)];
+      const branches = [root, root.fork(), root.fork()];
       branches[1].reseedSampler(42);
       branches[2].reseedSampler(99);
 
@@ -1062,7 +1063,7 @@ async function testBranchStore() {
       const worst = ppls.reduce((a, b) => Math.max(a, b));
       console.log(`  [PASS] best-of-N: best=${best.toFixed(2)}, worst=${worst.toFixed(2)}`);
 
-      branches.forEach(b => b.prune());
+      root.pruneSubtree();
     }
 
     // ── Test B: Rehydrate + Generate pipeline ──
@@ -1071,9 +1072,9 @@ async function testBranchStore() {
     // Tests: prefill→commit lifecycle, metrics across phase transition, getLogits().
     {
       await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
       b1.captureLogits();
-      const b2 = b1.fork(1);
+      const b2 = b1.fork();
 
       // Phase 1: Rehydrate from "saved" histories
       const history1 = await ctx.tokenize(" dog. The weather is nice today and I want to go", false);
@@ -1113,7 +1114,7 @@ async function testBranchStore() {
       assert(isFinite(b1.perplexity) && isFinite(b2.perplexity),
         `rehydrate: perplexity valid after prefill→commit (b1=${b1.perplexity.toFixed(2)}, b2=${b2.perplexity.toFixed(2)})`);
 
-      b1.prune(); b2.prune();
+      b2.prune(); b1.prune();
     }
 
     // ── Test C: getLogits() → modelEntropy() integration ──
@@ -1121,7 +1122,7 @@ async function testBranchStore() {
     // existing metrics API. This tests the JS API surface of the new exposure.
     {
       await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
       b1.captureLogits();
 
       const logits = b1.getLogits();
@@ -1159,9 +1160,9 @@ async function testBranchStore() {
     // produce() on next iteration reads from updated snapshot.
     {
       await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
       b1.captureLogits();
-      const b2 = b1.fork(1);
+      const b2 = b1.fork();
 
       const output = [];
       for (let i = 0; i < 5; i++) {
@@ -1183,7 +1184,7 @@ async function testBranchStore() {
       assert(output.length > 0,
         `produce→commit: generated ${output.length} tokens via inspect-then-batch pattern`);
 
-      b1.prune(); b2.prune();
+      b2.prune(); b1.prune();
     }
 
     // ── Test E: Mixed single/batched operations ──
@@ -1192,9 +1193,9 @@ async function testBranchStore() {
     // alternating between decode::one and decode::each on the same sequence.
     {
       await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
       b1.captureLogits();
-      const b2 = b1.fork(1);
+      const b2 = b1.fork();
 
       // Step 1-3: single-branch commit (decode::one path)
       for (let i = 0; i < 3; i++) {
@@ -1228,7 +1229,7 @@ async function testBranchStore() {
       assert(isFinite(b1.perplexity) && b1.perplexity >= 1.0,
         `mixed ops: perplexity valid after 9 mixed steps (${b1.perplexity.toFixed(2)})`);
 
-      b1.prune(); b2.prune();
+      b2.prune(); b1.prune();
     }
 
     // ── Test F: Independent EOG — one branch stops, other continues ──
@@ -1237,9 +1238,9 @@ async function testBranchStore() {
     // surviving branch generates correct output after sibling stops.
     {
       await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, 0, promptToks.length, { temperature: 0 });
+      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
       b1.captureLogits();
-      const b2 = b1.fork(1);
+      const b2 = b1.fork();
 
       const eog = ctx.getEogToken();
       const gen1 = [], gen2 = [];
@@ -1288,7 +1289,7 @@ async function testBranchStore() {
       assert(b2.position === promptToks.length + gen2.length,
         `independent EOG: b2 position correct (${b2.position} === ${promptToks.length} + ${gen2.length})`);
 
-      b1.prune(); b2.prune();
+      b2.prune(); b1.prune();
     }
   } finally {
     ctx.dispose();
