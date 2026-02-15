@@ -104,13 +104,12 @@ async function main() {
     console.log(`\nPrompt: "${prompt}"`);
   }
 
-  // Prefill prompt on seq 0
+  // Prefill prompt
   const promptTokens = await ctx.tokenize(prompt);
   await ctx.decode(promptTokens, 0, 0);
 
-  // Create main branch - tracks committed state
-  // Uses greedy sampling for the "target" model behavior
-  const main = Branch.create(ctx, 0, promptTokens.length, {
+  // Create main branch — tracks committed state
+  const main = Branch.create(ctx, promptTokens.length, {
     temperature: 0.7, // For bonus token sampling
   });
   main.captureLogits();
@@ -133,7 +132,7 @@ async function main() {
     // === DRAFT PHASE ===
     // Fork main branch for speculative drafting
     // Draft branch shares KV prefix with main, diverges as it generates
-    const draft = main.fork(1);
+    const draft = main.fork();
     draft.reseedSampler(iterations); // Different seed each iteration for diversity
 
     const drafts = [];
