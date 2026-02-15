@@ -375,12 +375,15 @@ private:
   Napi::Value _branchDecodeAndCaptureBatch(const Napi::CallbackInfo& info);
   Napi::Value _branchSample(const Napi::CallbackInfo& info);
   Napi::Value _branchAccept(const Napi::CallbackInfo& info);
-  Napi::Value _branchGetSeqId(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPerplexity(const Napi::CallbackInfo& info);
   Napi::Value _branchGetLogits(const Napi::CallbackInfo& info);
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
-  Napi::Value _branchDestroy(const Napi::CallbackInfo& info);
+  Napi::Value _branchPruneSubtree(const Napi::CallbackInfo& info);
+  Napi::Value _branchParent(const Napi::CallbackInfo& info);
+  Napi::Value _branchChildren(const Napi::CallbackInfo& info);
+  Napi::Value _branchIsLeaf(const Napi::CallbackInfo& info);
+  Napi::Value _branchIsActive(const Napi::CallbackInfo& info);
   Napi::Value _branchSamplerChainReseed(const Napi::CallbackInfo& info);
   Napi::Value _branchSteer(const Napi::CallbackInfo& info);
   Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
@@ -389,6 +392,8 @@ private:
 
   Napi::Value _storeCommit(const Napi::CallbackInfo& info);
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
+  Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
+  Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====
