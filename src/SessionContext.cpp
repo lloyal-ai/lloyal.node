@@ -649,8 +649,9 @@ private:
 };
 
 /**
- * AsyncWorker for batched multi-branch commit (decode_each + accept)
- * Decode-first ordering: if decode_each throws, accept_token never runs
+ * AsyncWorker for batched multi-branch commit (accept + decode_each)
+ * Accept-first ordering with rollback: accepts tokens for correct PPL measurement,
+ * then decodes. On decode failure, restores sampler/grammar/metrics from clones.
  */
 class StoreCommitWorker : public Napi::AsyncWorker {
 public:
@@ -660,12 +661,65 @@ public:
     : AsyncWorker(env), _deferred(env), _store(store), _items(std::move(items)) {}
 
   void Execute() override {
-    try {
-      _store.decode_each(_items);
-      for (auto& item : _items) {
-        lloyal::branch::accept_token(item.handle, item.token, _store);
+    // RAII snapshot of accept-mutable state. Destructor frees anything still
+    // owned, so partial clones from a throwing OOM don't leak.
+    struct Snapshot {
+      llama_sampler* sampler = nullptr;
+      llama_sampler* grammar = nullptr;
+      lloyal::metrics::BranchMetricsHandle metrics = 0;
+
+      ~Snapshot() {
+        if (sampler) lloyal::sampler::free_chain(sampler);
+        if (grammar) lloyal::grammar::free_sampler(grammar);
+        if (metrics) lloyal::metrics::free_branch_metrics(metrics);
       }
-    } catch (const std::exception& e) { SetError(e.what()); }
+
+      void restore_into(lloyal::branch::BranchState& st) {
+        std::swap(sampler, st.sampler_chain);
+        std::swap(grammar, st.grammar);
+        std::swap(metrics, st.metrics);
+      }
+    };
+
+    // Pre-size with unique_ptr so the vector never needs to move elements
+    std::vector<std::unique_ptr<Snapshot>> snaps(_items.size());
+
+    try {
+      // Phase 1: snapshot all accept-mutable state (no mutations yet)
+      for (size_t i = 0; i < _items.size(); ++i) {
+        auto* st = _store.get(_items[i].handle);
+        if (!st) throw std::runtime_error("StoreCommitWorker: invalid handle");
+
+        auto s = std::make_unique<Snapshot>();
+        s->sampler = st->sampler_chain
+            ? lloyal::sampler::clone_chain(st->sampler_chain) : nullptr;
+        s->grammar = st->grammar
+            ? lloyal::grammar::clone_sampler(st->grammar) : nullptr;
+        s->metrics = st->metrics != 0
+            ? lloyal::metrics::clone_branch_metrics(st->metrics) : 0;
+        snaps[i] = std::move(s);
+      }
+
+      // Phase 2: accept all tokens (in-memory state mutation, won't throw)
+      for (auto& item : _items)
+        lloyal::branch::accept_token(item.handle, item.token, _store);
+
+      // Phase 3: decode (single GPU batch — the only realistic failure point)
+      _store.decode_each(_items);
+
+      // Success — discard snapshots
+      snaps.clear();
+
+    } catch (const std::exception& e) {
+      // Restore all branches — un-mutated branches get a harmless equivalent swap
+      for (size_t i = 0; i < _items.size(); ++i) {
+        auto* st = _store.get(_items[i].handle);
+        if (st && snaps[i]) snaps[i]->restore_into(*st);
+      }
+      // ~Snapshot frees the swapped-out (post-accept) state
+
+      SetError(e.what());
+    }
   }
 
   void OnOK() override { _deferred.Resolve(Env().Undefined()); }

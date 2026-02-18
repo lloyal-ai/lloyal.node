@@ -185,7 +185,7 @@ const EXAMPLES = {
       assert(candidates.length === 5, 'should have 5 candidates');
 
       for (const c of candidates) {
-        assert(c.ppl >= 1, 'candidate ppl should be >= 1');
+        assert(c.ppl > 1 && c.ppl < 1000, `candidate ppl should be in (1, 1000), got ${c.ppl}`);
         assert(c.tokenCount > 0, 'candidate should have tokens');
       }
 
