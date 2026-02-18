@@ -57,14 +57,14 @@ async function main() {
 
     if (trimmed === "/quit" || trimmed === "/exit") {
       console.log("Goodbye!");
-      if (branch) branch.prune();
+      if (branch) await branch.prune();
       ctx.dispose();
       rl.close();
       return;
     }
 
     if (trimmed === "/clear") {
-      if (branch) branch.prune();
+      if (branch) await branch.prune();
       branch = null;
       await ctx.kvCacheClear();
       messages.length = 0;
@@ -98,19 +98,15 @@ async function main() {
         JSON.stringify([{ role: "system", content: "" }, { role: "user", content: trimmed }]),
       );
       const delta = await ctx.tokenize(fmt.prompt, false);
-      branch.prefill([...sep, ...delta]);
+      await branch.prefill([...sep, ...delta]);
     }
 
-    // Generate: produce inspects, commit advances
     process.stdout.write("< ");
     let rawOutput = "";
 
-    while (true) {
-      const { token, text, isStop } = branch.produce();
-      if (isStop) break;
+    for await (const { text } of branch) {
       process.stdout.write(text);
       rawOutput += text;
-      branch.commit(token);
     }
 
     console.log("\n");

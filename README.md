@@ -28,14 +28,14 @@ const root = Branch.create(ctx, prompt.length, { temperature: 0.8 });
 root.captureLogits();
 
 // Fork 4 branches — each gets a different reasoning prefix
-const analogy  = root.fork();
-const formal   = root.fork();
-const socratic = root.fork();
-const visual   = root.fork();
+const analogy  = await root.fork();
+const formal   = await root.fork();
+const socratic = await root.fork();
+const visual   = await root.fork();
 
 // Scatter-prefill: inject divergent prefixes in one batched dispatch
 // 4 branches × variable lengths → auto bin-packed into minimal GPU calls
-store.prefill([
+await store.prefill([
   [analogy,  await ctx.tokenize("Think of it like two coins...")],    // 12 tokens
   [formal,   await ctx.tokenize("In quantum mechanics, the...")],     // 8 tokens
   [socratic, await ctx.tokenize("What happens when you measure...")], // 10 tokens
@@ -50,21 +50,29 @@ for (;;) {
   const produced = live.map(b => ({ b, ...b.produce() }));
 
   // Prune branches that hit stop tokens
-  produced.filter(p => p.isStop).forEach(p => p.b.prune());
+  for (const p of produced.filter(p => p.isStop)) await p.b.prune();
 
   // Commit survivors — accept + decode in one GPU dispatch
   const items = produced
     .filter(p => !p.isStop)
     .map(p => { p.b.accept(p.token); return [p.b, p.token]; });
-  store.commit(items);
+  await store.commit(items);
 }
 
 // Winner takes all — one seq_keep pass, losers vaporized
 const winner = branches
   .filter(b => !b.disposed)
   .reduce((a, b) => (a.perplexity < b.perplexity ? a : b));
-store.retainOnly(winner);
+await store.retainOnly(winner);
 // store.available === nSeqMax - 1 — all leases recovered
+```
+
+Or for single-branch generation, Branch is an async iterable — generate until EOG:
+
+```javascript
+for await (const { token, text } of branch) {
+  process.stdout.write(text);
+}
 ```
 
 ## Continuous Tree Batching
@@ -74,11 +82,11 @@ Tree search with N branches means N calls to `llama_decode()` — each paying GP
 Two packing strategies for different access patterns:
 
 ```javascript
-// commit: 1 token per branch — synchronous tree expansion
-store.commit([[branch1, tok1], [branch2, tok2], [branch3, tok3]]);
+// commit: 1 token per branch — one GPU dispatch for N branches
+await store.commit([[branch1, tok1], [branch2, tok2], [branch3, tok3]]);
 
 // prefill: variable tokens per branch — asymmetric injection
-store.prefill([
+await store.prefill([
   [branchA, systemTokens],  // 200 tokens
   [branchB, queryTokens],   //  12 tokens
   [branchC, docTokens],     // 800 tokens
@@ -91,8 +99,8 @@ store.prefill([
 Two resources, two scales. Slots (65K) are how many branches can *exist* — cheap CPU state. Leases (`nSeqMax`) are how many can *decode* — scarce KV cache residency. Tenancy manages the scarce resource automatically: leases are acquired on `create()`/`fork()`, evicted on `prune()`, rebuilt on `retainOnly()`. No manual seq_id tracking, ever.
 
 ```javascript
-store.available;             // leases remaining — use for width/depth budget
-store.retainOnly(winner);    // nuclear: 1 seq_keep, rebuild vacancy
+store.available;                   // leases remaining — use for width/depth budget
+await store.retainOnly(winner);    // nuclear: 1 seq_keep, rebuild vacancy
 ```
 
 The turn lifecycle: search is surgical (N × `prune()`), promotion is nuclear (1 × `retainOnly()`). Per turn, fork → expand → evaluate → prune losers → repeat. Between turns, promote winner → tree is gone → next turn starts fresh.
@@ -197,7 +205,7 @@ For fine-grained control without Branch:
 ### Grammar-Constrained Generation
 
 ```javascript
-const grammar = ctx.jsonSchemaToGrammar(schema);
+const grammar = await ctx.jsonSchemaToGrammar(schema);
 const handle = ctx.createSampler(grammar);
 // Pull loop — consumer controls pace, can branch at any point
 ```

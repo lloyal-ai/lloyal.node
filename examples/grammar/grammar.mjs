@@ -83,7 +83,7 @@ async function main() {
     console.log(JSON.stringify(schema, null, 2));
   }
 
-  const grammar = ctx.jsonSchemaToGrammar(JSON.stringify(schema));
+  const grammar = await ctx.jsonSchemaToGrammar(JSON.stringify(schema));
   if (!jsonlMode) {
     console.log('\nGBNF Grammar (first 200 chars):');
     console.log(grammar.slice(0, 200) + '...\n');

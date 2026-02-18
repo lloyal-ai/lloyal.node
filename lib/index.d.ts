@@ -842,7 +842,7 @@ export interface SessionContext {
    *
    * // Warm prefill with exact cold/warm parity
    * const deltaTokens = await ctx.tokenize(deltaPrompt, false);
-   * branch.prefill([...separator, ...deltaTokens]);
+   * await branch.prefill([...separator, ...deltaTokens]);
    * ```
    */
   getTurnSeparator(): number[];
@@ -1455,7 +1455,7 @@ export interface SessionContext {
    * const logitsBuffer = new Float32Array(ctx.vocabSize);
    *
    * // Atomic decode + capture
-   * ctx.decodeAndCapture([token], position, seqId, logitsBuffer);
+   * await ctx.decodeAndCapture([token], position, seqId, logitsBuffer);
    *
    * // Safe to process logitsBuffer - it's an independent copy
    * const nextToken = sampleFromLogits(logitsBuffer);
@@ -1466,7 +1466,7 @@ export interface SessionContext {
     position: number,
     seqId: number,
     destBuffer: ArrayBuffer | Float32Array
-  ): void;
+  ): Promise<void>;
 
   // ===== KV CACHE FILE PERSISTENCE =====
 
@@ -1615,7 +1615,7 @@ export interface SessionContext {
    *       { addGenerationPrompt: false }
    *     );
    *     const delta = await ctx.tokenize(full.substring(prefix.length), false);
-   *     branch.prefill([...sep, ...delta]);
+   *     await branch.prefill([...sep, ...delta]);
    *   }
    *
    *   // Generate
@@ -1624,7 +1624,7 @@ export interface SessionContext {
    *     const { token, text, isStop } = branch.produce();
    *     if (isStop) break;
    *     rawOutput += text;
-   *     branch.commit(token);
+   *     await branch.commit(token);
    *   }
    *
    *   // Parse output: separates reasoning from content
@@ -1670,11 +1670,11 @@ export interface SessionContext {
    *   required: ["name"]
    * };
    *
-   * const grammar = ctx.jsonSchemaToGrammar(JSON.stringify(schema));
+   * const grammar = await ctx.jsonSchemaToGrammar(JSON.stringify(schema));
    * const handle = ctx.createSampler(grammar);
    * ```
    */
-  jsonSchemaToGrammar(schemaJson: string): string;
+  jsonSchemaToGrammar(schemaJson: string): Promise<string>;
 
   /**
    * Validate chat template syntax
@@ -1830,10 +1830,10 @@ export interface SessionContext {
   _branchCaptureLogits(handle: number): void;
 
   /** @internal Decode a single token and capture logits */
-  _branchDecodeAndCaptureOne(handle: number, token: number): void;
+  _branchDecodeAndCaptureOne(handle: number, token: number): Promise<void>;
 
   /** @internal Decode multiple tokens in n_batch-sized chunks and capture logits */
-  _branchDecodeAndCaptureBatch(handle: number, tokens: number[]): void;
+  _branchDecodeAndCaptureBatch(handle: number, tokens: number[]): Promise<void>;
 
   /** @internal Sample next token from branch's logits snapshot */
   _branchSample(handle: number): number;
@@ -1880,10 +1880,10 @@ export interface SessionContext {
   // ===== STORE API (internal, wrapped by BranchStore) =====
 
   /** @internal Batched accept + decode_each + capture for N branches */
-  _storeCommit(handles: number[], tokens: number[]): void;
+  _storeCommit(handles: number[], tokens: number[]): Promise<void>;
 
   /** @internal Batched decode_scatter + capture for N branches with variable token counts */
-  _storePrefill(handles: number[], tokenArrays: number[][]): void;
+  _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
 
   /** @internal Retain winner branch, evict all others */
   _storeRetainOnly(handle: number): void;
@@ -2109,22 +2109,17 @@ export interface Produced {
  * const root = Branch.create(ctx, tokens.length, { temperature: 0.8 });
  * root.captureLogits();
  *
- * const candidates = Array.from({ length: 5 }, (_, i) => {
- *   const branch = root.fork();
+ * const results = [];
+ * for (let i = 0; i < 5; i++) {
+ *   const branch = await root.fork();
  *   branch.reseedSampler(1000 + i);
- *   return branch;
- * });
- *
- * for (let t = 0; t < 50; t++) {
- *   for (const branch of candidates) {
- *     const { token, isStop } = branch.produce();
- *     if (isStop) continue;
- *     branch.commit(token);
- *   }
+ *   const tokens = [];
+ *   for await (const { token } of branch) tokens.push(token);
+ *   results.push({ branch, tokens, ppl: branch.perplexity });
  * }
  *
- * const best = candidates.reduce((a, b) => a.perplexity < b.perplexity ? a : b);
- * for (const c of candidates) { if (c !== best) c.prune(); }
+ * const best = results.reduce((a, b) => a.ppl < b.ppl ? a : b);
+ * for (const r of results) { if (r !== best) await r.branch.prune(); }
  * ```
  *
  * @category Branching
@@ -2162,7 +2157,7 @@ export class Branch {
    * to build arbitrarily deep trees.
    *
    */
-  fork(): Branch;
+  fork(): Promise<Branch>;
 
   /** Freeze the current logit distribution into this branch. Essential before fork(). */
   captureLogits(): void;
@@ -2184,8 +2179,19 @@ export class Branch {
    */
   getLogits(): Float32Array;
 
-  /** Decode a single token, write to KV, and capture resulting logits */
-  decodeAndCaptureOne(token: number): void;
+  /**
+   * Single-token forward pass with logit snapshot
+   *
+   * Runs one decode step (writing the token's KV entries), advances position,
+   * and captures the resulting logits for the next sample()/produce() call.
+   *
+   * Lower-level than {@link commit} — does NOT accept into the sampler penalty
+   * window. Use commit() for normal generation; use this when you need decode +
+   * capture without repeat-penalty tracking.
+   *
+   * @param token Token to decode
+   */
+  decodeAndCaptureOne(token: number): Promise<void>;
 
   /**
    * Bulk-decode tokens into the branch's KV cache and capture logits.
@@ -2206,7 +2212,7 @@ export class Branch {
    *
    * @param tokens - Token IDs to decode
    */
-  prefill(tokens: number[]): void;
+  prefill(tokens: number[]): Promise<void>;
 
   /** Sample next token from branch's frozen logits snapshot */
   sample(): number;
@@ -2214,11 +2220,27 @@ export class Branch {
   /** Accept token for repeat-penalty tracking */
   accept(token: number): void;
 
-  /** Discard branch — remove its divergent KV entries and free the handle. RESTRICT: throws if children exist. */
-  prune(): void;
+  /**
+   * Discard this branch — remove its divergent KV entries and free the handle
+   *
+   * Only removes KV entries divergent from the shared prefix; sibling branches
+   * are unaffected. The disposed flag is set synchronously — any call to
+   * produce(), commit(), etc. after prune() will throw immediately, even
+   * before the returned promise resolves.
+   *
+   * RESTRICT mode: throws if children exist. Use {@link pruneSubtree} to
+   * cascade-delete an entire subtree.
+   */
+  prune(): Promise<void>;
 
-  /** Discard branch and all descendants — CASCADE delete via iterative post-order traversal */
-  pruneSubtree(): void;
+  /**
+   * Discard this branch and all its descendants — CASCADE delete
+   *
+   * Iterative post-order traversal: prunes children first, then this branch.
+   * Use when tearing down an entire subtree (e.g. abandoned search path).
+   * Sets disposed synchronously, like {@link prune}.
+   */
+  pruneSubtree(): Promise<void>;
 
   /**
    * Reseed the sampler's PRNG for diversity after fork()
@@ -2260,7 +2282,7 @@ export class Branch {
    * branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
    *
    * const { token } = branch.produce();  // Blocked tokens won't be sampled
-   * branch.commit(token);
+   * await branch.commit(token);
    *
    * // Clear for next iteration (recompute based on new history)
    * branch.clearSteer();
@@ -2279,7 +2301,7 @@ export class Branch {
    *   beam.branch.steer(siblingTokens.map(t => ({ token: t, bias: -2.0 })));
    *
    *   const { token } = beam.branch.produce();
-   *   beam.branch.commit(token);
+   *   await beam.branch.commit(token);
    *   beam.lastToken = token;
    *   beam.branch.clearSteer();
    * }
@@ -2313,7 +2335,7 @@ export class Branch {
    *   const { token, isStop } = branch.produce();
    *   if (isStop) break;
    *
-   *   branch.commit(token);
+   *   await branch.commit(token);
    *   branch.clearSteer();  // Reset for next iteration
    *   generatedTokens.push(token);
    * }
@@ -2324,8 +2346,17 @@ export class Branch {
   /** Sample next token without advancing state. Inspect before committing. */
   produce(): Produced;
 
-  /** Accept and advance — write token to KV and update branch state. */
-  commit(token: number): void;
+  /**
+   * Decode and advance — write token to KV and update branch state
+   *
+   * Decodes the token (writing to KV cache via AsyncWorker on the libuv
+   * thread pool), captures the resulting logits for the next produce() call,
+   * then accepts into the sampler penalty window. Decode-first ordering:
+   * if decode throws, sampler state stays consistent.
+   *
+   * @param token Token to commit (from produce())
+   */
+  commit(token: number): Promise<void>;
 
   /** Branch's current position */
   readonly position: number;
@@ -2350,6 +2381,34 @@ export class Branch {
 
   /** True if this branch holds a KV lease */
   readonly isActive: boolean;
+
+  /**
+   * Async iterator — generate tokens until EOG
+   *
+   * Commit-before-yield semantics: every yielded token is already written
+   * to KV and accepted into the sampler. Breaking out of the loop is clean —
+   * no orphaned uncommitted tokens, perplexity reflects all yielded tokens.
+   *
+   * For inspect-before-commit (speculative decoding, tree search), use
+   * the {@link produce}/{@link commit} protocol directly.
+   *
+   * @example Generate to completion
+   * ```typescript
+   * for await (const { token, text } of branch) {
+   *   process.stdout.write(text);
+   * }
+   * ```
+   *
+   * @example Generate with consumer-side bound
+   * ```typescript
+   * const tokens = [];
+   * for await (const { token } of branch) {
+   *   tokens.push(token);
+   *   if (tokens.length >= limit) break;
+   * }
+   * ```
+   */
+  [Symbol.asyncIterator](): AsyncIterableIterator<{ token: number; text: string }>;
 }
 
 /**
@@ -2400,25 +2459,26 @@ export class Branch {
  * ```typescript
  * const store = new BranchStore(ctx);
  * const entries = branches.map(b => [b, b.produce().token] as [Branch, number]);
- * store.commit(entries);  // 32 tokens, 1 llama_decode()
+ * await store.commit(entries);  // 32 tokens, 1 llama_decode()
  * ```
  *
  * @example Best-of-N with batched commit
  * ```typescript
  * const store = new BranchStore(ctx);
- * const branches = [1, 2, 3].map(() => root.fork());
+ * const branches = [];
+ * for (const _ of [1, 2, 3]) branches.push(await root.fork());
  *
  * for (let step = 0; step < 50; step++) {
  *   const live = branches.map(b => [b, b.produce()] as const)
  *     .filter(([, p]) => !p.isStop);
  *   if (!live.length) break;
- *   store.commit(live.map(([b, p]) => [b, p.token]));
+ *   await store.commit(live.map(([b, p]) => [b, p.token]));
  * }
  * ```
  *
  * @example Asymmetric prefill — variable-length injections, auto-chunked
  * ```typescript
- * store.prefill([
+ * await store.prefill([
  *   [branchA, systemPromptTokens],   // 200 tokens
  *   [branchB, shortQueryTokens],     //  12 tokens
  *   [branchC, longDocumentTokens],   // 800 tokens
@@ -2443,7 +2503,7 @@ export class BranchStore {
    * @param entries - Array of `[branch, token]` tuples (branches must not be disposed)
    * @throws If any branch is disposed
    */
-  commit(entries: [Branch, number][]): void;
+  commit(entries: [Branch, number][]): Promise<void>;
 
   /**
    * Batched variable-length prefill for external tokens
@@ -2459,7 +2519,7 @@ export class BranchStore {
    * @param entries - Array of `[branch, tokens]` tuples (branches must not be disposed)
    * @throws If any branch is disposed
    */
-  prefill(entries: [Branch, number[]][]): void;
+  prefill(entries: [Branch, number[]][]): Promise<void>;
 
   /**
    * Retain only the winner branch — evict all other leases and free their slots.
@@ -2471,7 +2531,7 @@ export class BranchStore {
    * @param winner - The branch to keep (must not be disposed, must hold a lease)
    * @throws If winner is disposed or has no lease
    */
-  retainOnly(winner: Branch): void;
+  retainOnly(winner: Branch): Promise<void>;
 
   /** Number of available seq_id leases */
   readonly available: number;

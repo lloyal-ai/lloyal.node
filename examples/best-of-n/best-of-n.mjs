@@ -43,29 +43,16 @@ function emit(event, data) {
   }
 }
 
-/**
- * Generate a single completion using Branch API
- *
- * @param {Branch} branch - Branch to generate with
- * @param {number} maxTokens - Maximum tokens to generate
- * @param {object} ctx - Context for detokenization
- * @returns {Promise<{ text: string, ppl: number, tokenCount: number }>}
- */
+/** Collect tokens from a branch's async iterator, return text + perplexity. */
 async function generateWithBranch(branch, maxTokens, ctx) {
   const tokens = [];
-
-  for (let t = 0; t < maxTokens; t++) {
-    const { token, isStop } = branch.produce();
-    if (isStop) break;
+  for await (const { token } of branch) {
     tokens.push(token);
-    branch.commit(token);
+    if (tokens.length >= maxTokens) break;
   }
-
   const ppl = branch.perplexity;
-  const text = await ctx.detokenize(tokens);
-
   return {
-    text,
+    text: await ctx.detokenize(tokens),
     ppl: Number.isFinite(ppl) ? ppl : 999,
     tokenCount: tokens.length,
   };
@@ -129,7 +116,7 @@ async function main() {
   }
 
   // Fork baseline from root — inherits KV prefix + logits snapshot
-  const baselineBranch = root.fork();
+  const baselineBranch = await root.fork();
 
   const baseline = await generateWithBranch(baselineBranch, MAX_TOKENS, ctx);
 
@@ -139,7 +126,7 @@ async function main() {
     console.log(`  PPL: ${baseline.ppl.toFixed(2)} | "${baseline.text}"`);
   }
 
-  baselineBranch.prune();
+  await baselineBranch.prune();
 
   // === Best-of-N: Parallel candidates with high temperature ===
   if (!jsonlMode) {
@@ -153,60 +140,39 @@ async function main() {
   // CRITICAL: Reseed each branch's sampler for diversity (otherwise all produce identical output)
   const branches = [];
   for (let i = 0; i < N; i++) {
-    const branch = root.fork();
+    const branch = await root.fork();
     branch.reseedSampler(1000 + i);  // Unique seed per branch
     branches.push(branch);
   }
 
-  // Parallel generation loop - interleaved round-robin
-  const results = branches.map(() => ({ tokens: [], done: false }));
-
-  for (let t = 0; t < MAX_TOKENS; t++) {
-    let anyActive = false;
-
-    for (let i = 0; i < N; i++) {
-      if (results[i].done) continue;
-      anyActive = true;
-
-      const { token, text, isStop } = branches[i].produce();
-
-      if (isStop) {
-        results[i].done = true;
-        continue;
-      }
-
-      results[i].tokens.push(token);
-      branches[i].commit(token);
-
-      emit('token', { candidateIndex: i, text, index: t });
-    }
-
-    if (!anyActive) break;
-  }
-
-  // Finalize results - get perplexity and detokenize
+  // Generate each candidate sequentially — same total GPU work, simpler flow
   const candidates = [];
   for (let i = 0; i < N; i++) {
-    const ppl = branches[i].perplexity;
-    const text = await ctx.detokenize(results[i].tokens);
-    const tokenCount = results[i].tokens.length;
+    const tokens = [];
+    for await (const { token, text } of branches[i]) {
+      tokens.push(token);
+      emit('token', { candidateIndex: i, text, index: tokens.length - 1 });
+      if (tokens.length >= MAX_TOKENS) break;
+    }
 
+    const ppl = branches[i].perplexity;
+    const text = await ctx.detokenize(tokens);
     candidates.push({
       text,
       ppl: Number.isFinite(ppl) ? ppl : 999,
-      tokenCount,
+      tokenCount: tokens.length,
     });
 
-    emit('candidate', { index: i + 1, ppl: candidates[i].ppl, text, tokenCount });
+    emit('candidate', { index: i + 1, ppl: candidates[i].ppl, text, tokenCount: tokens.length });
 
     if (!jsonlMode) {
       const truncated = text.length > 55 ? text.slice(0, 55) + '...' : text;
       console.log(`  [${i + 1}] PPL: ${candidates[i].ppl.toFixed(2).padStart(6)} | "${truncated}"`);
     }
 
-    branches[i].prune();
+    await branches[i].prune();
   }
-  root.prune();
+  await root.prune();
 
   // Select best
   const best = candidates.reduce((a, b) => (a.ppl < b.ppl ? a : b));
