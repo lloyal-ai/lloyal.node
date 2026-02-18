@@ -1336,6 +1336,90 @@ async function testPplSanity() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// COMMIT ROLLBACK — decode failure must restore sampler/grammar/metrics
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testCommitRollback() {
+  console.log('\n--- Commit Rollback ---');
+
+  // Tiny KV (nCtx=32) with many branches (nSeqMax=8). Each branch consumes
+  // 1 KV cell per commit. With 8 branches and ~5 shared prefix cells, the
+  // 32-cell budget exhausts after ~3 commits per branch. decode_each returns
+  // non-zero (find_slot fails) → StoreCommitWorker throws → rollback fires.
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 32,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 8
+  });
+
+  try {
+    const promptToks = await ctx.tokenize("Hi");
+    await ctx.decode(promptToks, 0, 0);
+
+    const root = Branch.create(ctx, promptToks.length, { temperature: 1.0 });
+    root.captureLogits();
+    const branches = [root];
+    for (let i = 1; i < 8; i++) {
+      const b = await root.fork();
+      b.reseedSampler(1000 + i); // Divergent tokens → separate KV cells
+      branches.push(b);
+    }
+
+    const store = new BranchStore(ctx);
+
+    // Commit until decode fails from KV exhaustion
+    // nCtx may be clamped to a model minimum (e.g. 256), so we need enough
+    // rounds for 8 branches to exhaust ~256 cells: 256/8 = 32 rounds
+    let successfulRounds = 0;
+    let failedRound = false;
+    for (let round = 0; round < 50; round++) {
+      const live = branches
+        .map(b => [b, b.produce()])
+        .filter(([, p]) => !p.isStop);
+      if (!live.length) break;
+
+      // Snapshot PPL before this round
+      const pplsBefore = live.map(([b]) => b.perplexity);
+
+      try {
+        await store.commit(live.map(([b, p]) => [b, p.token]));
+        successfulRounds++;
+      } catch {
+        // Decode failed — verify PPL restored
+        const pplsAfter = live.map(([b]) => b.perplexity);
+        const allRestored = pplsBefore.every((p, i) => p === pplsAfter[i]);
+        assert(allRestored,
+          `rollback: all PPLs restored after decode failure at round ${round}`);
+
+        // Branches still usable for single commits (1 token fits)
+        const [b0, p0] = live[0];
+        const posBefore = b0.position;
+        try {
+          await b0.commit(p0.token);
+          assert(b0.position === posBefore + 1,
+            `rollback: single commit succeeds after failed batch (pos ${b0.position})`);
+        } catch {
+          // KV may be truly full even for 1 token — that's OK, test the PPL assertion above
+        }
+
+        failedRound = true;
+        break;
+      }
+    }
+
+    console.log(`  ${successfulRounds} successful rounds before KV exhaustion`);
+    assert(failedRound,
+      `rollback: decode failure triggered (nCtx=32, 8 branches, ${successfulRounds} rounds)`);
+
+    await root.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ASYNC REJECTION — Worker failures must reject, branch state un-advanced
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1702,6 +1786,7 @@ async function main() {
     await testDecodeAndCapture();
     await testBranchStore();
     await testPplSanity();
+    await testCommitRollback();
     await testAsyncRejection();
     await testEmptyInputEdgeCases();
     await testJsonSchemaToGrammar();
