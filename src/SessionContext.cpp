@@ -587,6 +587,197 @@ private:
   lloyal::chat_in::FormatResult _result;
 };
 
+// ===== BRANCH / STORE / DECODE ASYNC WORKERS =====
+
+/**
+ * AsyncWorker for single-token branch decode + logits capture
+ * Wraps lloyal::branch::decode_and_capture_one on libuv pool thread
+ */
+class BranchDecodeAndCaptureOneWorker : public Napi::AsyncWorker {
+public:
+  BranchDecodeAndCaptureOneWorker(Napi::Env env,
+                                   lloyal::branch::BranchStore& store,
+                                   lloyal::branch::BranchHandle handle,
+                                   llama_token token)
+    : AsyncWorker(env), _deferred(env), _store(store), _handle(handle), _token(token) {}
+
+  void Execute() override {
+    try {
+      lloyal::branch::decode_and_capture_one(_handle, _token, _store);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  lloyal::branch::BranchStore& _store;
+  lloyal::branch::BranchHandle _handle;
+  llama_token _token;
+};
+
+/**
+ * AsyncWorker for bulk branch decode + logits capture
+ * Wraps lloyal::branch::decode_and_capture_batch on libuv pool thread
+ */
+class BranchDecodeAndCaptureBatchWorker : public Napi::AsyncWorker {
+public:
+  BranchDecodeAndCaptureBatchWorker(Napi::Env env,
+                                     lloyal::branch::BranchStore& store,
+                                     lloyal::branch::BranchHandle handle,
+                                     std::vector<llama_token> tokens)
+    : AsyncWorker(env), _deferred(env), _store(store), _handle(handle),
+      _tokens(std::move(tokens)) {}
+
+  void Execute() override {
+    try {
+      lloyal::branch::decode_and_capture_batch(_handle, _tokens.data(), _tokens.size(), _store);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  lloyal::branch::BranchStore& _store;
+  lloyal::branch::BranchHandle _handle;
+  std::vector<llama_token> _tokens;
+};
+
+/**
+ * AsyncWorker for batched multi-branch commit (decode_each + accept)
+ * Decode-first ordering: if decode_each throws, accept_token never runs
+ */
+class StoreCommitWorker : public Napi::AsyncWorker {
+public:
+  StoreCommitWorker(Napi::Env env,
+                    lloyal::branch::BranchStore& store,
+                    std::vector<lloyal::branch::DecodeEachItem> items)
+    : AsyncWorker(env), _deferred(env), _store(store), _items(std::move(items)) {}
+
+  void Execute() override {
+    try {
+      _store.decode_each(_items);
+      for (auto& item : _items) {
+        lloyal::branch::accept_token(item.handle, item.token, _store);
+      }
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  lloyal::branch::BranchStore& _store;
+  std::vector<lloyal::branch::DecodeEachItem> _items;
+};
+
+/**
+ * AsyncWorker for multi-branch prefill (decode_scatter)
+ * Owns token storage; rebuilds spans in Execute() from owned vectors
+ */
+class StorePrefillWorker : public Napi::AsyncWorker {
+public:
+  StorePrefillWorker(Napi::Env env,
+                     lloyal::branch::BranchStore& store,
+                     std::vector<lloyal::branch::BranchHandle> handles,
+                     std::vector<std::vector<llama_token>> tokenStorage)
+    : AsyncWorker(env), _deferred(env), _store(store),
+      _handles(std::move(handles)), _tokenStorage(std::move(tokenStorage)) {}
+
+  void Execute() override {
+    try {
+      // Rebuild DecodeScatterItems with spans into owned storage
+      std::vector<lloyal::branch::DecodeScatterItem> items(_handles.size());
+      for (size_t i = 0; i < _handles.size(); i++) {
+        items[i].handle = _handles[i];
+        items[i].tokens = _tokenStorage[i];
+      }
+      _store.decode_scatter(items);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  lloyal::branch::BranchStore& _store;
+  std::vector<lloyal::branch::BranchHandle> _handles;
+  std::vector<std::vector<llama_token>> _tokenStorage;
+};
+
+/**
+ * AsyncWorker for decode + logits capture into a JS ArrayBuffer
+ * Pins the dest ArrayBuffer via Napi::Reference to prevent GC during Execute()
+ */
+class DecodeAndCaptureWorker : public Napi::AsyncWorker {
+public:
+  DecodeAndCaptureWorker(Napi::Env env, llama_context* ctx,
+                          std::vector<llama_token> tokens,
+                          int32_t pos, llama_seq_id seqId, int32_t nBatch,
+                          float* dest, int nVocab,
+                          Napi::Reference<Napi::ArrayBuffer> bufRef)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(std::move(tokens)),
+      _pos(pos), _seqId(seqId), _nBatch(nBatch), _dest(dest), _nVocab(nVocab),
+      _bufRef(std::move(bufRef)) {}
+
+  void Execute() override {
+    try {
+      lloyal::decode::many(_ctx, _tokens, _pos, _nBatch, _seqId);
+      float* logits = lloyal::logits::get(_ctx, -1);
+      std::memcpy(_dest, logits, _nVocab * sizeof(float));
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  std::vector<llama_token> _tokens;
+  int32_t _pos;
+  llama_seq_id _seqId;
+  int32_t _nBatch;
+  float* _dest;
+  int _nVocab;
+  Napi::Reference<Napi::ArrayBuffer> _bufRef;  // prevent GC of dest buffer
+};
+
+/**
+ * AsyncWorker for JSON schema → GBNF grammar conversion
+ * Pure CPU, no shared state — cleanest worker
+ */
+class JsonSchemaToGrammarWorker : public Napi::AsyncWorker {
+public:
+  JsonSchemaToGrammarWorker(Napi::Env env, std::string schemaJson)
+    : AsyncWorker(env), _deferred(env), _schemaJson(std::move(schemaJson)) {}
+
+  void Execute() override {
+    try {
+      _result = lloyal::grammar::from_json_schema(_schemaJson);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Napi::String::New(Env(), _result)); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  std::string _schemaJson;
+  std::string _result;
+};
+
 // ===== SESSIONCONTEXT IMPLEMENTATION =====
 
 Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
@@ -1738,23 +1929,18 @@ Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
   float* dest = static_cast<float*>(destBuffer.Data());
   int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
 
-  // Atomic: lock mutex through decode + logits copy
-  {
-    std::lock_guard<std::mutex> lock(_decodeMutex);
+  // Main-thread work: invalidate logits views (touches Napi objects)
+  invalidateLogits();
+  _decodeStepId++;
 
-    // Invalidate any existing logits views
-    invalidateLogits();
-    _decodeStepId++;
+  // Pin the JS ArrayBuffer to prevent GC during worker Execute()
+  auto bufRef = Napi::Reference<Napi::ArrayBuffer>::New(destBuffer, 1);
 
-    // Decode
-    lloyal::decode::many(_context, tokens, position, _nBatch, seqId);
-
-    // Capture logits immediately
-    float* logits = lloyal::logits::get(_context, -1);
-    std::memcpy(dest, logits, n_vocab * sizeof(float));
-  }
-
-  return env.Undefined();
+  auto* worker = new DecodeAndCaptureWorker(
+    env, _context, std::move(tokens), position, seqId, _nBatch,
+    dest, n_vocab, std::move(bufRef));
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 // ===== HELPER METHODS =====
@@ -1789,11 +1975,9 @@ Napi::Value SessionContext::jsonSchemaToGrammar(const Napi::CallbackInfo& info) 
 
   std::string schemaJson = info[0].As<Napi::String>().Utf8Value();
 
-  // Use liblloyal (handles parsing, conversion, and error logging)
-  // Pattern matches HybridSessionContext.cpp:374-379
-  std::string grammar = lloyal::grammar::from_json_schema(schemaJson);
-
-  return Napi::String::New(env, grammar);
+  auto* worker = new JsonSchemaToGrammarWorker(env, std::move(schemaJson));
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info) {
@@ -2264,9 +2448,9 @@ Napi::Value SessionContext::_branchDecodeAndCaptureOne(const Napi::CallbackInfo&
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
   auto token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
 
-  lloyal::branch::decode_and_capture_one(handle, token, _branchStore);
-
-  return env.Undefined();
+  auto* worker = new BranchDecodeAndCaptureOneWorker(env, _branchStore, handle, token);
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 // Bulk-decode tokens into a branch's KV cache and capture final logits.
@@ -2296,11 +2480,15 @@ Napi::Value SessionContext::_branchDecodeAndCaptureBatch(const Napi::CallbackInf
     tokens.push_back(static_cast<llama_token>(jsTokens.Get(i).As<Napi::Number>().Int32Value()));
   }
 
-  if (!tokens.empty()) {
-    lloyal::branch::decode_and_capture_batch(handle, tokens.data(), tokens.size(), _branchStore);
+  if (tokens.empty()) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
   }
 
-  return env.Undefined();
+  auto* worker = new BranchDecodeAndCaptureBatchWorker(env, _branchStore, handle, std::move(tokens));
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 Napi::Value SessionContext::_branchSample(const Napi::CallbackInfo& info) {
@@ -2512,7 +2700,11 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "_storeCommit: handles and tokens must have same length");
   }
 
-  if (n == 0) return env.Undefined();
+  if (n == 0) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
+  }
 
   std::vector<lloyal::branch::DecodeEachItem> items(n);
 
@@ -2523,15 +2715,9 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
       jsTokens.Get(i).As<Napi::Number>().Int32Value());
   }
 
-  // Batched decode first: if it throws, sampler state remains consistent
-  _branchStore.decode_each(items);
-
-  // Accept tokens into sampler penalty windows (CPU, per-branch)
-  for (uint32_t i = 0; i < n; i++) {
-    lloyal::branch::accept_token(items[i].handle, items[i].token, _branchStore);
-  }
-
-  return env.Undefined();
+  auto* worker = new StoreCommitWorker(env, _branchStore, std::move(items));
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
@@ -2550,13 +2736,17 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "_storePrefill: handles and tokenArrays must have same length");
   }
 
-  if (n == 0) return env.Undefined();
+  if (n == 0) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
+  }
 
+  std::vector<lloyal::branch::BranchHandle> handles(n);
   std::vector<std::vector<llama_token>> tokenStorage(n);
-  std::vector<lloyal::branch::DecodeScatterItem> items(n);
 
   for (uint32_t i = 0; i < n; i++) {
-    items[i].handle = static_cast<lloyal::branch::BranchHandle>(
+    handles[i] = static_cast<lloyal::branch::BranchHandle>(
       jsHandles.Get(i).As<Napi::Number>().Uint32Value());
 
     Napi::Array jsArr = jsTokenArrays.Get(i).As<Napi::Array>();
@@ -2566,13 +2756,11 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
       tokenStorage[i][j] = static_cast<llama_token>(
         jsArr.Get(j).As<Napi::Number>().Int32Value());
     }
-    items[i].tokens = tokenStorage[i];
   }
 
-  // Batched decode: variable tokens per branch, auto-chunked
-  _branchStore.decode_scatter(items);
-
-  return env.Undefined();
+  auto* worker = new StorePrefillWorker(env, _branchStore, std::move(handles), std::move(tokenStorage));
+  worker->Queue();
+  return worker->GetPromise();
 }
 
 Napi::Value SessionContext::_branchPruneSubtree(const Napi::CallbackInfo& info) {

@@ -7,7 +7,6 @@
 #include <lloyal/chat_in.hpp>
 #include <llama/llama.h>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -250,7 +249,7 @@ private:
   // ===== ATOMIC DECODE+CAPTURE =====
 
   /**
-   * Decode tokens and capture logits atomically (mutex protected)
+   * Decode tokens and capture logits into a JS ArrayBuffer
    * Args: tokens (number[]), position (number), seqId (number), destBuffer (ArrayBuffer)
    * Returns: Promise<void>
    */
@@ -424,9 +423,6 @@ private:
   // ===== TURN SEPARATOR CACHE =====
   std::vector<llama_token> _turnSeparatorCache;
   bool _turnSeparatorCached = false;
-
-  // ===== DECODE MUTEX =====
-  std::mutex _decodeMutex;
 
   // ===== LOGITS BUFFER MANAGEMENT (Memoization + Revocation) =====
   //

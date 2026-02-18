@@ -132,7 +132,7 @@ async function main() {
     // === DRAFT PHASE ===
     // Fork main branch for speculative drafting
     // Draft branch shares KV prefix with main, diverges as it generates
-    const draft = main.fork();
+    const draft = await main.fork();
     draft.reseedSampler(iterations); // Different seed each iteration for diversity
 
     const drafts = [];
@@ -149,11 +149,11 @@ async function main() {
       drafts.push({ token, text, entropy });
 
       // commit() accepts token + decodes + captures new logits
-      draft.commit(token);
+      await draft.commit(token);
     }
 
     if (drafts.length === 0) {
-      draft.prune();
+      await draft.prune();
       break;
     }
     totalDrafted += drafts.length;
@@ -166,13 +166,13 @@ async function main() {
     // === CLEANUP DRAFT ===
     // Prune draft branch - removes its divergent KV entries
     // Main branch is unchanged (still at pre-draft position)
-    draft.prune();
+    await draft.prune();
 
     // === ACCEPT PHASE ===
     // Commit accepted tokens to main branch
     const accepted = drafts.slice(0, acceptedCount);
     for (const d of accepted) {
-      main.commit(d.token);
+      await main.commit(d.token);
       if (!jsonlMode) {
         process.stdout.write(d.text);
       }
@@ -194,7 +194,7 @@ async function main() {
       const { token: bonusToken, text: bonusText, isStop } = main.produce();
 
       if (!isStop) {
-        main.commit(bonusToken);
+        await main.commit(bonusToken);
         if (!jsonlMode) {
           process.stdout.write(bonusText);
         }
@@ -218,7 +218,7 @@ async function main() {
   }
 
   // Cleanup main branch
-  main.prune();
+  await main.prune();
 
   // Statistics
   const acceptRate = totalDrafted > 0 ? totalAccepted / totalDrafted : 0;
