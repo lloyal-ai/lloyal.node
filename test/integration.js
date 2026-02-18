@@ -1297,6 +1297,45 @@ async function testBranchStore() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PPL SANITY — commit() must produce sane perplexity (not millions)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testPplSanity() {
+  console.log('\n--- PPL Sanity ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nThreads: 4
+  });
+
+  try {
+    const messages = [{ role: 'user', content: 'Tell me about the weather.' }];
+    const { prompt } = await ctx.formatChat(JSON.stringify(messages));
+    const promptToks = await ctx.tokenize(prompt);
+    await ctx.decode(promptToks, 0, 0);
+
+    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
+    branch.captureLogits();
+
+    for (let i = 0; i < 10; i++) {
+      const { token, isStop } = branch.produce();
+      if (isStop) break;
+      await branch.commit(token);
+    }
+
+    const ppl = branch.perplexity;
+    console.log(`  perplexity after 10 commits: ${ppl.toFixed(2)}`);
+    assert(isFinite(ppl) && ppl >= 1.0 && ppl < 1000,
+      `PPL sanity: ${ppl.toFixed(2)} is in [1, 1000)`);
+
+    await branch.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ASYNC REJECTION — Worker failures must reject, branch state un-advanced
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1662,6 +1701,7 @@ async function main() {
     await testDeterminism();
     await testDecodeAndCapture();
     await testBranchStore();
+    await testPplSanity();
     await testAsyncRejection();
     await testEmptyInputEdgeCases();
     await testJsonSchemaToGrammar();

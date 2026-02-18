@@ -2347,12 +2347,13 @@ export class Branch {
   produce(): Produced;
 
   /**
-   * Decode and advance — write token to KV and update branch state
+   * Accept and decode — update branch state, then write token to KV
    *
-   * Decodes the token (writing to KV cache via AsyncWorker on the libuv
-   * thread pool), captures the resulting logits for the next produce() call,
-   * then accepts into the sampler penalty window. Decode-first ordering:
-   * if decode throws, sampler state stays consistent.
+   * Accepts the token into the sampler penalty window (for correct PPL
+   * measurement), then decodes (writing to KV cache via AsyncWorker on
+   * the libuv thread pool) and captures the resulting logits for the next
+   * produce() call. Accept-first ordering with rollback: if decode throws,
+   * sampler/grammar/metrics are restored from clones.
    *
    * @param token Token to commit (from produce())
    */
@@ -2495,10 +2496,11 @@ export class BranchStore {
    * Batched single-token commit for model-generated tokens
    *
    * Each tuple `[branch, token]` binds one token to one branch.
-   * Decodes all N tokens in a single llama_decode() call via decode_each,
-   * captures logits per-branch, then accepts each token into its branch's
-   * repeat-penalty window. Decode-first ordering ensures sampler state
-   * stays consistent if decode throws.
+   * Accepts each token into its branch's repeat-penalty window (for correct
+   * PPL measurement), then decodes all N tokens in a single llama_decode()
+   * call via decode_each and captures logits per-branch. Accept-first
+   * ordering with rollback: if decode throws, sampler/grammar/metrics are
+   * restored from clones taken before the accept.
    *
    * @param entries - Array of `[branch, token]` tuples (branches must not be disposed)
    * @throws If any branch is disposed
