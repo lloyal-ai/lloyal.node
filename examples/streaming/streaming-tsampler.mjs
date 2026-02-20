@@ -6,7 +6,7 @@
  * - TypeScript sampling via tsampler (TTA pattern)
  * - N-gram tracking to detect sequence repetition
  * - Logit steering to prevent repeated sequences
- * - Branch API for KV management (prefill/decodeAndCaptureOne)
+ * - Branch API for KV management (prefill/commit)
  * - KV cache clear + re-prefill for infinite context
  *
  * The key insight: llama.cpp's token-level penalties degrade prose quality.
@@ -262,7 +262,7 @@ Begin:
 
     // Store and advance KV (no sampler accept — we're using tsampler externally)
     allTokens.push(token);
-    await branch.decodeAndCaptureOne(token);
+    await branch.commit(token);
 
     // Cache full? Reseed at boundary
     if (branch.position >= nCtx) {

@@ -1444,10 +1444,10 @@ async function testAsyncRejection() {
     }
     assert(threwOnFork, 'rejection: fork on disposed branch throws');
 
-    // Native AsyncWorker rejection: call _branchDecodeAndCaptureOne with invalid handle (0)
+    // Native AsyncWorker rejection: call _branchPrefill with invalid handle (0)
     let nativeRejected = false;
     try {
-      await ctx._branchDecodeAndCaptureOne(0, token);
+      await ctx._branchPrefill(0, [token]);
     } catch (e) {
       nativeRejected = true;
       assert(e instanceof Error, `rejection: native rejection is Error: ${e.constructor.name}`);

@@ -256,9 +256,7 @@ private:
 
   Napi::Value _branchCreate(const Napi::CallbackInfo& info);
   Napi::Value _branchFork(const Napi::CallbackInfo& info);
-  Napi::Value _branchCaptureLogits(const Napi::CallbackInfo& info);
-  Napi::Value _branchDecodeAndCaptureOne(const Napi::CallbackInfo& info);
-  Napi::Value _branchDecodeAndCaptureBatch(const Napi::CallbackInfo& info);
+  Napi::Value _branchPrefill(const Napi::CallbackInfo& info);
   Napi::Value _branchSample(const Napi::CallbackInfo& info);
   Napi::Value _branchAccept(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);

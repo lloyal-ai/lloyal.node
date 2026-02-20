@@ -556,50 +556,21 @@ private:
 // ===== BRANCH / STORE / DECODE ASYNC WORKERS =====
 
 /**
- * AsyncWorker for single-token branch decode + logits capture
- * Wraps lloyal::branch::decode_and_capture_one on libuv pool thread
+ * AsyncWorker for bulk branch decode + logits capture (prompt injection)
+ * Wraps lloyal::branch::prefill on libuv pool thread
  */
-class BranchDecodeAndCaptureOneWorker : public Napi::AsyncWorker {
+class BranchPrefillWorker : public Napi::AsyncWorker {
 public:
-  BranchDecodeAndCaptureOneWorker(Napi::Env env,
-                                   lloyal::branch::BranchStore& store,
-                                   lloyal::branch::BranchHandle handle,
-                                   llama_token token)
-    : AsyncWorker(env), _deferred(env), _store(store), _handle(handle), _token(token) {}
-
-  void Execute() override {
-    try {
-      lloyal::branch::decode_and_capture_one(_handle, _token, _store);
-    } catch (const std::exception& e) { SetError(e.what()); }
-  }
-
-  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
-  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
-  Napi::Promise GetPromise() { return _deferred.Promise(); }
-
-private:
-  Napi::Promise::Deferred _deferred;
-  lloyal::branch::BranchStore& _store;
-  lloyal::branch::BranchHandle _handle;
-  llama_token _token;
-};
-
-/**
- * AsyncWorker for bulk branch decode + logits capture
- * Wraps lloyal::branch::decode_and_capture_batch on libuv pool thread
- */
-class BranchDecodeAndCaptureBatchWorker : public Napi::AsyncWorker {
-public:
-  BranchDecodeAndCaptureBatchWorker(Napi::Env env,
-                                     lloyal::branch::BranchStore& store,
-                                     lloyal::branch::BranchHandle handle,
-                                     std::vector<llama_token> tokens)
+  BranchPrefillWorker(Napi::Env env,
+                      lloyal::branch::BranchStore& store,
+                      lloyal::branch::BranchHandle handle,
+                      std::vector<llama_token> tokens)
     : AsyncWorker(env), _deferred(env), _store(store), _handle(handle),
       _tokens(std::move(tokens)) {}
 
   void Execute() override {
     try {
-      lloyal::branch::decode_and_capture_batch(_handle, _tokens.data(), _tokens.size(), _store);
+      lloyal::branch::prefill(_handle, _tokens.data(), _tokens.size(), _store);
     } catch (const std::exception& e) { SetError(e.what()); }
   }
 
@@ -814,9 +785,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     // ===== BRANCH API (internal, wrapped by lib/Branch.ts) =====
     InstanceMethod("_branchCreate", &SessionContext::_branchCreate),
     InstanceMethod("_branchFork", &SessionContext::_branchFork),
-    InstanceMethod("_branchCaptureLogits", &SessionContext::_branchCaptureLogits),
-    InstanceMethod("_branchDecodeAndCaptureOne", &SessionContext::_branchDecodeAndCaptureOne),
-    InstanceMethod("_branchDecodeAndCaptureBatch", &SessionContext::_branchDecodeAndCaptureBatch),
+    InstanceMethod("_branchPrefill", &SessionContext::_branchPrefill),
     InstanceMethod("_branchSample", &SessionContext::_branchSample),
     InstanceMethod("_branchAccept", &SessionContext::_branchAccept),
     InstanceMethod("_branchGetPosition", &SessionContext::_branchGetPosition),
@@ -1881,52 +1850,14 @@ Napi::Value SessionContext::_branchFork(const Napi::CallbackInfo& info) {
   return Napi::Number::New(env, newHandle);
 }
 
-Napi::Value SessionContext::_branchCaptureLogits(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchCaptureLogits requires (handle)");
-  }
-
-  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  lloyal::branch::capture_logits(handle, _branchStore);
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::_branchDecodeAndCaptureOne(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchDecodeAndCaptureOne requires (handle, token)");
-  }
-
-  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
-  auto token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
-
-  auto* worker = new BranchDecodeAndCaptureOneWorker(env, _branchStore, handle, token);
-  worker->Queue();
-  return worker->GetPromise();
-}
-
 // Bulk-decode tokens into a branch's KV cache and capture final logits.
-//
-// tokens.size() is the total token count (n_tokens).  The branch's n_batch
-// (set at Branch.create via the nBatch parameter, stored on BranchState)
-// controls the chunk size — decode_and_capture_batch passes both to
-// decoder::decode_tokens which loops: min(n_tokens - processed, n_batch)
-// tokens per llama_decode call.
-//
-// Does NOT accept tokens into the sampler's penalty window.
 // Wrapped by Branch.prefill() on the JS side.
-Napi::Value SessionContext::_branchDecodeAndCaptureBatch(const Napi::CallbackInfo& info) {
+Napi::Value SessionContext::_branchPrefill(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsArray()) {
-    throw Napi::Error::New(env, "_branchDecodeAndCaptureBatch requires (handle, tokens[])");
+    throw Napi::Error::New(env, "_branchPrefill requires (handle, tokens[])");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
@@ -1944,7 +1875,7 @@ Napi::Value SessionContext::_branchDecodeAndCaptureBatch(const Napi::CallbackInf
     return deferred.Promise();
   }
 
-  auto* worker = new BranchDecodeAndCaptureBatchWorker(env, _branchStore, handle, std::move(tokens));
+  auto* worker = new BranchPrefillWorker(env, _branchStore, handle, std::move(tokens));
   worker->Queue();
   return worker->GetPromise();
 }

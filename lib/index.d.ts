@@ -1382,14 +1382,8 @@ export interface SessionContext {
   /** @internal Fork a branch to a new sequence */
   _branchFork(handle: number): number;
 
-  /** @internal Capture logits into branch's snapshot */
-  _branchCaptureLogits(handle: number): void;
-
-  /** @internal Decode a single token and capture logits */
-  _branchDecodeAndCaptureOne(handle: number, token: number): Promise<void>;
-
   /** @internal Decode multiple tokens in n_batch-sized chunks and capture logits */
-  _branchDecodeAndCaptureBatch(handle: number, tokens: number[]): Promise<void>;
+  _branchPrefill(handle: number, tokens: number[]): Promise<void>;
 
   /** @internal Sample next token from branch's logits snapshot */
   _branchSample(handle: number): number;
@@ -1629,7 +1623,7 @@ export interface Produced {
  * @example Best-of-N with perplexity selection
  * ```typescript
  * const root = Branch.create(ctx, tokens.length, { temperature: 0.8 });
- * root.captureLogits();
+ * await root.prefill(tokens);
  *
  * const results = [];
  * for (let i = 0; i < 5; i++) {
@@ -1651,8 +1645,8 @@ export class Branch {
    * Create a root branch at the given position
    *
    * The branch takes ownership of the sequence and creates its own sampler
-   * chain from the provided params. Call captureLogits() after prefill to
-   * freeze the logit distribution before forking.
+   * chain from the provided params. Call prefill() to decode prompt tokens
+   * and capture the logit distribution before forking.
    *
    * @param ctx SessionContext to create branch on
    * @param position Starting position (typically prompt token count)
@@ -1681,14 +1675,11 @@ export class Branch {
    */
   fork(): Promise<Branch>;
 
-  /** Freeze the current logit distribution into this branch. Essential before fork(). */
-  captureLogits(): void;
-
   /**
    * Get a copy of this branch's captured logits snapshot.
    *
    * Returns n_vocab floats — the raw logit distribution from the last
-   * decode_and_capture or captureLogits() call.
+   * prefill() or commit() call.
    *
    * Unlike {@link SessionContext.getLogits} (zero-copy view into shared
    * model memory, invalidated by next decode), this returns an independent
@@ -1700,20 +1691,6 @@ export class Branch {
    * @throws If no logits have been captured yet
    */
   getLogits(): Float32Array;
-
-  /**
-   * Single-token forward pass with logit snapshot
-   *
-   * Runs one decode step (writing the token's KV entries), advances position,
-   * and captures the resulting logits for the next sample()/produce() call.
-   *
-   * Lower-level than {@link commit} — does NOT accept into the sampler penalty
-   * window. Use commit() for normal generation; use this when you need decode +
-   * capture without repeat-penalty tracking.
-   *
-   * @param token Token to decode
-   */
-  decodeAndCaptureOne(token: number): Promise<void>;
 
   /**
    * Bulk-decode tokens into the branch's KV cache and capture logits.
