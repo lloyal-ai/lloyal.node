@@ -22,10 +22,9 @@ const store = new BranchStore(ctx);
 
 // Shared prompt: "Explain quantum entanglement"
 const prompt = await ctx.tokenize("Explain quantum entanglement");
-await ctx.decode(prompt, 0, 0);
 
-const root = Branch.create(ctx, prompt.length, { temperature: 0.8 });
-root.captureLogits();
+const root = Branch.create(ctx, 0, { temperature: 0.8 });
+await root.prefill(prompt);
 
 // Fork 4 branches — each gets a different reasoning prefix
 const analogy  = await root.fork();
@@ -206,11 +205,12 @@ For fine-grained control without Branch:
 
 ```javascript
 const grammar = await ctx.jsonSchemaToGrammar(schema);
-const handle = ctx.createSampler(grammar);
-// Pull loop — consumer controls pace, can branch at any point
+const branch = Branch.create(ctx, 0, params, undefined, grammar);
+await branch.prefill(promptTokens);
+// Grammar state cloned automatically on fork()
 ```
 
-See [`examples/grammar/`](./examples/grammar/) for the full pull loop pattern.
+See [`examples/grammar/`](./examples/grammar/) for the full branch fork pattern.
 
 ---
 

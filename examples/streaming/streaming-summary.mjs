@@ -13,6 +13,7 @@
  * - Sidecar mode: optional slim-summarize model for summarization (--sidecar)
  * - Outline detection with structural progress tracking
  * - Pattern matching (not instruction following) to guide continuation
+ * - Branch API for generation (produce/commit loop)
  *
  * After reseed, KV cache contains: [progress][tail]
  * - progress = minimal anchor + checklist of done/current sections + summary
@@ -25,7 +26,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -111,16 +112,17 @@ async function generateSummary(summaryCtx, text, options = {}) {
   }
 
   await summaryCtx.kvCacheClear();
-  await summaryCtx.decode(tokens, 0, 0);
+  const branch = Branch.create(summaryCtx, 0, { temperature: 0.3 });
+  await branch.prefill(tokens);
 
   let response = '';
-  let pos = tokens.length;
   for (let i = 0; i < maxTokens; i++) {
-    const token = summaryCtx.sample({ temperature: 0.3 });
-    if (summaryCtx.isStopToken(token)) break;
-    response += summaryCtx.tokenToText(token);
-    await summaryCtx.decode([token], pos++, 0);
+    const { token, text: t, isStop } = await branch.produce();
+    if (isStop) break;
+    response += t;
+    await branch.commit(token);
   }
+  await branch.prune();
 
   // Only parse slim-summarize Python-style list format
   return format === 'slim-summarize'
@@ -293,7 +295,9 @@ Begin:
     ? MAX_SINK_TOKENS
     : MAX_SINK_TOKENS - (anchorTokens?.length || 0);
 
-  await ctx.decode(promptTokens, 0, 0);
+  const samplingParams = { temperature: 0.8, topP: 0.9 };
+  let branch = Branch.create(ctx, 0, samplingParams);
+  await branch.prefill(promptTokens);
 
   if (!jsonlMode) {
     console.log(`\nContext size: ${nCtx}`);
@@ -305,8 +309,8 @@ Begin:
   }
 
   const allTokens = [...promptTokens];
-  const tracker = ctx.createPerplexityTracker();
-  let cachePos = promptTokens.length;
+  // Manual PPL tracking (persists across branch reseeds)
+  let nllSum = 0, nllCount = 0;
   let reseedCount = 0;
   let currentSegmentText = '';
   let allGeneratedText = '';
@@ -314,12 +318,9 @@ Begin:
   let pendingSummaryTokens = [];
 
   for (let t = 0; t < TARGET_TOKENS; t++) {
-    const token = ctx.sample({
-      temperature: 0.8,
-      topP: 0.9,
-    });
+    const { token, isStop } = await branch.produce();
 
-    if (ctx.isStopToken(token)) {
+    if (isStop) {
       if (!jsonlMode) {
         console.log('\n[EOS token reached]');
       }
@@ -327,8 +328,10 @@ Begin:
       break;
     }
 
-    const surprisal = ctx.modelSurprisal(token);
-    ctx.addSurprisal(tracker, surprisal);
+    const branchLogits = branch.getLogits();
+    const surprisal = ctx.modelSurprisal(token, 'nats', branchLogits);
+    nllSum += Math.max(0, surprisal);
+    nllCount++;
 
     const text = ctx.tokenToText(token);
     if (!jsonlMode) {
@@ -339,10 +342,10 @@ Begin:
     currentSegmentText += text;
     allGeneratedText += text;
     allTokens.push(token);
-    await ctx.decode([token], cachePos++, 0);
+    await branch.commit(token);
 
     // Cache full? Reseed with dynamic sinks
-    if (cachePos >= nCtx) {
+    if (branch.position >= nCtx) {
       // Estimate evicted portion of current segment only
       const tailCharsEstimate = TAIL_SIZE * 4;
       const evictedFromSegment = currentSegmentText.length > tailCharsEstimate
@@ -481,11 +484,16 @@ Begin:
       }
 
       const tail = allTokens.slice(-TAIL_SIZE);
-      await ctx.clearAndReseed(sinks, tail);
-      cachePos = sinks.length + TAIL_SIZE;
+
+      // Destroy current branch, clear KV, create fresh branch with re-prefill
+      await branch.prune();
+      await ctx.kvCacheClear();
+      branch = Branch.create(ctx, 0, samplingParams);
+      await branch.prefill([...sinks, ...tail]);
+
       reseedCount++;
 
-      const ppl = ctx.getPerplexity(tracker);
+      const ppl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
       emit('reseed', {
         count: reseedCount,
         tokenIndex: t + 1,
@@ -509,8 +517,8 @@ Begin:
     }
   }
 
-  const finalPpl = ctx.getPerplexity(tracker);
-  ctx.freePerplexityTracker(tracker);
+  const finalPpl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
+  await branch.prune();
 
   const generatedTokens = allTokens.length - promptTokens.length;
   const finalChain = summaries.join('\n');

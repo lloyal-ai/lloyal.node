@@ -9,7 +9,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace liblloyal_node {
@@ -87,16 +86,6 @@ private:
   Napi::Value getLogits(const Napi::CallbackInfo& info);
 
   /**
-   * Decode tokens through model
-   * Args: tokens (number[]), position (number), seqId? (number, default 0)
-   * Returns: Promise<void>
-   *
-   * The seqId parameter specifies which KV cache sequence to update.
-   * Use different seqIds for independent parallel sequences.
-   */
-  Napi::Value decode(const Napi::CallbackInfo& info);
-
-  /**
    * Tokenize text to token IDs
    * Args: text (string)
    * Returns: Promise<number[]>
@@ -150,21 +139,6 @@ private:
    */
   Napi::Value kvCacheSize(const Napi::CallbackInfo& info);
 
-  // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
-
-  /**
-   * Native greedy sampling (for validation)
-   * Returns: number (token ID)
-   */
-  Napi::Value greedySample(const Napi::CallbackInfo& info);
-
-  /**
-   * Native sampling with full parameters (for benchmarking)
-   * Args: params (optional object with temperature, topK, topP, etc.)
-   * Returns: number (token ID)
-   */
-  Napi::Value sample(const Napi::CallbackInfo& info);
-
   // ===== LIFECYCLE =====
 
   /**
@@ -211,49 +185,6 @@ private:
    * Returns: number (-1 if empty)
    */
   Napi::Value kvSeqPosMax(const Napi::CallbackInfo& info);
-
-  // ===== HANDLE-BASED GRAMMAR =====
-
-  /**
-   * Create a new grammar sampler, returns handle
-   * Args: grammarStr (string)
-   * Returns: number (handle)
-   */
-  Napi::Value createSampler(const Napi::CallbackInfo& info);
-
-  /**
-   * Apply grammar constraints to logits buffer
-   * Args: handle (number), logitsBuffer (ArrayBuffer)
-   */
-  Napi::Value applySampler(const Napi::CallbackInfo& info);
-
-  /**
-   * Accept token to advance grammar parser state
-   * Args: handle (number), tokenId (number)
-   */
-  Napi::Value acceptSamplerToken(const Napi::CallbackInfo& info);
-
-  /**
-   * Clone a grammar sampler
-   * Args: handle (number)
-   * Returns: number (new handle)
-   */
-  Napi::Value cloneSampler(const Napi::CallbackInfo& info);
-
-  /**
-   * Free a grammar sampler
-   * Args: handle (number)
-   */
-  Napi::Value freeSamplerHandle(const Napi::CallbackInfo& info);
-
-  // ===== ATOMIC DECODE+CAPTURE =====
-
-  /**
-   * Decode tokens and capture logits into a JS ArrayBuffer
-   * Args: tokens (number[]), position (number), seqId (number), destBuffer (ArrayBuffer)
-   * Returns: Promise<void>
-   */
-  Napi::Value decodeAndCapture(const Napi::CallbackInfo& info);
 
   /**
    * Write KV cache state + tokens to a file for disk persistence
@@ -320,58 +251,12 @@ private:
    */
   Napi::Value modelEntropy(const Napi::CallbackInfo& info);
 
-  /**
-   * Create a new perplexity tracker
-   * Returns: number (handle)
-   */
-  Napi::Value createPerplexityTracker(const Napi::CallbackInfo& info);
-
-  /**
-   * Add surprisal value to tracker
-   * Args: handle (number), surprisal (number)
-   */
-  Napi::Value addSurprisal(const Napi::CallbackInfo& info);
-
-  /**
-   * Get current perplexity value
-   * Args: handle (number)
-   * Returns: number (perplexity)
-   */
-  Napi::Value getPerplexity(const Napi::CallbackInfo& info);
-
-  /**
-   * Clone perplexity tracker
-   * Args: sourceHandle (number)
-   * Returns: number (new handle)
-   */
-  Napi::Value clonePerplexityTracker(const Napi::CallbackInfo& info);
-
-  /**
-   * Reset tracker to initial state
-   * Args: handle (number)
-   */
-  Napi::Value resetPerplexityTracker(const Napi::CallbackInfo& info);
-
-  /**
-   * Get number of tokens tracked
-   * Args: handle (number)
-   * Returns: number (count)
-   */
-  Napi::Value getPerplexityCount(const Napi::CallbackInfo& info);
-
-  /**
-   * Free perplexity tracker resources
-   * Args: handle (number)
-   */
-  Napi::Value freePerplexityTracker(const Napi::CallbackInfo& info);
 
   // ===== BRANCH API (internal, wrapped by lib/Branch.ts) =====
 
   Napi::Value _branchCreate(const Napi::CallbackInfo& info);
   Napi::Value _branchFork(const Napi::CallbackInfo& info);
-  Napi::Value _branchCaptureLogits(const Napi::CallbackInfo& info);
-  Napi::Value _branchDecodeAndCaptureOne(const Napi::CallbackInfo& info);
-  Napi::Value _branchDecodeAndCaptureBatch(const Napi::CallbackInfo& info);
+  Napi::Value _branchPrefill(const Napi::CallbackInfo& info);
   Napi::Value _branchSample(const Napi::CallbackInfo& info);
   Napi::Value _branchAccept(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);
@@ -386,6 +271,8 @@ private:
   Napi::Value _branchSamplerChainReseed(const Napi::CallbackInfo& info);
   Napi::Value _branchSteer(const Napi::CallbackInfo& info);
   Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetSamplerParams(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetGrammar(const Napi::CallbackInfo& info);
 
   // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
 
@@ -401,21 +288,6 @@ private:
   llama_context* _context = nullptr;
   bool _disposed = false;
   int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
-
-  // Persistent sampling chain (for repeat penalty tracking across tokens)
-  // Pattern from branch.hpp: create once via sampler::create_chain(), reuse across samples.
-  // Penalty sampler's history is updated via sampler::accept() after each sample.
-  // This enables proper repeat penalty tracking across long generations and clearAndReseed().
-  llama_sampler* _samplerChain = nullptr;
-  LloyalSamplingParams _samplerParams;  // Track current params to detect changes
-
-  // ===== HANDLE-BASED GRAMMAR =====
-  std::unordered_map<int32_t, llama_sampler*> _samplerHandles;
-  int32_t _nextSamplerHandle = 1;
-
-  // ===== HANDLE-BASED PERPLEXITY TRACKING =====
-  std::unordered_map<int32_t, lloyal::metrics::PerplexityHandle> _perplexityHandles;
-  int32_t _nextPerplexityHandle = 1;
 
   // ===== BRANCH STORE =====
   lloyal::branch::BranchStore _branchStore{16};  // capacity 16

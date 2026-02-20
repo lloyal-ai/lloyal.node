@@ -14,37 +14,33 @@ npm run example -- /path/to/model.gguf    # custom model
 - `/clear` - Reset conversation and clear terminal
 - `/quit` - Exit
 
-## The Pattern: Sync Produce, Async Commit
+## The Pattern: Branch Produce/Commit
 
 ```javascript
-// Sync generator - all operations are synchronous
-function* produceTokens(ctx, params) {
-  while (true) {
-    const tokenId = ctx.sample(params);      // sync
-    if (ctx.isStopToken(tokenId)) return;    // sync
-    const text = ctx.tokenToText(tokenId);   // sync
-    yield { text, tokenId };
-  }
-}
+// Create branch and prefill prompt
+const branch = Branch.create(ctx, 0, { temperature: 0.7 });
+await branch.prefill(promptTokens);
 
-// Usage - async commit is explicit in caller's loop
-for (const { text, tokenId } of produceTokens(ctx, params)) {
+// Async iterator - commit-before-yield
+for await (const { token, text } of branch) {
   process.stdout.write(text);
-  await ctx.decode([tokenId], position);     // async commit to KV
-  position += 1;
 }
+await branch.prune();
 ```
 
-**Key insight:** Token production is synchronous. Only the KV cache commit (`decode`) is async. This separation makes the control flow explicit.
+**Key insight:** The async iterator handles produce/commit internally. Each yielded token is already committed to KV. Breaking out is clean — no orphaned state.
 
 ## API Reference
 
 | Method | Sync/Async | Purpose |
 |--------|------------|---------|
-| `sample(params)` | sync | Sample next token from logits |
-| `isStopToken(id)` | sync | Check if token ends generation |
-| `tokenToText(id)` | sync | Convert token ID to text |
-| `decode(tokens, pos)` | async | Commit tokens to KV cache |
-| `tokenize(text)` | async | Convert text to token IDs |
-| `formatChat(json)` | async | Apply chat template |
-| `kvCacheClear()` | async | Reset KV cache |
+| `Branch.create(ctx, pos, params)` | sync | Create a branch for generation |
+| `branch.prefill(tokens)` | async | Feed tokens into branch's KV cache |
+| `branch.produce()` | async | Sample next token (no KV write) |
+| `branch.commit(token)` | async | Accept + decode into KV |
+| `branch.prune()` | async | Discard branch and its KV entries |
+| `ctx.isStopToken(id)` | sync | Check if token ends generation |
+| `ctx.tokenToText(id)` | sync | Convert token ID to text |
+| `ctx.tokenize(text)` | async | Convert text to token IDs |
+| `ctx.formatChat(json)` | async | Apply chat template |
+| `ctx.kvCacheClear()` | async | Reset KV cache |

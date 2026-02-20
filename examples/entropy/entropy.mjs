@@ -10,6 +10,8 @@
  * - EDT formula: T = T₀ · N^(θ/Entropy)
  * - Side-by-side comparison with fixed temperature
  * - Different prompt types: factual, creative, mixed
+ * - Branch API for token generation (produce/commit loop)
+ *
  *
  * Usage:
  *   node entropy.mjs [model-path]          # Human-readable output
@@ -18,7 +20,7 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -53,47 +55,48 @@ function edtTemperature(entropy) {
 
 /**
  * Generate with a specific sampling strategy
+ *
+ * Uses Branch API with per-token setSamplerParams() for EDT adaptation.
+ * Each token gets a temperature computed from the current logit entropy.
  */
 async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
   const messages = [{ role: 'user', content: prompt }];
   const { prompt: formatted } = await ctx.formatChat(JSON.stringify(messages));
-
   const tokens = await ctx.tokenize(formatted);
-  await ctx.decode(tokens, 0, 0);
+
+  const baseTemp = strategy === 'edt' ? 0.8 : strategy;
+  const branch = Branch.create(ctx, 0, { temperature: baseTemp, topP: 0.9 });
+  await branch.prefill(tokens);
 
   const output = [];
   const temps = [];
   const entropies = [];
-  let pos = tokens.length;
 
   for (let i = 0; i < maxTokens; i++) {
-    const entropy = ctx.modelEntropy('nats');
+    const branchLogits = branch.getLogits();
+    const entropy = ctx.modelEntropy('nats', branchLogits);
     entropies.push(entropy);
 
-    let temp;
-    if (strategy === 'edt') {
-      temp = edtTemperature(entropy);
-    } else {
-      temp = strategy; // Fixed temperature
-    }
+    const temp = strategy === 'edt' ? edtTemperature(entropy) : strategy;
     temps.push(temp);
 
-    const token = ctx.sample({ temperature: temp });
-    if (ctx.isStopToken(token)) break;
+    if (strategy === 'edt') branch.setSamplerParams({ temperature: temp, topP: 0.9 });
+
+    const { token, isStop } = await branch.produce();
+    if (isStop) break;
 
     const text = ctx.tokenToText(token);
     emit('token', { strategy: strategyName, token, text, entropy, temp });
 
     output.push(token);
-    await ctx.decode([token], pos++, 0);
+    await branch.commit(token);
   }
 
-  // Clear KV cache for next run
-  await ctx.kvCacheClear();
+  await branch.prune();
 
   const text = await ctx.detokenize(output);
-  const avgEntropy = entropies.reduce((a, b) => a + b, 0) / entropies.length;
-  const avgTemp = temps.reduce((a, b) => a + b, 0) / temps.length;
+  const avgEntropy = entropies.length > 0 ? entropies.reduce((a, b) => a + b, 0) / entropies.length : 0;
+  const avgTemp = temps.length > 0 ? temps.reduce((a, b) => a + b, 0) / temps.length : 0;
 
   return { text, avgEntropy, avgTemp, tokenCount: output.length, temps, entropies };
 }

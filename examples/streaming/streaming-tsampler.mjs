@@ -6,7 +6,8 @@
  * - TypeScript sampling via tsampler (TTA pattern)
  * - N-gram tracking to detect sequence repetition
  * - Logit steering to prevent repeated sequences
- * - clearAndReseed() for infinite context
+ * - Branch API for KV management (prefill/commit)
+ * - KV cache clear + re-prefill for infinite context
  *
  * The key insight: llama.cpp's token-level penalties degrade prose quality.
  * Instead, we track N-grams at the app level and steer away from repeats.
@@ -18,7 +19,7 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 // Import tsampler from npm package
 import {
@@ -172,7 +173,6 @@ Begin:
   }
 
   const promptTokens = await ctx.tokenize(prompt);
-  await ctx.decode(promptTokens, 0, 0);
 
   // Track all generated tokens
   const allTokens = [...promptTokens];
@@ -201,15 +201,19 @@ Begin:
     process.stdout.write(prompt);
   }
 
-  const tracker = ctx.createPerplexityTracker();
-  let cachePos = promptTokens.length;
+  // Branch used purely for KV management — sampling done externally via tsampler
+  let branch = Branch.create(ctx, 0, { temperature: 0 });
+  await branch.prefill(promptTokens);
+
+  // Manual PPL tracking (persists across branch reseeds)
+  let nllSum = 0, nllCount = 0;
   let reseedCount = 0;
   let blockedCount = 0;
 
   for (let t = 0; t < TARGET_TOKENS; t++) {
-    // Get logits from native layer
-    const logitsBuffer = ctx.getLogits();
-    const logits = new Float32Array(logitsBuffer);
+    // Get logits from branch snapshot
+    const originalLogits = branch.getLogits();
+    const logits = new Float32Array(originalLogits);
 
     // N-gram deduplication: Check if we're about to repeat a sequence
     const blockedToken = ngramTracker.getBlockedToken();
@@ -244,9 +248,10 @@ Begin:
     // tokenHistory.accept(token); // Disabled - matching baseline
     ngramTracker.accept(token);
 
-    // Track surprisal
-    const surprisal = ctx.modelSurprisal(token);
-    ctx.addSurprisal(tracker, surprisal);
+    // Track surprisal from original (unmodified) logits
+    const surprisal = ctx.modelSurprisal(token, 'nats', originalLogits);
+    nllSum += Math.max(0, surprisal);
+    nllCount++;
 
     // Output token
     const text = ctx.tokenToText(token);
@@ -255,18 +260,23 @@ Begin:
     }
     emit('token', { index: t, token, text, surprisal, blocked: wasBlocked });
 
-    // Store and decode
+    // Store and advance KV (no sampler accept — we're using tsampler externally)
     allTokens.push(token);
-    await ctx.decode([token], cachePos++, 0);
+    await branch.commit(token);
 
     // Cache full? Reseed at boundary
-    if (cachePos >= nCtx) {
+    if (branch.position >= nCtx) {
       const tail = allTokens.slice(-TAIL_SIZE);
-      await ctx.clearAndReseed(sinks, tail);
-      cachePos = sinks.length + TAIL_SIZE;
+
+      // Destroy current branch, clear KV, create fresh branch with re-prefill
+      await branch.prune();
+      await ctx.kvCacheClear();
+      branch = Branch.create(ctx, 0, { temperature: 0 });
+      await branch.prefill([...sinks, ...tail]);
+
       reseedCount++;
 
-      const ppl = ctx.getPerplexity(tracker);
+      const ppl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
       const stats = ngramTracker.stats();
 
       emit('reseed', { count: reseedCount, tokenIndex: t + 1, ppl, blockedCount, uniqueNgrams: stats.uniqueNgrams });
@@ -277,15 +287,15 @@ Begin:
     }
 
     // Progress every 1000 tokens
-    if ((t + 1) % 1000 === 0 && cachePos < nCtx && !jsonlMode) {
+    if ((t + 1) % 1000 === 0 && branch.position < nCtx && !jsonlMode) {
       const stats = ngramTracker.stats();
       console.log(`\n  [${t + 1}/${TARGET_TOKENS} | Blocked repeats: ${blockedCount} | Unique ${NGRAM_SIZE}-grams: ${stats.uniqueNgrams}]`);
     }
   }
 
-  const finalPpl = ctx.getPerplexity(tracker);
+  const finalPpl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
   const finalStats = ngramTracker.stats();
-  ctx.freePerplexityTracker(tracker);
+  await branch.prune();
 
   const generatedTokens = allTokens.length - promptTokens.length;
   emit('complete', {

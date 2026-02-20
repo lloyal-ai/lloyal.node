@@ -1,6 +1,6 @@
-# Speculative Decoding with Forkable KV State
+# Speculative Decoding with Branch API
 
-Demonstrates the KV cache primitives needed for speculative decoding: draft, fork, verify, accept/reject.
+Demonstrates speculative decoding using the Branch primitive: fork a draft, verify, accept/reject, sample bonus token.
 
 ## Run It
 
@@ -31,56 +31,74 @@ Statistics
 
 | Phase | What Happens |
 |-------|--------------|
-| **1. DRAFT** | Generate N tokens greedily (fast, low quality ok) |
-| **2. FORK** | `kvSeqCopy(0, 1)` - copy KV state for verification |
-| **3. VERIFY** | Run target model on all N tokens (one batch) |
-| **4. ACCEPT** | Keep tokens where target agrees with draft |
-| **5. BONUS** | Sample one token from target at rejection point |
-| **6. CLEANUP** | `kvCacheRemove()` rejected tokens, repeat |
+| **1. MAIN** | Create main branch tracking committed state |
+| **2. FORK** | Fork draft branch (shares KV prefix with main) |
+| **3. DRAFT** | produce/commit N tokens on draft branch |
+| **4. VERIFY** | Check draft confidence (entropy threshold) |
+| **5. PRUNE** | Remove draft branch (cleans up divergent KV) |
+| **6. ACCEPT** | Commit accepted tokens to main branch |
+| **7. BONUS** | Sample one token from main at rejection point |
 
-## Key Pattern: Accept/Reject with KV Cleanup
+## Key Pattern: Fork/Draft/Verify with Branch API
 
 ```javascript
-// Draft N tokens on seq 0
-for (let i = 0; i < N; i++) {
-  const token = ctx.sample({ temperature: 0.0 });
-  await ctx.decode([token], pos++, 0);
-  drafts.push(token);
+// Main branch tracks committed state
+const main = Branch.create(ctx, 0, { temperature: 0.7 });
+await main.prefill(promptTokens);
+
+while (output.length < maxTokens) {
+  // Fork draft from main — shares KV prefix
+  const draft = await main.fork();
+  draft.reseedSampler(iteration);
+
+  // Draft N tokens
+  const drafts = [];
+  for (let i = 0; i < N; i++) {
+    const entropy = ctx.modelEntropy('nats', draft.getLogits());
+    const { token, text, isStop } = draft.produceSync();
+    if (isStop) break;
+    drafts.push({ token, text, entropy });
+    await draft.commit(token);
+  }
+
+  // Verify and prune draft
+  const acceptedCount = verify(drafts);
+  await draft.prune();
+
+  // Commit accepted tokens to main
+  for (const d of drafts.slice(0, acceptedCount)) {
+    await main.commit(d.token);
+  }
+
+  // Bonus token from main at rejection point
+  if (acceptedCount < drafts.length) {
+    const { token } = main.produceSync();
+    await main.commit(token);
+  }
 }
-
-// Fork for verification
-ctx.kvSeqCopy(0, 1);
-
-// Verify (compare draft vs target distributions)
-const acceptedCount = verify(drafts);
-
-// Remove rejected tokens from KV cache
-if (acceptedCount < drafts.length) {
-  const rejectPos = startPos + acceptedCount;
-  await ctx.kvCacheRemove(0, rejectPos, -1);  // Critical!
-
-  // Sample bonus token from target at rejection point
-  const bonus = ctx.sample({ temperature: 0.7 });
-  await ctx.decode([bonus], rejectPos, 0);
-}
+await main.prune();
 ```
 
-## Why Fork Before Verify?
+## Why Branch API?
 
-In real speculative decoding with two models:
-- Draft model: small, fast, generates candidates
-- Target model: large, slow, verifies quality
+The produce/commit separation is what makes speculative decoding natural:
 
-The fork lets you run the target model on seq 1 while keeping the draft state on seq 0. After verification, you collapse to the accepted prefix.
+- **produce()** samples without writing to KV — inspect before deciding
+- **commit()** accepts + decodes — advance state only for accepted tokens
+- **fork()** shares KV prefix — draft branch doesn't duplicate the prompt
+- **prune()** removes divergent KV — clean rejection without manual bookkeeping
 
 ## Key APIs
 
 | Method | Description |
 |--------|-------------|
-| `kvSeqCopy(src, dst)` | Fork KV cache (O(1) tag copy) |
-| `kvCacheRemove(seq, start, end)` | Remove token range from cache |
-| `modelEntropy('nats')` | Check draft confidence |
-| `nSeqMax` | Context option for multi-sequence |
+| `Branch.create(ctx, pos, params)` | Create branch at position |
+| `branch.fork()` | Fork: shared KV prefix + cloned sampler |
+| `branch.produce()` | Sample without KV write |
+| `branch.commit(token)` | Accept + decode into KV |
+| `branch.prune()` | Remove divergent KV entries |
+| `branch.reseedSampler(seed)` | Diversify forked branch |
+| `ctx.modelEntropy('nats', logits)` | Check draft confidence |
 
 ## Accept Rate
 

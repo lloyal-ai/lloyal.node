@@ -82,16 +82,15 @@ async function main() {
     messages.push({ role: "user", content: trimmed });
 
     if (!branch) {
-      // === COLD (position === 0): full format → tokenize with BOS → decode ===
+      // === COLD (position === 0): full format → tokenize with BOS → prefill ===
       fmt = await ctx.formatChat(JSON.stringify(messages));
       const tokens = await ctx.tokenize(fmt.prompt);
-      await ctx.decode(tokens, 0, 0);
-      branch = Branch.create(ctx, tokens.length, {
+      branch = Branch.create(ctx, 0, {
         temperature: 0.7,
         topK: 40,
         topP: 0.9,
       });
-      branch.captureLogits();
+      await branch.prefill(tokens);
     } else {
       // === WARM (position > 0): format only the new message ===
       fmt = await ctx.formatChat(
