@@ -248,8 +248,8 @@ Begin:
     // tokenHistory.accept(token); // Disabled - matching baseline
     ngramTracker.accept(token);
 
-    // Track surprisal from original (unmodified) logits
-    const surprisal = ctx.modelSurprisal(token, 'nats', originalLogits);
+    // Track surprisal from branch's logits snapshot (before N-gram steering)
+    const surprisal = branch.modelSurprisal(token, 'nats');
     nllSum += Math.max(0, surprisal);
     nllCount++;
 

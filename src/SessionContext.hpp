@@ -79,13 +79,6 @@ private:
   // ===== CORE PRIMITIVES =====
 
   /**
-   * Get raw logits (zero-copy Float32Array)
-   * Returns: Float32Array pointing directly to llama.cpp memory
-   * Lifetime: Valid until next decode() call
-   */
-  Napi::Value getLogits(const Napi::CallbackInfo& info);
-
-  /**
    * Tokenize text to token IDs
    * Args: text (string)
    * Returns: Promise<number[]>
@@ -235,23 +228,6 @@ private:
    */
   Napi::Value hasPooling(const Napi::CallbackInfo& info);
 
-  // ===== METRICS API =====
-
-  /**
-   * Compute surprisal for a specific token
-   * Args: pickedTokenId (number), base? (string: "nats" | "bits" | "base10")
-   * Returns: number (surprisal in specified base)
-   */
-  Napi::Value modelSurprisal(const Napi::CallbackInfo& info);
-
-  /**
-   * Compute entropy of logits distribution
-   * Args: base? (string: "nats" | "bits" | "base10")
-   * Returns: number (entropy in specified base)
-   */
-  Napi::Value modelEntropy(const Napi::CallbackInfo& info);
-
-
   // ===== BRANCH API (internal, wrapped by lib/Branch.ts) =====
 
   Napi::Value _branchCreate(const Napi::CallbackInfo& info);
@@ -273,6 +249,11 @@ private:
   Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
   Napi::Value _branchSetSamplerParams(const Napi::CallbackInfo& info);
   Napi::Value _branchSetGrammar(const Napi::CallbackInfo& info);
+  Napi::Value _branchModelEntropy(const Napi::CallbackInfo& info);
+  Napi::Value _branchModelSurprisal(const Napi::CallbackInfo& info);
+  Napi::Value _branchGetSamplingPerplexity(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetLogitBias(const Napi::CallbackInfo& info);
+  Napi::Value _branchClearLogitBias(const Napi::CallbackInfo& info);
 
   // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
 
@@ -296,18 +277,6 @@ private:
   std::vector<llama_token> _turnSeparatorCache;
   bool _turnSeparatorCached = false;
 
-  // ===== LOGITS BUFFER MANAGEMENT (Memoization + Revocation) =====
-  //
-  // Pattern: "Memoized Step-Scoped Views with Explicit Revocation"
-  //
-  // - Memoization: If getLogits() called twice in same step, return same buffer
-  // - Revocation: On decode(), detach previous buffer to prevent use-after-invalidation
-  //
-  // See: lloyal::logits::get() for the underlying safe wrapper
-  uint64_t _decodeStepId = 0;                           // Incremented on each decode()
-  uint64_t _logitsStepId = 0;                           // Step when _logitsBuffer was created
-  Napi::Reference<Napi::ArrayBuffer> _logitsBufferRef;  // Strong reference - kept alive so we can Detach() on revocation
-
   // ===== INLINE HELPERS =====
   // Pattern matches HybridSessionContext.hpp:170-176
 
@@ -327,19 +296,6 @@ private:
 
   // Parse base string ("nats", "bits", "base10") to lloyal::metrics::Base enum
   static lloyal::metrics::Base parseBase(const std::string& baseStr);
-
-  /**
-   * Invalidate any active logits buffer (The Kill Switch)
-   *
-   * Called before any operation that would invalidate the logits pointer:
-   * - decode()
-   * - encode()
-   * - dispose()
-   *
-   * Detaches the ArrayBuffer so any JS code holding a reference
-   * will get a TypeError when trying to access it.
-   */
-  void invalidateLogits();
 };
 
 /**

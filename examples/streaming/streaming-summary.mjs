@@ -328,8 +328,7 @@ Begin:
       break;
     }
 
-    const branchLogits = branch.getLogits();
-    const surprisal = ctx.modelSurprisal(token, 'nats', branchLogits);
+    const surprisal = branch.modelSurprisal(token, 'nats');
     nllSum += Math.max(0, surprisal);
     nllCount++;
 

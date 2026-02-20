@@ -137,7 +137,7 @@ async function main() {
 
     for (let i = 0; i < DRAFT_COUNT && output.length + drafts.length < GENERATION_LENGTH; i++) {
       // Get entropy BEFORE sampling (from draft branch's logits snapshot)
-      const entropy = ctx.modelEntropy('nats', draft.getLogits());
+      const entropy = draft.modelEntropy('nats');
 
       // produce() samples from captured logits (no KV write yet)
       const { token, text, isStop } = draft.produceSync();
