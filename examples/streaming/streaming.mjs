@@ -8,15 +8,16 @@
  *
  * This example demonstrates:
  * - Generating tokens beyond context window limit
- * - clearAndReseed() for cache-local position reindexing
+ * - KV cache clear + re-prefill for cache-local position reindexing
  * - Per-token perplexity measurement across reseeds
+ * - Branch API for generation (produce/commit loop)
  *
  * Parameters from BlinkKV paper: 2048 context, 4 sinks, 256 tail
  */
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -80,7 +81,6 @@ Begin:
   }
 
   const promptTokens = await ctx.tokenize(prompt);
-  await ctx.decode(promptTokens, 0, 0);
 
   // Track all generated tokens (needed for reseeding)
   const allTokens = [...promptTokens];
@@ -97,22 +97,22 @@ Begin:
     process.stdout.write(prompt);
   }
 
-  const tracker = ctx.createPerplexityTracker();
-  let cachePos = promptTokens.length;
+  const samplingParams = { temperature: 0.8, topP: 0.9 };
+  let branch = Branch.create(ctx, 0, samplingParams);
+  await branch.prefill(promptTokens);
+
+  // Manual PPL tracking (persists across branch reseeds)
+  let nllSum = 0, nllCount = 0;
   let reseedCount = 0;
 
   for (let t = 0; t < TARGET_TOKENS; t++) {
-    // Sample next token
     // NOTE: Token-level repeat penalties are NOT used for long-form generation.
     // llama.cpp's penalty system penalizes individual tokens (not sequences),
     // which degrades prose quality over 100+ tokens as common words accumulate
     // in the penalty buffer. For sequence-level deduplication, use N-gram
     // tracking with logit steering (TTA pattern) instead.
-    const token = ctx.sample({
-      temperature: 0.8,
-      topP: 0.9,
-    });
-    if (ctx.isStopToken(token)) {
+    const { token, isStop } = await branch.produce();
+    if (isStop) {
       if (!jsonlMode) {
         console.log('\n[EOS token reached]');
       }
@@ -120,9 +120,11 @@ Begin:
       break;
     }
 
-    // Track surprisal
-    const surprisal = ctx.modelSurprisal(token);
-    ctx.addSurprisal(tracker, surprisal);
+    // Track surprisal from the logits used by produce()
+    const branchLogits = branch.getLogits();
+    const surprisal = ctx.modelSurprisal(token, 'nats', branchLogits);
+    nllSum += Math.max(0, surprisal);
+    nllCount++;
 
     // Output token
     const text = ctx.tokenToText(token);
@@ -131,18 +133,23 @@ Begin:
     }
     emit('token', { index: t, token, text, surprisal });
 
-    // Store token and decode
+    // Store token and commit (decode + capture new logits)
     allTokens.push(token);
-    await ctx.decode([token], cachePos++, 0);
+    await branch.commit(token);
 
     // Cache full? Reseed at boundary
-    if (cachePos >= nCtx) {
+    if (branch.position >= nCtx) {
       const tail = allTokens.slice(-TAIL_SIZE);
-      await ctx.clearAndReseed(sinks, tail);
-      cachePos = sinks.length + TAIL_SIZE;
+
+      // Destroy current branch, clear KV, create fresh branch with re-prefill
+      await branch.prune();
+      await ctx.kvCacheClear();
+      branch = Branch.create(ctx, 0, samplingParams);
+      await branch.prefill([...sinks, ...tail]);
+
       reseedCount++;
 
-      const ppl = ctx.getPerplexity(tracker);
+      const ppl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
       emit('reseed', { count: reseedCount, tokenIndex: t + 1, ppl });
 
       if (!jsonlMode) {
@@ -156,8 +163,8 @@ Begin:
     }
   }
 
-  const finalPpl = ctx.getPerplexity(tracker);
-  ctx.freePerplexityTracker(tracker);
+  const finalPpl = nllCount > 0 ? Math.exp(nllSum / nllCount) : 1;
+  await branch.prune();
 
   const generatedTokens = allTokens.length - promptTokens.length;
   emit('complete', { generatedTokens, reseeds: reseedCount, finalPpl });

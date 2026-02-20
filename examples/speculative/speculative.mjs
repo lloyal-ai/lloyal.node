@@ -104,15 +104,13 @@ async function main() {
     console.log(`\nPrompt: "${prompt}"`);
   }
 
-  // Prefill prompt
+  // Prefill prompt via main branch
   const promptTokens = await ctx.tokenize(prompt);
-  await ctx.decode(promptTokens, 0, 0);
 
-  // Create main branch — tracks committed state
-  const main = Branch.create(ctx, promptTokens.length, {
+  const main = Branch.create(ctx, 0, {
     temperature: 0.7, // For bonus token sampling
   });
-  main.captureLogits();
+  await main.prefill(promptTokens);
 
   const output = [];
   let totalDrafted = 0;
@@ -138,11 +136,11 @@ async function main() {
     const drafts = [];
 
     for (let i = 0; i < DRAFT_COUNT && output.length + drafts.length < GENERATION_LENGTH; i++) {
-      // Get entropy BEFORE sampling (from current logits)
-      const entropy = ctx.modelEntropy('nats');
+      // Get entropy BEFORE sampling (from draft branch's logits snapshot)
+      const entropy = ctx.modelEntropy('nats', draft.getLogits());
 
       // produce() samples from captured logits (no KV write yet)
-      const { token, text, isStop } = draft.produce();
+      const { token, text, isStop } = draft.produceSync();
 
       if (isStop) break;
 
@@ -191,7 +189,7 @@ async function main() {
     const rejected = drafts.slice(acceptedCount);
     if (rejected.length > 0) {
       // produce() samples from main's current logits (at rejection point)
-      const { token: bonusToken, text: bonusText, isStop } = main.produce();
+      const { token: bonusToken, text: bonusText, isStop } = main.produceSync();
 
       if (!isStop) {
         await main.commit(bonusToken);

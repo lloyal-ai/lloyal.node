@@ -1,7 +1,6 @@
 #include "SessionContext.hpp"
 #include "BackendManager.hpp"
 #include "FileSystem.h"
-#include <lloyal/decode.hpp>
 #include <lloyal/sampler.hpp>
 #include <lloyal/tokenizer.hpp>
 #include <lloyal/common.hpp>
@@ -409,39 +408,6 @@ private:
 /**
  * AsyncWorker for decode operation
  */
-class DecodeWorker : public Napi::AsyncWorker {
-public:
-  DecodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens,
-               int32_t pos, llama_seq_id seqId, int32_t nBatch)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _pos(pos), _seqId(seqId), _nBatch(nBatch) {}
-
-  void Execute() override {
-    try {
-      lloyal::decode::many(_ctx, _tokens, _pos, _nBatch, _seqId);
-    } catch (const std::exception& e) {
-      SetError(e.what());
-    }
-  }
-
-  void OnOK() override {
-    _deferred.Resolve(Env().Undefined());
-  }
-
-  void OnError(const Napi::Error& err) override {
-    _deferred.Reject(err.Value());
-  }
-
-  Napi::Promise GetPromise() { return _deferred.Promise(); }
-
-private:
-  Napi::Promise::Deferred _deferred;
-  llama_context* _ctx;
-  std::vector<llama_token> _tokens;
-  int32_t _pos;
-  llama_seq_id _seqId;
-  int32_t _nBatch;
-};
-
 /**
  * AsyncWorker for encode operation (embedding extraction)
  * Unlike DecodeWorker, marks ALL tokens with logits=true
@@ -664,14 +630,16 @@ public:
     // RAII snapshot of accept-mutable state. Destructor frees anything still
     // owned, so partial clones from a throwing OOM don't leak.
     struct Snapshot {
-      llama_sampler* sampler = nullptr;
-      llama_sampler* grammar = nullptr;
-      lloyal::metrics::BranchMetricsHandle metrics = 0;
+      lloyal::branch::SamplerChainHandle sampler = 0;
+      lloyal::branch::GrammarHandle grammar = 0;
+      lloyal::branch::MetricsHandle metrics = 0;
+      lloyal::branch::BranchStore* store = nullptr;
 
       ~Snapshot() {
-        if (sampler) lloyal::sampler::free_chain(sampler);
-        if (grammar) lloyal::grammar::free_sampler(grammar);
-        if (metrics) lloyal::metrics::free_branch_metrics(metrics);
+        if (!store) return;
+        if (sampler) store->free_sampler(sampler);
+        if (grammar) store->free_grammar(grammar);
+        if (metrics) store->free_metrics(metrics);
       }
 
       void restore_into(lloyal::branch::BranchState& st) {
@@ -691,12 +659,13 @@ public:
         if (!st) throw std::runtime_error("StoreCommitWorker: invalid handle");
 
         auto s = std::make_unique<Snapshot>();
-        s->sampler = st->sampler_chain
-            ? lloyal::sampler::clone_chain(st->sampler_chain) : nullptr;
-        s->grammar = st->grammar
-            ? lloyal::grammar::clone_sampler(st->grammar) : nullptr;
+        s->store = &_store;
+        s->sampler = st->sampler_chain != 0
+            ? _store.clone_sampler(st->sampler_chain) : 0;
+        s->grammar = st->grammar != 0
+            ? _store.clone_grammar(st->grammar) : 0;
         s->metrics = st->metrics != 0
-            ? lloyal::metrics::clone_branch_metrics(st->metrics) : 0;
+            ? _store.clone_metrics(st->metrics) : 0;
         snaps[i] = std::move(s);
       }
 
@@ -769,45 +738,6 @@ private:
 };
 
 /**
- * AsyncWorker for decode + logits capture into a JS ArrayBuffer
- * Pins the dest ArrayBuffer via Napi::Reference to prevent GC during Execute()
- */
-class DecodeAndCaptureWorker : public Napi::AsyncWorker {
-public:
-  DecodeAndCaptureWorker(Napi::Env env, llama_context* ctx,
-                          std::vector<llama_token> tokens,
-                          int32_t pos, llama_seq_id seqId, int32_t nBatch,
-                          float* dest, int nVocab,
-                          Napi::Reference<Napi::ArrayBuffer> bufRef)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(std::move(tokens)),
-      _pos(pos), _seqId(seqId), _nBatch(nBatch), _dest(dest), _nVocab(nVocab),
-      _bufRef(std::move(bufRef)) {}
-
-  void Execute() override {
-    try {
-      lloyal::decode::many(_ctx, _tokens, _pos, _nBatch, _seqId);
-      float* logits = lloyal::logits::get(_ctx, -1);
-      std::memcpy(_dest, logits, _nVocab * sizeof(float));
-    } catch (const std::exception& e) { SetError(e.what()); }
-  }
-
-  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
-  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
-  Napi::Promise GetPromise() { return _deferred.Promise(); }
-
-private:
-  Napi::Promise::Deferred _deferred;
-  llama_context* _ctx;
-  std::vector<llama_token> _tokens;
-  int32_t _pos;
-  llama_seq_id _seqId;
-  int32_t _nBatch;
-  float* _dest;
-  int _nVocab;
-  Napi::Reference<Napi::ArrayBuffer> _bufRef;  // prevent GC of dest buffer
-};
-
-/**
  * AsyncWorker for JSON schema → GBNF grammar conversion
  * Pure CPU, no shared state — cleanest worker
  */
@@ -836,10 +766,8 @@ private:
 
 Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(env, "SessionContext", {
-    // ===== THE GENERATION LOOP =====
-    InstanceMethod("decode", &SessionContext::decode),
+    // ===== CORE =====
     InstanceMethod("getLogits", &SessionContext::getLogits),
-    InstanceMethod("sample", &SessionContext::sample),
     InstanceMethod("tokenToText", &SessionContext::tokenToText),
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
     InstanceMethod("getEogToken", &SessionContext::getEogToken),
@@ -864,16 +792,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("kvSeqKeep", &SessionContext::kvSeqKeep),
     InstanceMethod("kvSeqPosMax", &SessionContext::kvSeqPosMax),
 
-    // ===== HANDLE-BASED GRAMMAR =====
-    InstanceMethod("createSampler", &SessionContext::createSampler),
-    InstanceMethod("applySampler", &SessionContext::applySampler),
-    InstanceMethod("acceptSamplerToken", &SessionContext::acceptSamplerToken),
-    InstanceMethod("cloneSampler", &SessionContext::cloneSampler),
-    InstanceMethod("freeSamplerHandle", &SessionContext::freeSamplerHandle),
-
-    // ===== ATOMIC DECODE+CAPTURE =====
-    InstanceMethod("decodeAndCapture", &SessionContext::decodeAndCapture),
-
     // ===== HELPERS =====
     InstanceMethod("formatChat", &SessionContext::formatChat),
     InstanceMethod("parseChatOutput", &SessionContext::parseChatOutput),
@@ -889,16 +807,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     // ===== METRICS API =====
     InstanceMethod("modelSurprisal", &SessionContext::modelSurprisal),
     InstanceMethod("modelEntropy", &SessionContext::modelEntropy),
-    InstanceMethod("createPerplexityTracker", &SessionContext::createPerplexityTracker),
-    InstanceMethod("addSurprisal", &SessionContext::addSurprisal),
-    InstanceMethod("getPerplexity", &SessionContext::getPerplexity),
-    InstanceMethod("clonePerplexityTracker", &SessionContext::clonePerplexityTracker),
-    InstanceMethod("resetPerplexityTracker", &SessionContext::resetPerplexityTracker),
-    InstanceMethod("getPerplexityCount", &SessionContext::getPerplexityCount),
-    InstanceMethod("freePerplexityTracker", &SessionContext::freePerplexityTracker),
-
-    // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
-    InstanceMethod("greedySample", &SessionContext::greedySample),
 
     // ===== LIFECYCLE =====
     InstanceMethod("dispose", &SessionContext::dispose),
@@ -923,6 +831,8 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchSamplerChainReseed", &SessionContext::_branchSamplerChainReseed),
     InstanceMethod("_branchSteer", &SessionContext::_branchSteer),
     InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
+    InstanceMethod("_branchSetSamplerParams", &SessionContext::_branchSetSamplerParams),
+    InstanceMethod("_branchSetGrammar", &SessionContext::_branchSetGrammar),
 
     // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
@@ -954,26 +864,6 @@ SessionContext::SessionContext(const Napi::CallbackInfo& info)
 
 SessionContext::~SessionContext() {
   if (!_disposed) {
-    // Free handle-based grammar samplers first
-    for (auto& [handle, sampler] : _samplerHandles) {
-      if (sampler) {
-        llama_sampler_free(sampler);
-      }
-    }
-    _samplerHandles.clear();
-
-    // Free handle-based perplexity trackers
-    for (auto& [napiHandle, pplHandle] : _perplexityHandles) {
-      lloyal::metrics::free_perplexity(pplHandle);
-    }
-    _perplexityHandles.clear();
-
-    // Free persistent sampler chain (pattern from branch.hpp)
-    if (_samplerChain) {
-      lloyal::sampler::free_chain(_samplerChain);
-      _samplerChain = nullptr;
-    }
-
     // Free context (depends on model)
     if (_context) {
       llama_free(_context);
@@ -1071,43 +961,6 @@ Napi::Value SessionContext::getLogits(const Napi::CallbackInfo& info) {
 
   // Return Float32Array view
   return Napi::Float32Array::New(env, n_vocab, buffer, 0);
-}
-
-Napi::Value SessionContext::decode(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected (tokens: number[], position: number[, seqId: number])");
-  }
-
-  // Revoke any active logits buffer before decode
-  invalidateLogits();
-
-  // Extract tokens
-  Napi::Array jsTokens = info[0].As<Napi::Array>();
-  std::vector<llama_token> tokens;
-  tokens.reserve(jsTokens.Length());
-  for (uint32_t i = 0; i < jsTokens.Length(); i++) {
-    Napi::Value val = jsTokens[i];
-    if (!val.IsNumber()) {
-      throw Napi::TypeError::New(env, "Token array must contain only numbers");
-    }
-    tokens.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
-  }
-
-  int32_t position = info[1].As<Napi::Number>().Int32Value();
-
-  // Extract optional seqId (default 0 for backward compatibility)
-  llama_seq_id seqId = 0;
-  if (info.Length() >= 3 && info[2].IsNumber()) {
-    seqId = static_cast<llama_seq_id>(info[2].As<Napi::Number>().Int32Value());
-  }
-
-  // Run async
-  auto* worker = new DecodeWorker(env, _context, tokens, position, seqId, _nBatch);
-  worker->Queue();
-  return worker->GetPromise();
 }
 
 Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
@@ -1248,20 +1101,6 @@ Napi::Value SessionContext::modelEntropy(const Napi::CallbackInfo& info) {
   float entropy = lloyal::metrics::model_entropy(logits, n_vocab, base);
 
   return Napi::Number::New(env, static_cast<double>(entropy));
-}
-
-Napi::Value SessionContext::greedySample(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // Use liblloyal greedy sampler with model overload
-  llama_token token = lloyal::sampler::greedy(_context, _model.get());
-
-  return Napi::Number::New(env, static_cast<double>(token));
 }
 
 Napi::Value SessionContext::tokenToText(const Napi::CallbackInfo& info) {
@@ -1488,95 +1327,12 @@ Napi::Value SessionContext::kvCacheSize(const Napi::CallbackInfo& info) {
   return Napi::Number::New(env, static_cast<double>(max_pos));
 }
 
-Napi::Value SessionContext::sample(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  llama_token next_token;
-
-  // Use greedy if no params, otherwise use persistent sampler chain
-  // Pattern from branch.hpp: create chain once, reuse across samples, call accept() after
-  if (info.Length() == 0 || !info[0].IsObject()) {
-    // No params - use greedy sampling (stateless, no chain needed)
-    next_token = lloyal::sampler::greedy(_context, _model.get());
-  } else {
-    // Use adapter to convert JS params → liblloyal-compatible structure
-    LloyalSamplingParams params = adaptSamplingParamsFromJS(info[0].As<Napi::Object>());
-
-    // Create or rebuild sampler chain if params changed
-    // Pattern from branch.hpp: persistent chain enables repeat penalty tracking
-    if (!_samplerChain || params != _samplerParams) {
-      if (_samplerChain) {
-        lloyal::sampler::free_chain(_samplerChain);
-      }
-      _samplerChain = lloyal::sampler::create_chain(params);
-      _samplerParams = params;
-    }
-
-    // Get logits and build candidate array (pattern from branch.hpp::sample)
-    const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-    float* logits = lloyal::logits::get(_context, -1);
-
-    std::vector<llama_token_data> candidates(n_vocab);
-    for (int i = 0; i < n_vocab; i++) {
-      candidates[i] = llama_token_data{static_cast<llama_token>(i), logits[i], 0.0f};
-    }
-
-    llama_token_data_array cur_p = {
-      candidates.data(),
-      static_cast<size_t>(n_vocab),
-      -1,    // selected
-      false  // sorted
-    };
-
-    // Apply persistent sampler chain (includes penalties, filters, temp, dist)
-    lloyal::sampler::apply(_samplerChain, &cur_p);
-
-    if (cur_p.selected == -1) {
-      throw Napi::Error::New(env, "Sampling failed - no token selected");
-    }
-
-    next_token = cur_p.data[cur_p.selected].id;
-
-    // Update penalty history in persistent chain (KEY CHANGE from old stateless approach)
-    // This enables repeat penalty to track ALL tokens across the generation,
-    // not just what's visible in the current KV cache window after clearAndReseed()
-    lloyal::sampler::accept(_samplerChain, next_token);
-  }
-
-  return Napi::Number::New(env, static_cast<double>(next_token));
-}
-
 Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!_disposed) {
     // Revoke any active logits buffer before disposing
     invalidateLogits();
-
-    // Free handle-based grammar samplers
-    for (auto& [handle, sampler] : _samplerHandles) {
-      if (sampler) {
-        llama_sampler_free(sampler);
-      }
-    }
-    _samplerHandles.clear();
-
-    // Free handle-based perplexity trackers
-    for (auto& [napiHandle, pplHandle] : _perplexityHandles) {
-      lloyal::metrics::free_perplexity(pplHandle);
-    }
-    _perplexityHandles.clear();
-
-    // Free persistent sampler chain (pattern from branch.hpp)
-    if (_samplerChain) {
-      lloyal::sampler::free_chain(_samplerChain);
-      _samplerChain = nullptr;
-    }
 
     // Drain branch store while context is still alive
     _branchStore.drain();
@@ -1647,358 +1403,6 @@ Napi::Value SessionContext::kvSeqPosMax(const Napi::CallbackInfo& info) {
   llama_pos pos = lloyal::kv::pos_max(_context, seq);
   return Napi::Number::New(env, static_cast<double>(pos));
 }
-
-// ===== HANDLE-BASED GRAMMAR =====
-
-Napi::Value SessionContext::createSampler(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "Expected (grammarStr: string)");
-  }
-
-  std::string grammarStr = info[0].As<Napi::String>().Utf8Value();
-  llama_sampler* sampler = lloyal::grammar::init_sampler(_model.get(), grammarStr);
-
-  if (!sampler) {
-    throw Napi::Error::New(env, "Failed to create grammar sampler");
-  }
-
-  int32_t handle = _nextSamplerHandle++;
-  _samplerHandles[handle] = sampler;
-
-  return Napi::Number::New(env, static_cast<double>(handle));
-}
-
-Napi::Value SessionContext::applySampler(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 2) {
-    throw Napi::TypeError::New(env, "Expected (handle, logitsBuffer)");
-  }
-
-  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
-
-  auto it = _samplerHandles.find(handle);
-  if (it == _samplerHandles.end()) {
-    throw Napi::Error::New(env, "Invalid sampler handle");
-  }
-
-  // Get logits buffer
-  Napi::ArrayBuffer buffer;
-  if (info[1].IsArrayBuffer()) {
-    buffer = info[1].As<Napi::ArrayBuffer>();
-  } else if (info[1].IsTypedArray()) {
-    buffer = info[1].As<Napi::TypedArray>().ArrayBuffer();
-  } else {
-    throw Napi::TypeError::New(env, "Expected ArrayBuffer or TypedArray");
-  }
-
-  float* logits = static_cast<float*>(buffer.Data());
-  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Build candidates array
-  std::vector<llama_token_data> candidates(n_vocab);
-  for (int i = 0; i < n_vocab; i++) {
-    candidates[i] = llama_token_data{static_cast<llama_token>(i), logits[i], 0.0f};
-  }
-
-  llama_token_data_array arr = {candidates.data(), static_cast<size_t>(n_vocab), -1, false};
-
-  // Apply grammar (modifies candidates)
-  llama_sampler_apply(it->second, &arr);
-
-  // Write back to buffer
-  for (int i = 0; i < n_vocab; i++) {
-    logits[i] = candidates[i].logit;
-  }
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::acceptSamplerToken(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 2) {
-    throw Napi::TypeError::New(env, "Expected (handle, tokenId)");
-  }
-
-  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
-  llama_token token = static_cast<llama_token>(info[1].As<Napi::Number>().Int32Value());
-
-  auto it = _samplerHandles.find(handle);
-  if (it == _samplerHandles.end()) {
-    throw Napi::Error::New(env, "Invalid sampler handle");
-  }
-
-  try {
-    llama_sampler_accept(it->second, token);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
-  }
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::cloneSampler(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::TypeError::New(env, "Expected (handle)");
-  }
-
-  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
-
-  auto it = _samplerHandles.find(handle);
-  if (it == _samplerHandles.end()) {
-    throw Napi::Error::New(env, "Invalid sampler handle");
-  }
-
-  llama_sampler* cloned = lloyal::grammar::clone_sampler(it->second);
-  if (!cloned) {
-    throw Napi::Error::New(env, "Failed to clone sampler");
-  }
-
-  int32_t newHandle = _nextSamplerHandle++;
-  _samplerHandles[newHandle] = cloned;
-
-  return Napi::Number::New(env, static_cast<double>(newHandle));
-}
-
-Napi::Value SessionContext::freeSamplerHandle(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 1) {
-    throw Napi::TypeError::New(env, "Expected (handle)");
-  }
-
-  int32_t handle = static_cast<int32_t>(info[0].As<Napi::Number>().Int32Value());
-
-  auto it = _samplerHandles.find(handle);
-  if (it != _samplerHandles.end()) {
-    llama_sampler_free(it->second);
-    _samplerHandles.erase(it);
-  }
-
-  return env.Undefined();
-}
-
-// ===== PERPLEXITY TRACKING =====
-
-Napi::Value SessionContext::createPerplexityTracker(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Create new perplexity tracker via metrics.hpp
-  lloyal::metrics::PerplexityHandle handle = lloyal::metrics::create_perplexity();
-
-  // Generate N-API handle
-  int32_t napiHandle = _nextPerplexityHandle++;
-  _perplexityHandles[napiHandle] = handle;
-
-  return Napi::Number::New(env, static_cast<double>(napiHandle));
-}
-
-Napi::Value SessionContext::addSurprisal(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected (handle: number, surprisal: number)");
-  }
-
-  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
-  double surprisal = info[1].As<Napi::Number>().DoubleValue();
-
-  // Lookup handle
-  auto it = _perplexityHandles.find(napiHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
-  }
-
-  // Add surprisal to tracker
-  lloyal::metrics::add_surprisal(it->second, static_cast<float>(surprisal));
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::getPerplexity(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected handle: number");
-  }
-
-  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
-
-  // Lookup handle
-  auto it = _perplexityHandles.find(napiHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
-  }
-
-  // Get perplexity value
-  float ppl = lloyal::metrics::get_ppl(it->second);
-
-  return Napi::Number::New(env, static_cast<double>(ppl));
-}
-
-Napi::Value SessionContext::clonePerplexityTracker(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected handle: number");
-  }
-
-  int32_t sourceHandle = info[0].As<Napi::Number>().Int32Value();
-
-  // Lookup source handle
-  auto it = _perplexityHandles.find(sourceHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid source perplexity tracker handle");
-  }
-
-  // Clone via metrics.hpp
-  lloyal::metrics::PerplexityHandle clonedHandle =
-      lloyal::metrics::clone_perplexity(it->second);
-
-  // Generate new N-API handle
-  int32_t newNapiHandle = _nextPerplexityHandle++;
-  _perplexityHandles[newNapiHandle] = clonedHandle;
-
-  return Napi::Number::New(env, static_cast<double>(newNapiHandle));
-}
-
-Napi::Value SessionContext::resetPerplexityTracker(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected handle: number");
-  }
-
-  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
-
-  // Lookup handle
-  auto it = _perplexityHandles.find(napiHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
-  }
-
-  // Reset tracker
-  lloyal::metrics::reset_perplexity(it->second);
-
-  return env.Undefined();
-}
-
-Napi::Value SessionContext::getPerplexityCount(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected handle: number");
-  }
-
-  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
-
-  // Lookup handle
-  auto it = _perplexityHandles.find(napiHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
-  }
-
-  // Get token count
-  int count = lloyal::metrics::get_count(it->second);
-
-  return Napi::Number::New(env, static_cast<double>(count));
-}
-
-Napi::Value SessionContext::freePerplexityTracker(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected handle: number");
-  }
-
-  int32_t napiHandle = info[0].As<Napi::Number>().Int32Value();
-
-  // Lookup and remove handle
-  auto it = _perplexityHandles.find(napiHandle);
-  if (it == _perplexityHandles.end()) {
-    throw Napi::Error::New(env, "Invalid perplexity tracker handle");
-  }
-
-  // Free via metrics.hpp
-  lloyal::metrics::free_perplexity(it->second);
-
-  // Remove from map
-  _perplexityHandles.erase(it);
-
-  return env.Undefined();
-}
-
-// ===== ATOMIC DECODE+CAPTURE =====
-
-Napi::Value SessionContext::decodeAndCapture(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (info.Length() < 4) {
-    throw Napi::TypeError::New(env, "Expected (tokens, position, seqId, destBuffer)");
-  }
-
-  // Parse tokens
-  Napi::Array tokensArray = info[0].As<Napi::Array>();
-  std::vector<llama_token> tokens(tokensArray.Length());
-  for (uint32_t i = 0; i < tokensArray.Length(); i++) {
-    tokens[i] = static_cast<llama_token>(tokensArray.Get(i).As<Napi::Number>().Int32Value());
-  }
-
-  int32_t position = info[1].As<Napi::Number>().Int32Value();
-  llama_seq_id seqId = toSeqId(info[2].As<Napi::Number>().DoubleValue());
-
-  // Get dest buffer
-  Napi::ArrayBuffer destBuffer;
-  if (info[3].IsArrayBuffer()) {
-    destBuffer = info[3].As<Napi::ArrayBuffer>();
-  } else if (info[3].IsTypedArray()) {
-    destBuffer = info[3].As<Napi::TypedArray>().ArrayBuffer();
-  } else {
-    throw Napi::TypeError::New(env, "destBuffer must be ArrayBuffer or TypedArray");
-  }
-
-  float* dest = static_cast<float*>(destBuffer.Data());
-  int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Main-thread work: invalidate logits views (touches Napi objects)
-  invalidateLogits();
-  _decodeStepId++;
-
-  // Pin the JS ArrayBuffer to prevent GC during worker Execute()
-  auto bufRef = Napi::Reference<Napi::ArrayBuffer>::New(destBuffer, 1);
-
-  auto* worker = new DecodeAndCaptureWorker(
-    env, _context, std::move(tokens), position, seqId, _nBatch,
-    dest, n_vocab, std::move(bufRef));
-  worker->Queue();
-  return worker->GetPromise();
-}
-
-// ===== HELPER METHODS =====
-// Pattern matches HybridSessionContext.cpp:103-106, 365-379
 
 Napi::Value SessionContext::getMemorySize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -2658,10 +2062,11 @@ Napi::Value SessionContext::_branchSamplerChainReseed(const Napi::CallbackInfo& 
     throw Napi::Error::New(env, "_branchSamplerChainReseed: invalid handle");
   }
 
-  // Only reseed stochastic chains (has_dist_sampler=true)
+  // Only reseed stochastic chains (has_dist=true)
   // Reseeding greedy chains would corrupt them
-  if (state->sampler_chain && state->has_dist_sampler) {
-    lloyal::sampler::reseed_chain(state->sampler_chain, seed);
+  if (state->sampler_chain != 0 && _branchStore.sampler_has_dist(state->sampler_chain)) {
+    llama_sampler* chain = _branchStore.get_sampler_chain(state->sampler_chain);
+    if (chain) lloyal::sampler::reseed_chain(chain, seed);
   }
 
   return env.Undefined();
@@ -2732,6 +2137,48 @@ Napi::Value SessionContext::_branchClearSteer(const Napi::CallbackInfo& info) {
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
 
   lloyal::branch::clear_steer(handle, _branchStore);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchSetSamplerParams(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::Error::New(env, "_branchSetSamplerParams requires (handle, params)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  LloyalSamplingParams params;
+  if (info[1].IsObject()) {
+    params = adaptSamplingParamsFromJS(info[1].As<Napi::Object>());
+  }
+
+  lloyal::branch::set_sampler_params(handle, params, _branchStore);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchSetGrammar(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::Error::New(env, "_branchSetGrammar requires (handle, grammarStr)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  std::string grammar_str = info[1].As<Napi::String>().Utf8Value();
+
+  lloyal::branch::set_grammar(
+    handle,
+    _model.get(),
+    grammar_str.empty() ? "" : grammar_str.c_str(),
+    _branchStore
+  );
 
   return env.Undefined();
 }

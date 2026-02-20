@@ -86,42 +86,37 @@ async function testCoreAPI(ctx) {
   const tokenText = ctx.tokenToText(tokens[0]);
   assert(typeof tokenText === 'string', `tokenToText(${tokens[0]}) → "${tokenText}"`);
 
-  // decode + getLogits
-  await ctx.decode(tokens, 0);
-  const logits = ctx.getLogits();
-  assert(logits instanceof Float32Array, `getLogits() → Float32Array(${logits.length})`);
-  assert(logits.length === ctx.vocabSize, `logits.length === vocabSize (${ctx.vocabSize})`);
+  // Branch-based prefill + getLogits
+  const branch = Branch.create(ctx, 0, { temperature: 0 });
+  await branch.prefill(tokens);
+
+  const branchLogits = branch.getLogits();
+  assert(branchLogits instanceof Float32Array, `branch.getLogits() → Float32Array(${branchLogits.length})`);
+  assert(branchLogits.length === ctx.vocabSize, `branchLogits.length === vocabSize (${ctx.vocabSize})`);
 
   // Validate logits are not garbage
   let hasNonZero = false, hasNaN = false;
-  for (let i = 0; i < logits.length; i++) {
-    if (logits[i] !== 0.0) hasNonZero = true;
-    if (isNaN(logits[i])) hasNaN = true;
+  for (let i = 0; i < branchLogits.length; i++) {
+    if (branchLogits[i] !== 0.0) hasNonZero = true;
+    if (isNaN(branchLogits[i])) hasNaN = true;
   }
-  assert(hasNonZero && !hasNaN, 'logits valid (non-zero, no NaN)');
+  assert(hasNonZero && !hasNaN, 'branch logits valid (non-zero, no NaN)');
 
-  // modelEntropy
-  const entropy = ctx.modelEntropy();
-  assert(isFinite(entropy) && entropy >= 0, `modelEntropy() → ${entropy.toFixed(4)} nats`);
+  // modelEntropy with branch logits
+  const entropy = ctx.modelEntropy('nats', branchLogits);
+  assert(isFinite(entropy) && entropy >= 0, `modelEntropy(branchLogits) → ${entropy.toFixed(4)} nats`);
 
-  // greedySample
-  const greedy = ctx.greedySample();
-  assert(greedy >= 0 && greedy < ctx.vocabSize, `greedySample() → ${greedy}`);
-
-  // sample with params
-  const sampled = ctx.sample({ temperature: 0 });
-  assert(sampled === greedy, `sample({temp:0}) === greedySample() (${sampled})`);
+  // Branch greedy sampling (temperature: 0)
+  const greedy = branch.sample();
+  assert(greedy >= 0 && greedy < ctx.vocabSize, `branch.sample() greedy → ${greedy}`);
 
   // isStopToken - EOS should be a stop token
   const eos = ctx.getEogToken();
   assert(ctx.isStopToken(eos), `isStopToken(EOS=${eos}) → true`);
 
-  // Logits memoization
-  const logits1 = ctx.getLogits();
-  const logits2 = ctx.getLogits();
-  assert(logits1[0] === logits2[0], 'getLogits() memoized (same step = same buffer)');
-
-  // withLogits helper
+  // withLogits helper (context-level logits)
+  // Note: getLogits() reads from the shared context buffer, which is populated
+  // by branch decode operations
   const maxLogit = withLogits(ctx, (l) => {
     let max = l[0];
     for (let i = 1; i < l.length; i++) if (l[i] > max) max = l[i];
@@ -136,6 +131,8 @@ async function testCoreAPI(ctx) {
     asyncRejected = true;
   }
   assert(asyncRejected, 'withLogits() rejects async callbacks');
+
+  await branch.prune();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,11 +144,13 @@ async function testKVCache(ctx) {
 
   await ctx.kvCacheClear();
   const tokens = await ctx.tokenize("Test prompt");
-  await ctx.decode(tokens, 0);
+  const branch = Branch.create(ctx, 0, { temperature: 0 });
+  await branch.prefill(tokens);
 
   const sizeBefore = ctx.kvCacheSize();
-  assert(sizeBefore >= 0, `kvCacheSize() after decode → ${sizeBefore}`);
+  assert(sizeBefore >= 0, `kvCacheSize() after prefill → ${sizeBefore}`);
 
+  await branch.prune();
   await ctx.kvCacheClear();
   const sizeAfter = ctx.kvCacheSize();
   assert(sizeAfter === -1, `kvCacheClear() → size=${sizeAfter} (empty)`);
@@ -172,21 +171,25 @@ async function testMultiSequence() {
   });
 
   try {
+    // Use a branch to prefill tokens (populates KV on its seq_id)
     const tokens = await ctx.tokenize("The quick brown fox");
-    await ctx.decode(tokens, 0, 0);
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
 
-    const seq0Pos = ctx.kvSeqPosMax(0);
-    assert(seq0Pos >= 0, `kvSeqPosMax(0) → ${seq0Pos}`);
+    // Branch allocates a seq_id — check its KV is populated
+    const branchPos = branch.position;
+    assert(branchPos === tokens.length, `branch position → ${branchPos}`);
 
-    const seq1Before = ctx.kvSeqPosMax(1);
-    assert(seq1Before === -1, `kvSeqPosMax(1) before copy → ${seq1Before} (empty)`);
+    // Fork creates a new sequence with copied KV
+    const forked = await branch.fork();
+    assert(forked.position === branchPos, `forked position matches parent → ${forked.position}`);
 
-    ctx.kvSeqCopy(0, 1);
-    const seq1After = ctx.kvSeqPosMax(1);
-    assert(seq1After === seq0Pos, `kvSeqCopy(0,1) → seq1 pos=${seq1After}`);
+    // Raw KV seq ops still work for advanced use
+    const seq1Before = ctx.kvSeqPosMax(3);  // unused seq_id
+    assert(seq1Before === -1, `kvSeqPosMax(unused) → ${seq1Before} (empty)`);
 
-    const seq0After = ctx.kvSeqPosMax(0);
-    assert(seq0After === seq0Pos, `seq0 unchanged after copy → ${seq0After}`);
+    await forked.prune();
+    await branch.prune();
   } finally {
     ctx.dispose();
   }
@@ -202,48 +205,22 @@ async function testGrammar() {
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
     nCtx: CTX_SIZE,
-    nThreads: 4
+    nThreads: 4,
+    nSeqMax: 4
   });
 
   try {
     const grammar = `root ::= "{" ws "}" ws
 ws ::= [ \\t\\n]*`;
 
-    // Handle-based API
-    const handle = ctx.createSampler(grammar);
-    assert(typeof handle === 'number' && handle > 0, `createSampler() → handle=${handle}`);
-
-    const cloned = ctx.cloneSampler(handle);
-    assert(cloned !== handle, `cloneSampler() → new handle=${cloned}`);
-
-    const testLogits = new Float32Array(ctx.vocabSize).fill(0.5);
-    ctx.applySampler(handle, testLogits);
-
-    let masked = 0, validToken = -1;
-    for (let i = 0; i < testLogits.length; i++) {
-      if (testLogits[i] < -1e30) masked++;
-      else if (validToken === -1) validToken = i;
-    }
-    assert(masked > 0 && validToken >= 0, `applySampler() masked ${masked} tokens`);
-
-    ctx.acceptSamplerToken(handle, validToken);
-    ok(`acceptSamplerToken(${validToken})`);
-
-    ctx.freeSamplerHandle(handle);
-    ctx.freeSamplerHandle(cloned);
-    ok('freeSamplerHandle() both handles');
-
     // Branch API with grammar
-    await ctx.kvCacheClear();
     const prompt = await ctx.tokenize("Output: ");
-    await ctx.decode(prompt, 0, 0);
-
-    const branch = Branch.create(ctx, prompt.length, { temperature: 0 }, undefined, grammar);
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 }, undefined, grammar);
+    await branch.prefill(prompt);
 
     const output = [];
     for (let i = 0; i < 10; i++) {
-      const { token, text, isStop } = branch.produce();
+      const { token, text, isStop } = await branch.produce();
       if (isStop) break;
       await branch.commit(token);
       output.push(text);
@@ -251,6 +228,32 @@ ws ::= [ \\t\\n]*`;
 
     const result = output.join('');
     assert(/^\{\s*\}\s*$/.test(result), `Branch+grammar → "${result}"`);
+
+    // Grammar is cloned on fork — independent parser states
+    await ctx.kvCacheClear();
+    const prompt2 = await ctx.tokenize("Output: ");
+    const root = Branch.create(ctx, 0, { temperature: 0 }, undefined, grammar);
+    await root.prefill(prompt2);
+
+    const childA = await root.fork();
+    const childB = await root.fork();
+
+    // Both children should produce grammar-valid output independently
+    const outA = [], outB = [];
+    for (let i = 0; i < 10; i++) {
+      const pA = await childA.produce();
+      if (!pA.isStop) { await childA.commit(pA.token); outA.push(pA.text); }
+      const pB = await childB.produce();
+      if (!pB.isStop) { await childB.commit(pB.token); outB.push(pB.text); }
+    }
+
+    const resultA = outA.join(''), resultB = outB.join('');
+    assert(/^\{\s*\}\s*$/.test(resultA), `Fork A grammar → "${resultA}"`);
+    assert(/^\{\s*\}\s*$/.test(resultB), `Fork B grammar → "${resultB}"`);
+
+    await childA.prune();
+    await childB.prune();
+    await root.prune();
     await branch.prune();
   } finally {
     ctx.dispose();
@@ -266,45 +269,27 @@ async function testMetrics(ctx) {
 
   await ctx.kvCacheClear();
   const tokens = await ctx.tokenize("Hello");
-  await ctx.decode(tokens, 0);
+  const branch = Branch.create(ctx, 0, { temperature: 0 });
+  await branch.prefill(tokens);
 
-  const token1 = ctx.greedySample();
-  const surprisal = ctx.modelSurprisal(token1, "nats");
-  assert(surprisal >= 0, `modelSurprisal() → ${surprisal.toFixed(2)} nats`);
+  // modelSurprisal with branch logits
+  const token1 = branch.sample();
+  const branchLogits = branch.getLogits();
+  const surprisal = ctx.modelSurprisal(token1, "nats", branchLogits);
+  assert(surprisal >= 0, `modelSurprisal(branchLogits) → ${surprisal.toFixed(2)} nats`);
 
-  const surprisalBits = ctx.modelSurprisal(token1, "bits");
+  const surprisalBits = ctx.modelSurprisal(token1, "bits", branchLogits);
   assert(Math.abs(surprisalBits - surprisal / Math.log(2)) < 0.01, 'bits = nats / ln(2)');
 
-  const tracker = ctx.createPerplexityTracker();
-  assert(tracker > 0, `createPerplexityTracker() → ${tracker}`);
+  // Branch perplexity — built-in, accumulates through commit()
+  await branch.commit(token1);
+  const { token: token2 } = await branch.produce();
+  await branch.commit(token2);
 
-  ctx.addSurprisal(tracker, surprisal);
-  await ctx.decode([token1], tokens.length);
-  ctx.addSurprisal(tracker, ctx.modelSurprisal(ctx.greedySample()));
+  const ppl = branch.perplexity;
+  assert(isFinite(ppl) && ppl >= 1.0, `branch.perplexity → ${ppl.toFixed(2)}`);
 
-  const count = ctx.getPerplexityCount(tracker);
-  assert(count === 2, `getPerplexityCount() → ${count}`);
-
-  const ppl = ctx.getPerplexity(tracker);
-  assert(ppl >= 1.0, `getPerplexity() → ${ppl.toFixed(2)}`);
-
-  const clonedTracker = ctx.clonePerplexityTracker(tracker);
-  assert(clonedTracker !== tracker, `clonePerplexityTracker() → ${clonedTracker}`);
-
-  ctx.resetPerplexityTracker(clonedTracker);
-  assert(ctx.getPerplexityCount(clonedTracker) === 0, 'resetPerplexityTracker() → count=0');
-
-  ctx.freePerplexityTracker(tracker);
-  ctx.freePerplexityTracker(clonedTracker);
-  ok('freePerplexityTracker() both');
-
-  let threwOnInvalid = false;
-  try {
-    ctx.getPerplexity(tracker);
-  } catch {
-    threwOnInvalid = true;
-  }
-  assert(threwOnInvalid, 'Invalid handle throws');
+  await branch.prune();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -332,15 +317,13 @@ async function testBranchPrefill() {
     const messages = [{ role: 'user', content: turns[0] }];
     const { prompt } = await ctx.formatChat(JSON.stringify(messages));
     const promptToks = await ctx.tokenize(prompt);
-    await ctx.decode(promptToks, 0, 0);
-
-    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(promptToks);
 
     // Turn 1
     const gen1 = [];
     for (let i = 0; i < GEN_TOKENS; i++) {
-      const { token, isStop } = branch.produce();
+      const { token, isStop } = await branch.produce();
       if (isStop) break;
       await branch.commit(token);
       gen1.push(token);
@@ -371,7 +354,7 @@ async function testBranchPrefill() {
 
       const gen = [];
       for (let i = 0; i < GEN_TOKENS; i++) {
-        const { token, isStop } = branch.produce();
+        const { token, isStop } = await branch.produce();
         if (isStop) break;
         await branch.commit(token);
         gen.push(token);
@@ -411,7 +394,7 @@ async function testWarmMultiTurnRecall() {
     async function generate(branch) {
       const gen = [];
       for (;;) {
-        const { token, isStop } = branch.produce();
+        const { token, isStop } = await branch.produce();
         if (isStop) break;
         await branch.commit(token);
         gen.push(token);
@@ -434,10 +417,8 @@ async function testWarmMultiTurnRecall() {
     const msgs1 = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
     const { prompt, format, reasoningFormat } = await ctx.formatChat(JSON.stringify(msgs1), {});
     const promptToks = await ctx.tokenize(prompt);
-    await ctx.decode(promptToks, 0, 0);
-
-    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(promptToks);
 
     // Helper: parse output and check content (not reasoning) for a term
     function checkRecall(rawText, term) {
@@ -528,7 +509,7 @@ async function testWarmSemanticRecall() {
 
         const gen = [];
         for (let i = 0; i < GEN_TOKENS; i++) {
-          const { token, isStop } = branch.produce();
+          const { token, isStop } = await branch.produce();
           if (isStop) break;
           await branch.commit(token);
           gen.push(token);
@@ -542,15 +523,13 @@ async function testWarmSemanticRecall() {
       messages.push({ role: 'user', content: 'Remember this: my dog is named Max.' });
       const { prompt } = await ctx.formatChat(JSON.stringify(messages));
       const promptToks = await ctx.tokenize(prompt);
-      await ctx.decode(promptToks, 0, 0);
-
-      branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      branch.captureLogits();
+      branch = Branch.create(ctx, 0, { temperature: 0 });
+      await branch.prefill(promptToks);
 
       // Generate turn 1 response
       const gen = [];
       for (let i = 0; i < GEN_TOKENS; i++) {
-        const { token, isStop } = branch.produce();
+        const { token, isStop } = await branch.produce();
         if (isStop) break;
         await branch.commit(token);
         gen.push(token);
@@ -625,11 +604,8 @@ async function testBranchSteer() {
 
   try {
     const tokens = await ctx.tokenize("The quick brown");
-    await ctx.decode(tokens, 0, 0);
-
-    // Use greedy sampling for deterministic tests
-    const branch = Branch.create(ctx, tokens.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
 
     // Get the greedy token (what would be sampled without steer)
     const greedyToken = branch.sample();
@@ -669,10 +645,8 @@ async function testBranchSteer() {
 
     // Test fork invariant: steer is NOT cloned on fork
     const tokens2 = await ctx.tokenize("Hello world");
-    await ctx.decode(tokens2, 0, 0);
-
-    const parent = Branch.create(ctx, tokens2.length, { temperature: 0 });
-    parent.captureLogits();
+    const parent = Branch.create(ctx, 0, { temperature: 0 });
+    await parent.prefill(tokens2);
 
     const parentGreedy = parent.sample();
 
@@ -732,17 +706,15 @@ async function testNBatchAblation() {
       const messages = [{ role: 'user', content: "Hello, how are you today?" }];
       const { prompt } = await ctx.formatChat(JSON.stringify(messages));
       const promptToks = await ctx.tokenize(prompt);
-      await ctx.decode(promptToks, 0, 0);
-
-      const branch = Branch.create(ctx, promptToks.length, { temperature: 0 }, nBatch);
-      branch.captureLogits();
+      const branch = Branch.create(ctx, 0, { temperature: 0 }, nBatch);
+      await branch.prefill(promptToks);
 
       const followUp = await ctx.tokenize(" What else?");
       await branch.prefill(followUp);
 
       const gen = [];
       for (let i = 0; i < 5; i++) {
-        const { token, isStop } = branch.produce();
+        const { token, isStop } = await branch.produce();
         if (isStop) break;
         await branch.commit(token);
         gen.push(token);
@@ -820,15 +792,18 @@ async function testDeterminism() {
       const messages = [{ role: 'user', content: prompt }];
       const { prompt: formatted } = await ctx.formatChat(JSON.stringify(messages));
       const tokens = await ctx.tokenize(formatted);
-      await ctx.decode(tokens, 0);
+
+      const branch = Branch.create(ctx, 0, { temperature: 0 });
+      await branch.prefill(tokens);
 
       const gen = [];
       for (let i = 0; i < 20; i++) {
-        const token = ctx.sample({ temperature: 0 });
-        if (ctx.isStopToken(token)) break;
+        const { token, isStop } = await branch.produce();
+        if (isStop) break;
+        await branch.commit(token);
         gen.push(token);
-        await ctx.decode([token], tokens.length + i);
       }
+      await branch.prune();
       return gen.join(',');
     } finally {
       ctx.dispose();
@@ -915,11 +890,11 @@ async function testEmbeddings() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ATOMIC DECODE AND CAPTURE
+// BRANCH PREFILL + GET LOGITS (replaces testDecodeAndCapture)
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function testDecodeAndCapture() {
-  console.log('\n--- decodeAndCapture ---');
+async function testBranchPrefillAndLogits() {
+  console.log('\n--- Branch prefill + getLogits ---');
 
   const ctx = await addon.createContext({
     modelPath: MODEL_PATH,
@@ -929,23 +904,23 @@ async function testDecodeAndCapture() {
 
   try {
     const tokens = await ctx.tokenize("Hello");
-    const buffer = new Float32Array(ctx.vocabSize);
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
 
-    await ctx.decodeAndCapture(tokens, 0, 0, buffer);
-
+    const logits = branch.getLogits();
     let valid = false;
-    for (let i = 0; i < buffer.length; i++) {
-      if (buffer[i] !== 0 && !isNaN(buffer[i])) valid = true;
+    for (let i = 0; i < logits.length; i++) {
+      if (logits[i] !== 0 && !isNaN(logits[i])) valid = true;
     }
-    assert(valid, `decodeAndCapture() filled buffer with valid logits`);
+    assert(valid, `branch.prefill() + getLogits() → valid logits`);
 
-    // Verify it's a copy
-    const orig = buffer[0];
-    buffer[0] = -999;
-    const ctxLogits = ctx.getLogits();
-    const isCopy = ctxLogits[0] !== -999;
-    buffer[0] = orig;
-    assert(isCopy, 'Captured buffer is independent copy');
+    // Branch logits are an independent copy
+    const orig = logits[0];
+    logits[0] = -999;
+    const logits2 = branch.getLogits();
+    assert(logits2[0] !== -999, 'branch.getLogits() returns independent copy');
+
+    await branch.prune();
   } finally {
     ctx.dispose();
   }
@@ -1040,16 +1015,15 @@ async function testBranchStore() {
     // Tests: batched generation loop, perplexity accumulation through accept_token,
     // Branch.perplexity accessor after store ops, reseedSampler diversity.
     {
-      await ctx.decode(promptToks, 0, 0);
-      const root = Branch.create(ctx, promptToks.length, { temperature: 0.8 });
-      root.captureLogits();
+      const root = Branch.create(ctx, 0, { temperature: 0.8 });
+      await root.prefill(promptToks);
       const branches = [root, await root.fork(), await root.fork()];
       branches[1].reseedSampler(42);
       branches[2].reseedSampler(99);
 
       for (let step = 0; step < 10; step++) {
-        const live = branches.map(b => [b, b.produce()])
-          .filter(([, p]) => !p.isStop);
+        const produced = await Promise.all(branches.map(async b => [b, await b.produce()]));
+        const live = produced.filter(([, p]) => !p.isStop);
         if (!live.length) break;
         await store.commit(live.map(([b, p]) => [b, p.token]));
       }
@@ -1071,9 +1045,8 @@ async function testBranchStore() {
     // generating with store.commit(). This is the persistence/replay pattern.
     // Tests: prefill→commit lifecycle, metrics across phase transition, getLogits().
     {
-      await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      b1.captureLogits();
+      const b1 = Branch.create(ctx, 0, { temperature: 0 });
+      await b1.prefill(promptToks);
       const b2 = await b1.fork();
 
       // Phase 1: Rehydrate from "saved" histories
@@ -1095,8 +1068,8 @@ async function testBranchStore() {
       // Phase 2: Generate continuations
       const gen1 = [], gen2 = [];
       for (let i = 0; i < 5; i++) {
-        const live = [[b1, b1.produce()], [b2, b2.produce()]]
-          .filter(([, p]) => !p.isStop);
+        const produced = [[b1, await b1.produce()], [b2, await b2.produce()]];
+        const live = produced.filter(([, p]) => !p.isStop);
         if (!live.length) break;
         await store.commit(live.map(([b, p]) => [b, p.token]));
         for (const [b, p] of live) {
@@ -1121,9 +1094,8 @@ async function testBranchStore() {
     // Verifies Branch.getLogits() returns a Float32Array consumable by the
     // existing metrics API. This tests the JS API surface of the new exposure.
     {
-      await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      b1.captureLogits();
+      const b1 = Branch.create(ctx, 0, { temperature: 0 });
+      await b1.prefill(promptToks);
 
       const logits = b1.getLogits();
       assert(logits instanceof Float32Array,
@@ -1134,16 +1106,11 @@ async function testBranchStore() {
       // Feed branch logits into ctx.modelEntropy() — proves the returned
       // buffer is a valid logits distribution consumable by metrics API
       const entropyFromBranch = ctx.modelEntropy("nats", logits);
-      const entropyFromCtx = ctx.modelEntropy("nats");
       assert(isFinite(entropyFromBranch) && entropyFromBranch > 0,
         `getLogits→modelEntropy: ${entropyFromBranch.toFixed(4)} nats`);
 
-      // Branch logits (captured from same decode) should match context logits
-      assert(Math.abs(entropyFromBranch - entropyFromCtx) < 1e-4,
-        `getLogits→modelEntropy: branch=${entropyFromBranch.toFixed(4)} ≈ ctx=${entropyFromCtx.toFixed(4)}`);
-
       // After store.commit, logits change — getLogits() reflects new state
-      const p = b1.produce();
+      const p = await b1.produce();
       assert(!p.isStop, `getLogits: produce() should not hit EOG on first token`);
       await store.commit([[b1, p.token]]);
       const logitsAfter = b1.getLogits();
@@ -1159,15 +1126,14 @@ async function testBranchStore() {
     // Tests: produce() reads from branch snapshot, store.commit() advances state,
     // produce() on next iteration reads from updated snapshot.
     {
-      await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      b1.captureLogits();
+      const b1 = Branch.create(ctx, 0, { temperature: 0 });
+      await b1.prefill(promptToks);
       const b2 = await b1.fork();
 
       const output = [];
       for (let i = 0; i < 5; i++) {
         // Inspect with produce() — does NOT advance state
-        const p1 = b1.produce(), p2 = b2.produce();
+        const p1 = await b1.produce(), p2 = await b2.produce();
 
         // Can inspect text and isStop before committing
         assert(typeof p1.text === 'string' && typeof p2.text === 'string',
@@ -1192,15 +1158,14 @@ async function testBranchStore() {
     // Tests: both paths write to the same branch state correctly, no corruption when
     // alternating between decode::one and decode::each on the same sequence.
     {
-      await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      b1.captureLogits();
+      const b1 = Branch.create(ctx, 0, { temperature: 0 });
+      await b1.prefill(promptToks);
       const b2 = await b1.fork();
 
       // Step 1-3: single-branch commit (decode::one path)
       for (let i = 0; i < 3; i++) {
-        const live = [[b1, b1.produce()], [b2, b2.produce()]]
-          .filter(([, p]) => !p.isStop);
+        const produced = [[b1, await b1.produce()], [b2, await b2.produce()]];
+        const live = produced.filter(([, p]) => !p.isStop);
         if (!live.length) break;
         for (const [b, p] of live) await b.commit(p.token);
       }
@@ -1208,8 +1173,8 @@ async function testBranchStore() {
 
       // Step 4-6: batched commit (decode::each path)
       for (let i = 0; i < 3; i++) {
-        const live = [[b1, b1.produce()], [b2, b2.produce()]]
-          .filter(([, p]) => !p.isStop);
+        const produced = [[b1, await b1.produce()], [b2, await b2.produce()]];
+        const live = produced.filter(([, p]) => !p.isStop);
         if (!live.length) break;
         await store.commit(live.map(([b, p]) => [b, p.token]));
       }
@@ -1219,8 +1184,8 @@ async function testBranchStore() {
 
       // Step 7-9: back to single-branch commit
       for (let i = 0; i < 3; i++) {
-        const live = [[b1, b1.produce()], [b2, b2.produce()]]
-          .filter(([, p]) => !p.isStop);
+        const produced = [[b1, await b1.produce()], [b2, await b2.produce()]];
+        const live = produced.filter(([, p]) => !p.isStop);
         if (!live.length) break;
         for (const [b, p] of live) await b.commit(p.token);
       }
@@ -1237,9 +1202,8 @@ async function testBranchStore() {
     // Tests: per-branch EOG filtering, store.commit with shrinking branch set,
     // surviving branch generates correct output after sibling stops.
     {
-      await ctx.decode(promptToks, 0, 0);
-      const b1 = Branch.create(ctx, promptToks.length, { temperature: 0 });
-      b1.captureLogits();
+      const b1 = Branch.create(ctx, 0, { temperature: 0 });
+      await b1.prefill(promptToks);
       const b2 = await b1.fork();
 
       const eog = ctx.getEogToken();
@@ -1253,8 +1217,8 @@ async function testBranchStore() {
         }
 
         const pairs = [
-          ...(!stopped[0] ? [[b1, b1.produce()]] : []),
-          ...(!stopped[1] ? [[b2, b2.produce()]] : []),
+          ...(!stopped[0] ? [[b1, await b1.produce()]] : []),
+          ...(!stopped[1] ? [[b2, await b2.produce()]] : []),
         ];
 
         const live = pairs.filter(([, p]) => !p.isStop);
@@ -1313,13 +1277,11 @@ async function testPplSanity() {
     const messages = [{ role: 'user', content: 'Tell me about the weather.' }];
     const { prompt } = await ctx.formatChat(JSON.stringify(messages));
     const promptToks = await ctx.tokenize(prompt);
-    await ctx.decode(promptToks, 0, 0);
-
-    const branch = Branch.create(ctx, promptToks.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(promptToks);
 
     for (let i = 0; i < 10; i++) {
-      const { token, isStop } = branch.produce();
+      const { token, isStop } = await branch.produce();
       if (isStop) break;
       await branch.commit(token);
     }
@@ -1356,10 +1318,8 @@ async function testCommitRollback() {
 
   try {
     const promptToks = await ctx.tokenize("Hi");
-    await ctx.decode(promptToks, 0, 0);
-
-    const root = Branch.create(ctx, promptToks.length, { temperature: 1.0 });
-    root.captureLogits();
+    const root = Branch.create(ctx, 0, { temperature: 1.0 });
+    await root.prefill(promptToks);
     const branches = [root];
     for (let i = 1; i < 8; i++) {
       const b = await root.fork();
@@ -1375,9 +1335,8 @@ async function testCommitRollback() {
     let successfulRounds = 0;
     let failedRound = false;
     for (let round = 0; round < 50; round++) {
-      const live = branches
-        .map(b => [b, b.produce()])
-        .filter(([, p]) => !p.isStop);
+      const produced = await Promise.all(branches.map(async b => [b, await b.produce()]));
+      const live = produced.filter(([, p]) => !p.isStop);
       if (!live.length) break;
 
       // Snapshot PPL before this round
@@ -1435,13 +1394,11 @@ async function testAsyncRejection() {
 
   try {
     const tokens = await ctx.tokenize("Hello world");
-    await ctx.decode(tokens, 0, 0);
-
-    const branch = Branch.create(ctx, tokens.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
 
     // Generate one token to prove branch works
-    const { token, isStop } = branch.produce();
+    const { token, isStop } = await branch.produce();
     assert(!isStop, 'rejection: initial produce succeeds');
     await branch.commit(token);
     const posAfterCommit = branch.position;
@@ -1460,14 +1417,23 @@ async function testAsyncRejection() {
     }
     assert(threwOnCommit, 'rejection: commit on disposed branch throws');
 
-    // produce() on disposed branch
+    // produce() on disposed branch — async version rejects
     let threwOnProduce = false;
     try {
-      branch.produce();
+      await branch.produce();
     } catch (e) {
       threwOnProduce = true;
     }
-    assert(threwOnProduce, 'rejection: produce on disposed branch throws');
+    assert(threwOnProduce, 'rejection: produce on disposed branch rejects');
+
+    // produceSync() on disposed branch — throws synchronously
+    let threwOnProduceSync = false;
+    try {
+      branch.produceSync();
+    } catch (e) {
+      threwOnProduceSync = true;
+    }
+    assert(threwOnProduceSync, 'rejection: produceSync on disposed branch throws');
 
     // fork() on disposed branch
     let threwOnFork = false;
@@ -1508,10 +1474,8 @@ async function testEmptyInputEdgeCases() {
 
   try {
     const tokens = await ctx.tokenize("Hello world");
-    await ctx.decode(tokens, 0, 0);
-
-    const branch = Branch.create(ctx, tokens.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
     const store = new BranchStore(ctx);
 
     const posBefore = branch.position;
@@ -1532,7 +1496,7 @@ async function testEmptyInputEdgeCases() {
     ok('branch.prefill([]) resolves');
 
     // Verify branch still works after empty operations
-    const { token, isStop } = branch.produce();
+    const { token, isStop } = await branch.produce();
     assert(!isStop, 'empty edge: produce still works after empty ops');
     await branch.commit(token);
     assert(branch.position === posBefore + 1, 'empty edge: commit advances position after empty ops');
@@ -1572,21 +1536,14 @@ async function testJsonSchemaToGrammar() {
       `jsonSchemaToGrammar: returned ${grammar.length}-char grammar`);
     assert(grammar.includes('root'), 'jsonSchemaToGrammar: grammar contains "root" rule');
 
-    // Use the grammar with createSampler to prove it's valid GBNF
-    const handle = ctx.createSampler(grammar);
-    assert(handle > 0, `jsonSchemaToGrammar: createSampler accepted grammar (handle=${handle})`);
-
-    // Generate tokens with grammar constraint
-    await ctx.kvCacheClear();
+    // Use the grammar with Branch.create to prove it's valid GBNF
     const prompt = await ctx.tokenize("Output JSON: ");
-    await ctx.decode(prompt, 0, 0);
-
-    const branch = Branch.create(ctx, prompt.length, { temperature: 0 }, undefined, grammar);
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 }, undefined, grammar);
+    await branch.prefill(prompt);
 
     const output = [];
     for (let i = 0; i < 50; i++) {
-      const { token, text, isStop } = branch.produce();
+      const { token, text, isStop } = await branch.produce();
       if (isStop) break;
       await branch.commit(token);
       output.push(text);
@@ -1609,7 +1566,6 @@ async function testJsonSchemaToGrammar() {
     }
 
     await branch.prune();
-    ctx.freeSamplerHandle(handle);
 
     // Error path: invalid JSON → promise rejects
     let rejected = false;
@@ -1641,13 +1597,11 @@ async function testDisposedDuringAsync() {
 
   try {
     const tokens = await ctx.tokenize("Test prompt");
-    await ctx.decode(tokens, 0, 0);
-
-    const branch = Branch.create(ctx, tokens.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(tokens);
 
     // Generate one token so branch has state
-    const { token } = branch.produce();
+    const { token } = await branch.produce();
     await branch.commit(token);
 
     // Call prune() — DO NOT await yet
@@ -1656,14 +1610,14 @@ async function testDisposedDuringAsync() {
     // Immediately (before microtask resolves) check disposed
     assert(branch.disposed, 'disposed-during: _disposed is true synchronously after prune() call');
 
-    // produce() should throw synchronously
+    // produceSync() should throw synchronously
     let threwProduce = false;
     try {
-      branch.produce();
+      branch.produceSync();
     } catch {
       threwProduce = true;
     }
-    assert(threwProduce, 'disposed-during: produce() throws before prune promise resolves');
+    assert(threwProduce, 'disposed-during: produceSync() throws before prune promise resolves');
 
     // commit() should throw synchronously (the _ensureNotDisposed guard)
     let threwCommit = false;
@@ -1702,11 +1656,10 @@ async function testAsyncIterator() {
 
   try {
     const prompt = await ctx.tokenize("The quick brown fox");
-    await ctx.decode(prompt, 0, 0);
 
     // Generate to EOG via for-await
-    const branch = Branch.create(ctx, prompt.length, { temperature: 0 });
-    branch.captureLogits();
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(prompt);
 
     const tokens = [];
     for await (const { token, text } of branch) {
@@ -1729,13 +1682,11 @@ async function testAsyncIterator() {
 
     // Compare: iterator output matches produce/commit output (deterministic, temp=0)
     await ctx.kvCacheClear();
-    await ctx.decode(prompt, 0, 0);
-
-    const branchManual = Branch.create(ctx, prompt.length, { temperature: 0 });
-    branchManual.captureLogits();
+    const branchManual = Branch.create(ctx, 0, { temperature: 0 });
+    await branchManual.prefill(prompt);
     const manualTokens = [];
     for (let i = 0; i < 10; i++) {
-      const { token, isStop } = branchManual.produce();
+      const { token, isStop } = await branchManual.produce();
       if (isStop) break;
       await branchManual.commit(token);
       manualTokens.push(token);
@@ -1746,6 +1697,119 @@ async function testAsyncIterator() {
       'iterator: output matches manual produce/commit (deterministic)');
 
     await branchManual.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HOT-SWAP TESTS (setSamplerParams / setGrammar)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testSetSamplerParams() {
+  console.log('\n--- setSamplerParams ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nThreads: 4,
+  });
+
+  try {
+    const prompt = await ctx.tokenize("The capital of France is");
+
+    // Greedy baseline
+    const greedy = Branch.create(ctx, 0, { temperature: 0, topK: 0, topP: 1.0, minP: 0 });
+    await greedy.prefill(prompt);
+    const greedyTok = greedy.sample();
+    assert(greedyTok >= 0, `setSamplerParams: greedy token valid (${greedyTok})`);
+
+    // Switch to stochastic — at high temp, should eventually diverge
+    greedy.setSamplerParams({ temperature: 1.5, seed: 42, topK: 0, topP: 1.0, minP: 0 });
+    let diverged = false;
+    for (let i = 0; i < 20; i++) {
+      if (greedy.sample() !== greedyTok) { diverged = true; break; }
+    }
+    assert(diverged, 'setSamplerParams: stochastic diverges from greedy');
+
+    // Switch back to greedy — should be deterministic again
+    greedy.setSamplerParams({ temperature: 0, topK: 0, topP: 1.0, minP: 0 });
+    const tok2 = greedy.sample();
+    const tok3 = greedy.sample();
+    assert(tok2 === tok3, `setSamplerParams: greedy restored (${tok2} === ${tok3})`);
+
+    await greedy.prune();
+
+    // Memoization: identical params should not rebuild
+    await ctx.kvCacheClear();
+    const branch = Branch.create(ctx, 0, { temperature: 0.8, seed: 100 });
+    await branch.prefill(prompt);
+    branch.setSamplerParams({ temperature: 0.8, seed: 100 });  // Same — should be no-op
+    assert(!branch.disposed, 'setSamplerParams: memoized no-op does not dispose');
+
+    await branch.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+async function testSetGrammar() {
+  console.log('\n--- setGrammar ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nThreads: 4,
+    nSeqMax: 4,
+  });
+
+  try {
+    const grammar = `root ::= "{" ws "}" ws
+ws ::= [ \\t\\n]*`;
+
+    // Hot-swap: create without grammar, then add one
+    const prompt = await ctx.tokenize("Output: ");
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    await branch.prefill(prompt);
+
+    branch.setGrammar(grammar);
+    const output = [];
+    for (let i = 0; i < 10; i++) {
+      const { token, text, isStop } = await branch.produce();
+      if (isStop) break;
+      await branch.commit(token);
+      output.push(text);
+    }
+    const result = output.join('');
+    assert(/^\{\s*\}\s*$/.test(result), `setGrammar: hot-swap constrains → "${result}"`);
+
+    // Remove grammar
+    branch.setGrammar('');
+    // Should no longer be constrained (just verify it doesn't throw)
+    const { token } = await branch.produce();
+    assert(typeof token === 'number', 'setGrammar: removal works, sample succeeds');
+
+    await branch.prune();
+
+    // Hot-swap + fork: grammar cloned to child
+    await ctx.kvCacheClear();
+    const root = Branch.create(ctx, 0, { temperature: 0 });
+    await root.prefill(prompt);
+    root.setGrammar(grammar);
+
+    const child = await root.fork();
+    const childOut = [];
+    for (let i = 0; i < 10; i++) {
+      const p = await child.produce();
+      if (p.isStop) break;
+      await child.commit(p.token);
+      childOut.push(p.text);
+    }
+    const childResult = childOut.join('');
+    assert(/^\{\s*\}\s*$/.test(childResult), `setGrammar: fork inherits grammar → "${childResult}"`);
+
+    await child.prune();
+    await root.prune();
   } finally {
     ctx.dispose();
   }
@@ -1783,7 +1847,7 @@ async function main() {
     await testBranchSteer();
     await testNBatchAblation();
     await testDeterminism();
-    await testDecodeAndCapture();
+    await testBranchPrefillAndLogits();
     await testBranchStore();
     await testPplSanity();
     await testCommitRollback();
@@ -1792,6 +1856,8 @@ async function main() {
     await testJsonSchemaToGrammar();
     await testDisposedDuringAsync();
     await testAsyncIterator();
+    await testSetSamplerParams();
+    await testSetGrammar();
     await testEmbeddings();
 
     // Summary

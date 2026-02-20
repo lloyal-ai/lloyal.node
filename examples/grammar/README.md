@@ -1,6 +1,6 @@
-# Grammar-Constrained Generation with Pull Loop
+# Grammar-Constrained Generation with Branch Forking
 
-Demonstrates generator-based token streaming with grammar constraints and forkable state.
+Demonstrates grammar-constrained generation using the Branch API with automatic grammar cloning on fork.
 
 ## Run It
 
@@ -17,109 +17,61 @@ Generating until "city" field...
   "age": 30,
   "city":
 
-Saving KV cache and grammar state at branch point...
-
-Exploring 3 city branches:
+Forking into 3 branches at branch point...
 
   [NYC branch]: { "name": "John Doe", "age": 30, "city": "Seattle" }
   [LA branch]: { "name": "John Doe", "age": 30, "city": "Chicago" }
   [Chicago branch]: { "name": "John Doe", "age": 30, "city": "LA" }
 ```
 
-## The Pull Loop Pattern
+## The Branch Fork Pattern
 
-This example uses a **pull loop** via JS generators. The consumer requests tokens one at a time and decides when to stop:
-
-```javascript
-function* tokenGenerator(ctx, grammarHandle, maxTokens = 100) {
-  for (let i = 0; i < maxTokens; i++) {
-    const logits = ctx.getLogits();
-    ctx.applySampler(grammarHandle, logits);
-
-    const token = ctx.sample({ temperature: 0.7 });
-    if (ctx.isStopToken(token)) return;
-
-    ctx.acceptSamplerToken(grammarHandle, token);
-
-    // Yield control back to caller
-    yield { token, text: ctx.tokenToText(token) };
-  }
-}
-```
-
-Consumer decides when to continue:
+Grammar state is integrated into the branch and cloned automatically on fork:
 
 ```javascript
-for (const { token, text } of gen) {
-  accumulated += text;
-  await ctx.decode([token], pos++, 0);
+// Create root branch with grammar constraint
+const grammar = await ctx.jsonSchemaToGrammar(JSON.stringify(schema));
+const root = Branch.create(ctx, 0, params, undefined, grammar);
+await root.prefill(promptTokens);
 
-  // Stop at decision point - generator pauses here
-  if (accumulated.includes('"city"')) {
-    break;  // Generator stays paused, state preserved
-  }
-}
-```
-
-## Why Pull Loop Here?
-
-For this branching use case, pull made the code simpler:
-
-```javascript
-// Stop when we see the branch point - just break
-for (const { token, text } of gen) {
-  accumulated += text;
+// Generate until branch point
+for (let i = 0; i < 100; i++) {
+  const { token, text, isStop } = await root.produce();
+  if (isStop) break;
+  await root.commit(token);
   if (accumulated.includes('"city"')) break;
 }
-// Generator paused mid-iteration, grammar state intact
-// Now save and branch
-```
 
-With a push loop you'd need callbacks or flags to signal "stop here" - doable, but the control flow is inverted. Pull keeps the branching logic linear and readable.
+// Fork — grammar state cloned automatically
+for (const city of cities) {
+  const child = await root.fork();
+  child.reseedSampler(seed++);
 
-## Branching Pattern
-
-1. **Generate** until decision point (pull loop pauses naturally)
-2. **Save** both KV cache and grammar state
-3. **Fork** for each branch exploration
-4. **Restore** and continue independently
-
-```javascript
-// Pause at branch point
-if (accumulated.includes('"city"')) break;
-
-// Save state
-const kvSnapshot = await ctx.kvCacheSave(0);
-const grammarSnapshot = ctx.cloneSampler(grammarHandle);
-
-// Explore branches
-for (const branch of branches) {
-  await ctx.kvCacheLoad(0, kvSnapshot);
-  const branchGrammar = ctx.cloneSampler(grammarSnapshot);
-
-  // Each branch continues independently
-  for (const { token, text } of tokenGenerator(ctx, branchGrammar)) {
-    // ...
+  for await (const { text } of child) {
+    // Each branch generates independently with its own grammar state
   }
+  await child.prune();
 }
+await root.prune();
 ```
+
+## Why Branch Fork Here?
+
+For grammar-constrained branching, fork handles everything atomically:
+- **KV cache**: Shared prefix, divergent-only storage per branch
+- **Grammar state**: Parser position cloned automatically
+- **Sampler chain**: Penalties and PRNG cloned and reseeded
+
+No manual KV save/load or grammar cloning needed — `fork()` is a single operation.
 
 ## Key APIs
 
 | Method | Description |
 |--------|-------------|
-| `getLogits()` | Get logits buffer (modified in-place by applySampler) |
-| `applySampler(handle, logits)` | Apply grammar constraints to logits |
-| `sample()` | Sample from modified logits |
-| `acceptSamplerToken(handle, id)` | Advance grammar parser state |
-| `createSampler(grammar)` | Create grammar handle |
-| `cloneSampler(handle)` | Clone grammar state for branching |
-| `kvCacheSave(seq)` / `kvCacheLoad(seq, buf)` | Snapshot/restore KV state |
-
-## Grammar + KV Travel Together
-
-For valid branching, fork **both**:
-- **KV cache**: Model's memory of what it has seen
-- **Grammar state**: Parser's position in the grammar
-
-Missing either causes invalid completions or grammar errors.
+| `Branch.create(ctx, pos, params, nBatch, grammar)` | Create branch with grammar constraint |
+| `branch.fork()` | Clone branch: KV prefix + grammar + sampler |
+| `branch.reseedSampler(seed)` | Diversify forked branch's PRNG |
+| `branch.produce()` | Sample grammar-valid token |
+| `branch.commit(token)` | Advance grammar + KV state |
+| `branch.prune()` | Clean up branch resources |
+| `ctx.jsonSchemaToGrammar(json)` | Convert JSON schema to GBNF grammar |

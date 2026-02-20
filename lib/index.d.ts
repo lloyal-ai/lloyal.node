@@ -273,8 +273,6 @@ export interface FormatChatOptions {
   /**
    * Explicit GBNF grammar string for constrained generation.
    * Mutually exclusive with `jsonSchema`.
-   *
-   * @see {@link SessionContext.createSampler}
    */
   grammar?: string;
 
@@ -550,7 +548,7 @@ export interface AdvancedSamplingParams {
  *
  * Configures the sampler chain — a pipeline of composable filters and
  * transforms applied to raw logits before token selection. The chain is
- * built once at branch/context creation and persists across decode steps
+ * built once at branch creation and persists across decode steps
  * (penalty state accumulates, PRNG advances).
  *
  * **Chain order**: penalties → top_k → typical_p → top_p → min_p →
@@ -603,24 +601,29 @@ export interface SamplingParams {
  * Inference context — the runtime surface for a loaded model
  *
  * A SessionContext owns a llama_context (KV cache + compute graph) bound to a
- * shared model. All inference flows through this interface: tokenization,
- * forward passes, logit access, sampling, KV cache management, chat template
- * formatting, and embedding extraction.
+ * shared model. It provides tokenization, logit access, KV cache management,
+ * chat template formatting, and embedding extraction.
  *
- * The core generation loop is three steps, repeated:
- * 1. **decode()** — Feed tokens through the transformer, populating KV cache.
- * 2. **getLogits()** — Zero-copy view into the model's output distribution.
- * 3. **sample()** — Select the next token via the configured sampler chain.
+ * **All generation flows through {@link Branch}.** Create a branch at position 0,
+ * prefill prompt tokens, then use the produce/commit loop or async iterator:
+ *
+ * ```typescript
+ * const branch = Branch.create(ctx, 0, { temperature: 0.7 });
+ * await branch.prefill(promptTokens);
+ * for await (const { token, text } of branch) {
+ *   process.stdout.write(text);
+ * }
+ * ```
  *
  * For tree-structured generation (best-of-N, beam search, speculative
- * decoding), use the {@link Branch} and {@link BranchStore} APIs instead —
- * they manage per-branch KV sequences, sampler chains, and logits snapshots
- * with O(1) GPU dispatches via batched decode.
+ * decoding), use {@link Branch.fork} and {@link BranchStore} — they manage
+ * per-branch KV sequences, sampler chains, and logits snapshots with O(1)
+ * GPU dispatches via batched decode.
  *
  * **Logits lifetime**: `getLogits()` returns a zero-copy Float32Array wrapping
  * llama.cpp's internal buffer. It is invalidated (ArrayBuffer detached) on
- * the next `decode()`, `encode()`, or `dispose()`. Use {@link withLogits} for
- * safe scoped access.
+ * the next `encode()` or `dispose()`. Use {@link withLogits} for safe scoped
+ * access. For branch-level logits, use {@link Branch.getLogits} instead.
  *
  * **KV cache**: Supports multi-sequence operation (`nSeqMax > 1`), per-sequence
  * copy/clear/eviction, file-based persistence, and context compression via
@@ -636,54 +639,17 @@ export interface SamplingParams {
  * @category Core
  */
 export interface SessionContext {
-  // ===== THE GENERATION LOOP =====
 
   /**
-   * STEP 1: Process tokens through the model (forward pass)
-   *
-   * This feeds tokens through the transformer and updates the KV cache.
-   * After decoding, the model has "read" this text and is ready to predict.
-   *
-   * Think of this as: "the model reads your prompt"
-   *
-   * Why async? Model inference takes time (~45ms per token)
-   * Why position? Model needs to know where in conversation this text appears
-   *
-   * Cost: ~45ms per token (generation), ~120ms for 50 tokens (prompt)
-   *
-   * @param tokens Token IDs from tokenize()
-   * @param position Where these tokens start in the sequence
-   * @param seqId Sequence ID (default: 0)
-   * @example
-   * ```typescript
-   * const tokens = await ctx.tokenize("Hello world");
-   * await ctx.decode(tokens, 0);
-   * let position = tokens.length;
-   *
-   * // Generate next token
-   * await ctx.decode([nextToken], position++);
-   *
-   * // Multi-sequence: decode to different sequences
-   * await ctx.decode(tokens, 0, 0);  // Sequence 0
-   * await ctx.decode(tokens, 0, 1);  // Sequence 1
-   * ```
-   */
-  decode(tokens: number[], position: number, seqId?: number): Promise<void>;
-
-  /**
-   * STEP 2: Get logits (zero-copy view into model memory)
+   * Get logits (zero-copy view into model memory)
    *
    * Returns unnormalized scores for every possible next token.
    * Higher score = model thinks this token is more likely.
    * The returned Float32Array wraps llama.cpp's internal buffer directly
-   * (zero-copy). It is mutable — you can write to it for custom sampling
-   * (e.g., setting banned tokens to -Infinity before calling sample()).
-   *
-   * Memoized per decode step: calling getLogits() twice between decodes
-   * returns the same Float32Array backed by the same ArrayBuffer.
+   * (zero-copy).
    *
    * LIFETIME CONSTRAINTS:
-   * - Valid ONLY until the next decode(), encode(), or dispose() call
+   * - Valid ONLY until the next encode() or dispose() call
    * - The ArrayBuffer is detached on invalidation — accessing a stale
    *   buffer throws a TypeError
    * - DO NOT retain references across async boundaries
@@ -697,59 +663,8 @@ export interface SessionContext {
    * Cost: ~0.5ms (zero-copy pointer, no data copied)
    *
    * @returns Float32Array of unnormalized logits (vocabSize elements)
-   * @example
-   * ```typescript
-   * await ctx.decode(tokens, 0);
-   *
-   * // Read logits for analysis
-   * const logits = ctx.getLogits();
-   * const entropy = ctx.modelEntropy("bits", logits);
-   *
-   * // Or modify in-place for custom sampling
-   * logits[BANNED_TOKEN] = -Infinity;
-   * const token = ctx.sample({ temperature: 0.7 });
-   *
-   * // Next decode invalidates the buffer
-   * await ctx.decode([token], position++);
-   * // logits is now DETACHED - do not access!
-   * ```
    */
   getLogits(): Float32Array;
-
-  /**
-   * STEP 3: Sample a token from logits
-   *
-   * Converts raw logits into a token decision using:
-   * - Temperature: controls randomness
-   * - Top-K/Top-P: filters unlikely tokens
-   * - Repeat/frequency/presence penalties (tracked across calls)
-   *
-   * NOTE: Grammar constraints are NOT applied by sample(). For grammar-
-   * constrained generation, use the handle-based API (createSampler /
-   * applySampler) or the Branch API which integrates grammar natively.
-   *
-   * This is where generation strategy happens.
-   *
-   * Cost: ~0.1ms (native sampling)
-   *
-   * @param params Sampling strategy (greedy if omitted)
-   * @returns Selected token ID
-   * @example
-   * ```typescript
-   * // Greedy (always pick most likely)
-   * const token = ctx.sample();
-   *
-   * // Creative generation
-   * const token = ctx.sample({ temperature: 0.9 });
-   *
-   * // Constrained to valid JSON (handle-based API)
-   * const grammarHandle = ctx.createSampler(grammar);
-   * ctx.applySampler(grammarHandle, ctx.getLogits());
-   * const token = ctx.sample({ temperature: 0.7 });
-   * ctx.acceptSamplerToken(grammarHandle, token);
-   * ```
-   */
-  sample(params?: SamplingParams): number;
 
   /**
    * Convert token ID to text piece
@@ -762,20 +677,8 @@ export interface SessionContext {
    *
    * Cost: ~0.05ms
    *
-   * @param token Token ID from sample()
+   * @param token Token ID
    * @returns Text string for this token
-   * @example
-   * ```typescript
-   * while (true) {
-   *   const token = ctx.sample({ temperature: 0.8 });
-   *   if (ctx.isStopToken(token)) break;
-   *
-   *   const text = ctx.tokenToText(token);
-   *   process.stdout.write(text); // Stream to output
-   *
-   *   await ctx.decode([token], position++);
-   * }
-   * ```
    */
   tokenToText(token: number): string;
 
@@ -795,14 +698,6 @@ export interface SessionContext {
    * Cost: <0.01ms (fast vocabulary lookup)
    *
    * @param token Token ID to check
-   * @example
-   * ```typescript
-   * const token = ctx.sample();
-   * if (ctx.isStopToken(token)) {
-   *   console.log('Generation complete');
-   *   break;
-   * }
-   * ```
    */
   isStopToken(token: number): boolean;
 
@@ -910,14 +805,6 @@ export interface SessionContext {
    *
    * @param sequenceId Sequence ID (defaults to 0 for single conversation)
    * @returns Highest position index, or -1 if empty
-   * @example
-   * ```typescript
-   * const tokens = await ctx.tokenize("Hello world");
-   * await ctx.decode(tokens, 0);
-   *
-   * const maxPos = ctx.kvCacheSize(0);
-   * console.log(`${maxPos + 1} tokens in cache`);
-   * ```
    */
   kvCacheSize(sequenceId?: number): number;
 
@@ -938,18 +825,6 @@ export interface SessionContext {
    * @param sequenceId Sequence ID (use 0 for single sequence)
    * @param start Start position (inclusive)
    * @param end End position (exclusive), -1 = to end
-   * @example
-   * ```typescript
-   * // Remove old tokens to stay under context limit
-   * const currentLength = ctx.kvCacheSize(0);
-   * if (currentLength > 2000) {
-   *   // Remove oldest 500 tokens
-   *   await ctx.kvCacheRemove(0, 0, 500);
-   *
-   *   // THEN decode new tokens
-   *   await ctx.decode(newTokens, currentLength - 500);
-   * }
-   * ```
    */
   kvCacheRemove(sequenceId: number, start: number, end: number): Promise<void>;
 
@@ -968,17 +843,6 @@ export interface SessionContext {
    *
    * @param sequenceId Sequence ID (use 0 for single sequence)
    * @returns Serialized state buffer
-   * @example
-   * ```typescript
-   * // Save state before risky operation
-   * const snapshot = await ctx.kvCacheSave(0);
-   *
-   * // Try something
-   * await ctx.decode(riskyTokens, position);
-   *
-   * // Didn't work - restore previous state
-   * await ctx.kvCacheLoad(0, snapshot);
-   * ```
    */
   kvCacheSave(sequenceId?: number): Promise<Buffer>;
 
@@ -1014,14 +878,6 @@ export interface SessionContext {
    *
    * Cost: ~1ms
    *
-   * @example
-   * ```typescript
-   * // Start fresh conversation
-   * await ctx.kvCacheClear();
-   *
-   * const tokens = await ctx.tokenize("New conversation");
-   * await ctx.decode(tokens, 0);
-   * ```
    */
   kvCacheClear(): Promise<void>;
 
@@ -1113,19 +969,6 @@ export interface SessionContext {
    * @param dstSeqId Destination sequence to copy to
    * @param p0 Start position (must be 0, default: 0)
    * @param p1 End position (must be -1 for full copy, default: -1)
-   * @example
-   * ```typescript
-   * // Decode shared prompt to seq 0
-   * await ctx.decode(promptTokens, 0);
-   *
-   * // Fork to seq 1 and seq 2 (metadata-only, instant)
-   * ctx.kvSeqCopy(0, 1);
-   * ctx.kvSeqCopy(0, 2);
-   *
-   * // Divergent generation — only new tokens allocate KV entries
-   * await ctx.decode([tokenA], position, 1);
-   * await ctx.decode([tokenB], position, 2);
-   * ```
    */
   kvSeqCopy(srcSeqId: number, dstSeqId: number, p0?: number, p1?: number): void;
 
@@ -1162,91 +1005,6 @@ export interface SessionContext {
    */
   kvSeqPosMax(seqId: number): number;
 
-  // ===== HANDLE-BASED GRAMMAR =====
-
-  /**
-   * Create a new grammar sampler (returns handle)
-   *
-   * Creates an independent grammar sampler instance with its own state.
-   * Returns a handle that can be used with applySampler/acceptSamplerToken.
-   * Multiple handles can coexist with independent parser states.
-   *
-   * Cost: ~0.1-1ms depending on grammar complexity
-   *
-   * @param grammarStr GBNF grammar string
-   * @returns Handle to the created sampler
-   * @example
-   * ```typescript
-   * const grammarHandle = ctx.createSampler(jsonGrammar);
-   *
-   * // Apply grammar constraints to logits
-   * ctx.applySampler(grammarHandle, logitsBuffer);
-   * ctx.acceptSamplerToken(grammarHandle, token);
-   *
-   * // Create independent copy with same grammar
-   * const clonedHandle = ctx.cloneSampler(grammarHandle);
-   *
-   * // Cleanup when done
-   * ctx.freeSamplerHandle(grammarHandle);
-   * ctx.freeSamplerHandle(clonedHandle);
-   * ```
-   */
-  createSampler(grammarStr: string): number;
-
-  /**
-   * Apply grammar constraints using handle-based sampler
-   *
-   * Masks invalid tokens with -Infinity based on parser state.
-   * Modifies the logits buffer in-place.
-   *
-   * @param handle Sampler handle from createSampler()
-   * @param logitsBuffer ArrayBuffer or TypedArray containing logits
-   */
-  applySampler(handle: number, logitsBuffer: ArrayBuffer | Float32Array): void;
-
-  /**
-   * Accept token to advance grammar parser state (handle-based)
-   *
-   * Must be called after sampling to advance the grammar parser.
-   *
-   * @param handle Sampler handle from createSampler()
-   * @param tokenId Token that was sampled
-   */
-  acceptSamplerToken(handle: number, tokenId: number): void;
-
-  /**
-   * Clone a grammar sampler
-   *
-   * Creates a copy of the sampler with identical parser state.
-   * Both handles can then be used independently with their own state.
-   *
-   * @param handle Sampler handle to clone
-   * @returns New handle to cloned sampler
-   * @example
-   * ```typescript
-   * const original = ctx.createSampler(jsonGrammar);
-   * ctx.acceptSamplerToken(original, openBrace);
-   *
-   * // Clone preserves parser state (already accepted openBrace)
-   * const copy = ctx.cloneSampler(original);
-   *
-   * // Both can now continue independently
-   * ctx.acceptSamplerToken(original, tokenA);
-   * ctx.acceptSamplerToken(copy, tokenB);
-   * ```
-   */
-  cloneSampler(handle: number): number;
-
-  /**
-   * Free a grammar sampler handle
-   *
-   * Releases memory for the specified sampler.
-   * Handle becomes invalid after this call.
-   *
-   * @param handle Sampler handle to free
-   */
-  freeSamplerHandle(handle: number): void;
-
   // ===== METRICS API =====
 
   /**
@@ -1256,30 +1014,18 @@ export interface SessionContext {
    * - Low surprisal: Model expected this token (high probability)
    * - High surprisal: Model didn't expect this token (low probability)
    *
-   * Call after decode() to compute surprisal for any token based on
-   * the current logits distribution, or pass captured logits for
-   * offline computation (e.g., best-of-n scoring from prefill logits).
+   * Pass captured logits (e.g., from {@link Branch.getLogits}) for
+   * offline computation, or omit to use the current context logits.
    *
    * @param pickedTokenId - Token ID to compute surprisal for
    * @param base - Logarithm base: "nats" (default) or "bits"
    * @param logits - Optional Float32Array of logits (uses current context logits if omitted)
    * @returns Surprisal value in specified base
    *
-   * @example Current context logits (default)
+   * @example With branch logits
    * ```typescript
-   * await ctx.decode(tokens, position);
-   * const token = ctx.sample();
-   * const surprisal = ctx.modelSurprisal(token, "bits");
-   * console.log(`Model surprise: ${surprisal.toFixed(2)} bits`);
-   * ```
-   *
-   * @example Captured/arbitrary logits (for best-of-n, verification, etc.)
-   * ```typescript
-   * // Capture logits after prefill
-   * const capturedLogits = new Float32Array(ctx.getLogits());
-   *
-   * // Later: compute surprisal from captured logits
-   * const surprisal = ctx.modelSurprisal(token, "nats", capturedLogits);
+   * const { token } = await branch.produce();
+   * const surprisal = ctx.modelSurprisal(token, "bits", branch.getLogits());
    * ```
    *
    * COST: O(n_vocab) - softmax normalization required
@@ -1293,180 +1039,21 @@ export interface SessionContext {
    * - Low entropy: Model is confident (peaked distribution)
    * - High entropy: Model is uncertain (flat distribution)
    *
-   * Call after decode() to analyze the current prediction distribution,
-   * or pass captured logits for offline analysis.
+   * Pass captured logits (e.g., from {@link Branch.getLogits}) for
+   * offline analysis, or omit to use the current context logits.
    *
    * @param base - Logarithm base: "nats" (default) or "bits"
    * @param logits - Optional Float32Array of logits (uses current context logits if omitted)
    * @returns Entropy value in specified base
    *
-   * @example Current context logits (default)
+   * @example With branch logits
    * ```typescript
-   * await ctx.decode(tokens, position);
-   * const entropy = ctx.modelEntropy("bits");
-   * if (entropy > 5.0) {
-   *   console.log("Model is very uncertain - consider adjusting parameters");
-   * }
-   * ```
-   *
-   * @example Captured/arbitrary logits
-   * ```typescript
-   * const capturedLogits = new Float32Array(ctx.getLogits());
-   * const entropy = ctx.modelEntropy("nats", capturedLogits);
+   * const entropy = ctx.modelEntropy("bits", branch.getLogits());
    * ```
    *
    * COST: O(n_vocab) - must sum over all token probabilities
    */
   modelEntropy(base?: 'nats' | 'bits', logits?: Float32Array): number;
-
-  /**
-   * Create a new perplexity tracker.
-   *
-   * @returns Integer handle to the tracker
-   *
-   * @example
-   * ```typescript
-   * const tracker = ctx.createPerplexityTracker();
-   *
-   * // Add surprisals during generation
-   * for (let i = 0; i < tokens.length; i++) {
-   *   const surprisal = ctx.modelSurprisal(tokens[i]);
-   *   ctx.addSurprisal(tracker, surprisal);
-   * }
-   *
-   * const ppl = ctx.getPerplexity(tracker);
-   * console.log(`Sequence perplexity: ${ppl.toFixed(2)}`);
-   *
-   * ctx.freePerplexityTracker(tracker);
-   * ```
-   */
-  createPerplexityTracker(): number;
-
-  /**
-   * Add a surprisal value to the rolling tracker.
-   *
-   * @param handle - Tracker handle from createPerplexityTracker()
-   * @param surprisal - Surprisal value (from modelSurprisal or computed)
-   *
-   * @example
-   * ```typescript
-   * const surprisal = ctx.modelSurprisal(tokenId, "nats");
-   * ctx.addSurprisal(tracker, surprisal);
-   * ```
-   *
-   * COST: O(1) - numerically stable accumulation
-   * THREAD-SAFETY: Not thread-safe (handle is session-local)
-   */
-  addSurprisal(handle: number, surprisal: number): void;
-
-  /**
-   * Get current perplexity value.
-   *
-   * @param handle - Tracker handle
-   * @returns Perplexity = exp(average_surprisal_in_nats)
-   *
-   * @example
-   * ```typescript
-   * const ppl = ctx.getPerplexity(tracker);
-   * console.log(`Current PPL: ${ppl.toFixed(2)}`);
-   * ```
-   *
-   * FORMULA: PPL = exp(sum_surprisals / count)
-   * RANGE: [1, ∞) where 1 = perfect prediction
-   */
-  getPerplexity(handle: number): number;
-
-  /**
-   * Clone a perplexity tracker (for fork/branch scenarios).
-   *
-   * @param sourceHandle - Handle to clone from
-   * @returns New handle with same accumulated state
-   *
-   * @example
-   * ```typescript
-   * // Branch A and B start from same base perplexity
-   * const baseTracker = ctx.createPerplexityTracker();
-   * // ... accumulate base surprisals ...
-   *
-   * const branchA = ctx.clonePerplexityTracker(baseTracker);
-   * const branchB = ctx.clonePerplexityTracker(baseTracker);
-   *
-   * // Branch A and B now track independently
-   * ctx.addSurprisal(branchA, surprisalA);
-   * ctx.addSurprisal(branchB, surprisalB);
-   * ```
-   */
-  clonePerplexityTracker(sourceHandle: number): number;
-
-  /**
-   * Reset tracker to initial state (count=0, sum=0).
-   *
-   * @param handle - Tracker handle to reset
-   *
-   * @example
-   * ```typescript
-   * // Reuse tracker for multiple sequences
-   * const tracker = ctx.createPerplexityTracker();
-   *
-   * for (const sequence of sequences) {
-   *   ctx.resetPerplexityTracker(tracker);
-   *   // ... process sequence ...
-   *   const ppl = ctx.getPerplexity(tracker);
-   * }
-   * ```
-   */
-  resetPerplexityTracker(handle: number): void;
-
-  /**
-   * Get number of tokens tracked.
-   *
-   * @param handle - Tracker handle
-   * @returns Number of surprisal values added
-   */
-  getPerplexityCount(handle: number): number;
-
-  /**
-   * Free perplexity tracker resources.
-   *
-   * @param handle - Tracker handle to free
-   *
-   * NOTE: Auto-freed in dispose() if not manually freed
-   */
-  freePerplexityTracker(handle: number): void;
-
-  // ===== ATOMIC DECODE+CAPTURE =====
-
-  /**
-   * Decode tokens and capture logits atomically
-   *
-   * Performs decode and logits capture as a single atomic operation,
-   * ensuring the captured logits correspond exactly to the decoded tokens.
-   *
-   * Use this instead of separate decode() + getLogits() calls when
-   * you need guaranteed consistency between decode and logits capture.
-   *
-   * @param tokens Token IDs to decode
-   * @param position Start position in sequence
-   * @param seqId Sequence ID
-   * @param destBuffer Pre-allocated buffer to receive logits (vocabSize floats)
-   * @example
-   * ```typescript
-   * // Pre-allocate buffer (reuse across calls)
-   * const logitsBuffer = new Float32Array(ctx.vocabSize);
-   *
-   * // Atomic decode + capture
-   * await ctx.decodeAndCapture([token], position, seqId, logitsBuffer);
-   *
-   * // Safe to process logitsBuffer - it's an independent copy
-   * const nextToken = sampleFromLogits(logitsBuffer);
-   * ```
-   */
-  decodeAndCapture(
-    tokens: number[],
-    position: number,
-    seqId: number,
-    destBuffer: ArrayBuffer | Float32Array
-  ): Promise<void>;
 
   // ===== KV CACHE FILE PERSISTENCE =====
 
@@ -1528,26 +1115,8 @@ export interface SessionContext {
    * ]));
    *
    * const tokens = await ctx.tokenize(result.prompt);
-   * await ctx.decode(tokens, 0);
-   * ```
-   *
-   * @example With tools
-   * ```typescript
-   * const tools = [{ type: 'function', function: {
-   *   name: 'get_weather', description: 'Get weather',
-   *   parameters: { type: 'object', properties: { location: { type: 'string' } } }
-   * }}];
-   * const result = await ctx.formatChat(JSON.stringify(messages), {
-   *   tools: JSON.stringify(tools),
-   *   toolChoice: 'auto'
-   * });
-   * // result.grammar contains GBNF for constrained tool call generation
-   * // result.format identifies the chat format for output parsing
-   * ```
-   *
-   * @example Backward compatible (string as second arg)
-   * ```typescript
-   * const result = await ctx.formatChat(messagesJson, templateOverrideString);
+   * const branch = Branch.create(ctx, 0, { temperature: 0.7 });
+   * await branch.prefill(tokens);
    * ```
    */
   formatChat(
@@ -1601,12 +1170,11 @@ export interface SessionContext {
    *   messages.push({ role: 'user', content: userContent });
    *
    *   if (!branch) {
-   *     // Cold path: format full conversation, tokenize with BOS, decode all
+   *     // Cold path: format full conversation, tokenize with BOS, prefill
    *     fmt = await ctx.formatChat(JSON.stringify(messages));
    *     const tokens = await ctx.tokenize(fmt.prompt);
-   *     await ctx.decode(tokens, 0, 0);
-   *     branch = Branch.create(ctx, tokens.length, { temperature: 0.7 });
-   *     branch.captureLogits();
+   *     branch = Branch.create(ctx, 0, { temperature: 0.7 });
+   *     await branch.prefill(tokens);
    *   } else {
    *     // Warm path: string-diff for delta tokens
    *     const { prompt: full } = await ctx.formatChat(JSON.stringify(messages));
@@ -1621,7 +1189,7 @@ export interface SessionContext {
    *   // Generate
    *   let rawOutput = '';
    *   while (true) {
-   *     const { token, text, isStop } = branch.produce();
+   *     const { token, text, isStop } = await branch.produce();
    *     if (isStop) break;
    *     rawOutput += text;
    *     await branch.commit(token);
@@ -1653,7 +1221,7 @@ export interface SessionContext {
    * Convert JSON schema to GBNF grammar
    *
    * Generates grammar string for constrained JSON generation.
-   * Use with createSampler() for grammar-constrained generation.
+   * Use with {@link Branch.create} grammar parameter for constrained generation.
    *
    * Cost: ~1-10ms depending on schema complexity
    *
@@ -1671,7 +1239,7 @@ export interface SessionContext {
    * };
    *
    * const grammar = await ctx.jsonSchemaToGrammar(JSON.stringify(schema));
-   * const handle = ctx.createSampler(grammar);
+   * const branch = Branch.create(ctx, 0, params, undefined, grammar);
    * ```
    */
   jsonSchemaToGrammar(schemaJson: string): Promise<string>;
@@ -1779,18 +1347,6 @@ export interface SessionContext {
    */
   hasPooling(): boolean;
 
-  // ===== NATIVE REFERENCE IMPLEMENTATIONS =====
-
-  /**
-   * Sample greedily from current logits
-   *
-   * Selects token with highest logit value (deterministic).
-   * Equivalent to sample() with temperature=0.
-   *
-   * @returns Token ID with highest probability
-   */
-  greedySample(): number;
-
   // ===== PROPERTIES =====
 
   /**
@@ -1877,6 +1433,12 @@ export interface SessionContext {
   /** @internal Clear all dynamic logit biases from a branch */
   _branchClearSteer(handle: number): void;
 
+  /** @internal Replace sampler chain with new parameters (memoized) */
+  _branchSetSamplerParams(handle: number, params: SamplingParams): void;
+
+  /** @internal Replace or remove grammar constraint */
+  _branchSetGrammar(handle: number, grammarStr: string): void;
+
   // ===== STORE API (internal, wrapped by BranchStore) =====
 
   /** @internal Batched accept + decode_each + capture for N branches */
@@ -1905,7 +1467,6 @@ export interface SessionContext {
  * - KV cache: `nCtx * 2 * nLayers * dHead` bytes per KV type (fp16 default).
  *   For a 7B model with `nCtx: 4096`, expect ~1-2 GB of KV memory.
  * - Compute scratch: temporary buffers for the forward pass, sized to `nBatch`.
- * - Sampler state: penalty tracking window, PRNG state.
  *
  * **Model sharing:** If two contexts use the same `modelPath`, the model
  * weights are loaded once and shared. Only the KV cache and compute buffers
@@ -1926,8 +1487,9 @@ export interface SessionContext {
  *
  * try {
  *   const tokens = await ctx.tokenize("Hello");
- *   await ctx.decode(tokens, 0);
- *   const token = ctx.sample({ temperature: 0.7 });
+ *   const branch = Branch.create(ctx, 0, { temperature: 0.7 });
+ *   await branch.prefill(tokens);
+ *   for await (const { text } of branch) process.stdout.write(text);
  * } finally {
  *   ctx.dispose();
  * }
@@ -2015,55 +1577,15 @@ export function loadBinary(variant?: GpuVariant): {
  * The callback MUST NOT:
  * - Store the logits reference
  * - Return a Promise (will throw)
- * - Call decode() (would invalidate logits)
  *
  * This prevents common bugs where logits become invalid due to
  * async operations between access and usage.
- *
- * How it works:
- * - Memoization: Multiple getLogits() calls in same step return same buffer
- * - Revocation: Next decode() invalidates previous buffer
  *
  * @template T Return type of the callback
  * @param ctx The session context
  * @param fn Synchronous callback that uses logits - must not return a Promise
  * @returns The result from the callback
  * @throws Error if callback returns a Promise (async usage not allowed)
- *
- * @example Safe synchronous usage
- * ```typescript
- * // Compute entropy synchronously
- * const entropy = withLogits(ctx, (logits) => {
- *   let maxLogit = logits[0];
- *   for (let i = 1; i < logits.length; i++) {
- *     if (logits[i] > maxLogit) maxLogit = logits[i];
- *   }
- *
- *   let sumExp = 0;
- *   for (let i = 0; i < logits.length; i++) {
- *     sumExp += Math.exp(logits[i] - maxLogit);
- *   }
- *
- *   let entropy = 0;
- *   for (let i = 0; i < logits.length; i++) {
- *     const p = Math.exp(logits[i] - maxLogit) / sumExp;
- *     if (p > 0) entropy -= p * Math.log(p);
- *   }
- *   return entropy;
- * });
- *
- * // Now safe to decode (previous logits buffer is revoked)
- * await ctx.decode([nextToken], position++);
- * ```
- *
- * @example Error: async callback
- * ```typescript
- * // This will throw!
- * withLogits(ctx, async (logits) => {
- *   await something();  // NOT ALLOWED
- *   return logits[0];
- * });
- * ```
  *
  * @category Core
  */
@@ -2208,7 +1730,7 @@ export class Branch {
    * tokens (user input between turns), not model-generated tokens.
    * For model output, use `commit()` which does accept + decode.
    *
-   * Branch-level equivalent of `ctx.decode()`.
+   * The primary way to feed tokens into a branch's KV cache.
    *
    * @param tokens - Token IDs to decode
    */
@@ -2281,7 +1803,7 @@ export class Branch {
    * // Block those tokens for this sample only
    * branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
    *
-   * const { token } = branch.produce();  // Blocked tokens won't be sampled
+   * const { token } = await branch.produce();  // Blocked tokens won't be sampled
    * await branch.commit(token);
    *
    * // Clear for next iteration (recompute based on new history)
@@ -2300,7 +1822,7 @@ export class Branch {
    *   // Penalize sibling choices to encourage diversity
    *   beam.branch.steer(siblingTokens.map(t => ({ token: t, bias: -2.0 })));
    *
-   *   const { token } = beam.branch.produce();
+   *   const { token } = await beam.branch.produce();
    *   await beam.branch.commit(token);
    *   beam.lastToken = token;
    *   beam.branch.clearSteer();
@@ -2332,7 +1854,7 @@ export class Branch {
    *   const blocked = computeConstraints(generatedTokens);
    *   branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
    *
-   *   const { token, isStop } = branch.produce();
+   *   const { token, isStop } = await branch.produce();
    *   if (isStop) break;
    *
    *   await branch.commit(token);
@@ -2343,8 +1865,60 @@ export class Branch {
    */
   clearSteer(): void;
 
-  /** Sample next token without advancing state. Inspect before committing. */
-  produce(): Produced;
+  /**
+   * Replace the sampler chain with new parameters (memoized)
+   *
+   * If the new params match the current chain's params, this is a no-op.
+   * Otherwise the old chain is freed and a new one is created. Use for
+   * Entropy-Driven Temperature (EDT) and other adaptive sampling strategies
+   * that adjust parameters per-step.
+   *
+   * @param params - New sampling parameters
+   *
+   * @example Entropy-Driven Temperature
+   * ```typescript
+   * const entropy = ctx.modelEntropy('nats', branch.getLogits());
+   * branch.setSamplerParams({ temperature: edtTemperature(entropy) });
+   * const { token } = await branch.produce();
+   * await branch.commit(token);
+   * ```
+   */
+  setSamplerParams(params: SamplingParams): void;
+
+  /**
+   * Replace or remove the grammar constraint
+   *
+   * Pass a GBNF grammar string to constrain generation. Pass empty string
+   * or undefined to remove the constraint. The grammar state is cloned on
+   * fork(), so sibling branches can diverge independently after hot-swap.
+   *
+   * @param grammarStr - GBNF grammar string, or empty/undefined to remove
+   *
+   * @example Hot-swap grammar mid-generation
+   * ```typescript
+   * // Start unconstrained, then switch to JSON after detecting tool call
+   * branch.setGrammar(jsonGrammar);
+   * const { token } = await branch.produce();
+   * ```
+   */
+  setGrammar(grammarStr?: string): void;
+
+  /**
+   * Sample next token without advancing state (async)
+   *
+   * Async contract: local branches resolve immediately; cloud branches
+   * may perform an HTTP round-trip. Use {@link produceSync} when you know
+   * the branch is local and want zero-overhead sampling.
+   */
+  produce(): Promise<Produced>;
+
+  /**
+   * Sample next token without advancing state (sync)
+   *
+   * Same as {@link produce} but synchronous. Use when you know the branch
+   * is local and want to avoid the microtick overhead of a promise.
+   */
+  produceSync(): Produced;
 
   /**
    * Accept and decode — update branch state, then write token to KV
@@ -2428,9 +2002,9 @@ export class Branch {
  * Packs N tokens into a single batch via `decode_each` (one row per sequence,
  * all at their respective positions). Single `llama_decode()` call. Logits
  * captured per-branch at batch index `i`. O(N) total work, O(1) GPU
- * dispatches, O(1) amortized dispatch overhead per branch. Post-decode,
- * accepts each token into its branch's repeat-penalty window. Decode-first
- * ordering ensures sampler state stays consistent if decode throws.
+ * dispatches, O(1) amortized dispatch overhead per branch. Accept-first
+ * ordering with rollback: accepts each token into its branch's repeat-penalty
+ * window before decode, restores from clones if decode throws.
  *
  * **prefill()** — Bulk token injection. Each branch contributes a
  * variable-length token array. Uses a two-pass bin-packing algorithm:
@@ -2459,7 +2033,7 @@ export class Branch {
  * @example 32-branch generation step — one GPU dispatch
  * ```typescript
  * const store = new BranchStore(ctx);
- * const entries = branches.map(b => [b, b.produce().token] as [Branch, number]);
+ * const entries = await Promise.all(branches.map(async b => [b, (await b.produce()).token] as [Branch, number]));
  * await store.commit(entries);  // 32 tokens, 1 llama_decode()
  * ```
  *
@@ -2470,8 +2044,8 @@ export class Branch {
  * for (const _ of [1, 2, 3]) branches.push(await root.fork());
  *
  * for (let step = 0; step < 50; step++) {
- *   const live = branches.map(b => [b, b.produce()] as const)
- *     .filter(([, p]) => !p.isStop);
+ *   const produced = await Promise.all(branches.map(async b => [b, await b.produce()] as const));
+ *   const live = produced.filter(([, p]) => !p.isStop);
  *   if (!live.length) break;
  *   await store.commit(live.map(([b, p]) => [b, p.token]));
  * }

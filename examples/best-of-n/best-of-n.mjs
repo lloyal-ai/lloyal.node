@@ -11,10 +11,10 @@
  * See: Stiennon et al. 2020 "Learning to summarize from human feedback"
  *
  * KEY IMPLEMENTATION DETAIL:
- * Uses the Branch API for parallel generation. After prefilling the prompt,
- * we create a root branch and call captureLogits(). When forking to multiple
- * candidates, each fork inherits the root's logits snapshot, ensuring all
- * candidates start from the same probability distribution.
+ * Uses the Branch API for parallel generation. The root branch prefills the
+ * prompt and captures logits. When forking to multiple candidates, each fork
+ * inherits the root's logits snapshot, ensuring all candidates start from
+ * the same probability distribution.
  *
  * Usage:
  *   node best-of-n.mjs [model-path]          # Human-readable output
@@ -92,21 +92,18 @@ async function main() {
     console.log(`\nPrompt: "${userPrompt}"`);
   }
 
-  // Prefill prompt
+  // Prefill prompt via root branch
   const promptTokens = await ctx.tokenize(prompt);
-  await ctx.decode(promptTokens, 0, 0);
+
+  const root = Branch.create(ctx, 0, {
+    temperature: HIGH_TEMP,
+    topP: 0.95,
+  });
+  await root.prefill(promptTokens);
 
   if (!jsonlMode) {
     console.log(`\nPrefill complete. Prompt length: ${promptTokens.length} tokens`);
   }
-
-  // CRITICAL: Create root branch IMMEDIATELY after prefill to capture logits
-  // The root branch stores a snapshot of the logits for fork operations
-  const root = Branch.create(ctx, promptTokens.length, {
-    temperature: HIGH_TEMP,
-    topP: 0.95,
-  });
-  root.captureLogits();
 
   // === Baseline: Single generation with low temperature ===
   if (!jsonlMode) {

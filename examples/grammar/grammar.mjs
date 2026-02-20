@@ -2,8 +2,9 @@
 /**
  * Grammar-constrained generation with forkable state
  *
- * Uses JS generators for backpressure - generation pauses at each yield,
- * allowing precise control over when to branch.
+ * Uses Branch API for grammar-constrained generation with tree branching.
+ * Grammar state is automatically cloned on fork(), so each branch can
+ * diverge independently while maintaining valid JSON output.
  *
  * Usage:
  *   node grammar.mjs [model-path]          # Human-readable output
@@ -12,7 +13,7 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
+import { createContext, Branch } from '../../lib/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
@@ -29,27 +30,6 @@ const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
 function emit(event, data) {
   if (jsonlMode) {
     console.log(JSON.stringify({ event, ...data }));
-  }
-}
-
-/**
- * Generator that yields tokens one at a time
- * Caller controls pace via next() - natural backpressure
- */
-function* tokenGenerator(ctx, grammarHandle, maxTokens = 100) {
-  for (let i = 0; i < maxTokens; i++) {
-    // Apply grammar constraints to context logits
-    const logits = ctx.getLogits();
-    ctx.applySampler(grammarHandle, logits);
-
-    const token = ctx.sample();
-    if (ctx.isStopToken(token)) return;
-
-    // Advance grammar state
-    ctx.acceptSamplerToken(grammarHandle, token);
-
-    // Yield token and text - caller decides when to continue
-    yield { token, text: ctx.tokenToText(token) };
   }
 }
 
@@ -89,16 +69,16 @@ async function main() {
     console.log(grammar.slice(0, 200) + '...\n');
   }
 
-  const grammarHandle = ctx.createSampler(grammar);
-
   const prompt = 'Generate a person as JSON:\n';
   if (!jsonlMode) {
     console.log(`Prompt: "${prompt}"`);
   }
 
   const tokens = await ctx.tokenize(prompt);
-  await ctx.decode(tokens, 0, 0);
-  let pos = tokens.length;
+
+  // Root branch with grammar constraint — grammar state cloned automatically on fork()
+  const root = Branch.create(ctx, 0, { temperature: 0.7, topP: 0.9 }, undefined, grammar);
+  await root.prefill(tokens);
 
   // ===== PHASE 1: Generate until we see "city" key =====
   if (!jsonlMode) {
@@ -106,19 +86,19 @@ async function main() {
     process.stdout.write('  ');
   }
 
-  const gen = tokenGenerator(ctx, grammarHandle);
-  const collectedTokens = [];
   let accumulated = '';
 
-  for (const { token, text } of gen) {
-    collectedTokens.push(token);
+  for (let i = 0; i < 100; i++) {
+    const { token, text, isStop } = await root.produce();
+    if (isStop) break;
+
     accumulated += text;
     if (!jsonlMode) {
       process.stdout.write(text);
     }
     emit('token', { phase: 'prefix', token, text });
 
-    await ctx.decode([token], pos++, 0);
+    await root.commit(token);
 
     // Stop when we see "city": - we want to branch here
     if (accumulated.includes('"city"')) {
@@ -129,55 +109,46 @@ async function main() {
     console.log('\n');
   }
 
-  // ===== PHASE 2: Save state for branching =====
-  if (!jsonlMode) {
-    console.log('Saving KV cache and grammar state at branch point...');
-  }
-  const kvSnapshot = await ctx.kvCacheSave(0);
-  const grammarSnapshot = ctx.cloneSampler(grammarHandle);
-  const branchPos = pos;
-
-  emit('branch_point', { prefix: accumulated, position: branchPos });
-
-  // ===== PHASE 3: Complete with different cities =====
+  // ===== PHASE 2: Fork and complete with different branches =====
   const cities = ['NYC', 'LA', 'Chicago'];
   if (!jsonlMode) {
-    console.log(`\nExploring ${cities.length} city branches:\n`);
+    console.log(`Forking into ${cities.length} branches at branch point...\n`);
   }
 
-  const branches = [];
+  emit('branch_point', { prefix: accumulated, position: root.position });
+
+  const results = [];
   for (const city of cities) {
-    // Restore KV cache
-    await ctx.kvCacheLoad(0, kvSnapshot);
-    pos = branchPos;
+    const child = await root.fork();
+    child.reseedSampler(results.length + 42);
 
-    // Fresh grammar clone for this branch
-    const branchGrammar = ctx.cloneSampler(grammarSnapshot);
-
-    // Generate completion for this branch
-    const branchGen = tokenGenerator(ctx, branchGrammar, 30);
     let branchText = '';
+    for (let i = 0; i < 30; i++) {
+      const { token, text, isStop } = await child.produce();
+      if (isStop) break;
 
-    for (const { token, text } of branchGen) {
       branchText += text;
       emit('token', { phase: 'branch', city, token, text });
-      await ctx.decode([token], pos++, 0);
+
+      await child.commit(token);
     }
 
     const fullOutput = accumulated + branchText;
-    branches.push({ city, output: fullOutput });
+    results.push({ city, output: fullOutput });
 
     if (!jsonlMode) {
       console.log(`  [${city} branch]: ${fullOutput}`);
     }
     emit('branch_complete', { city, output: fullOutput });
 
-    ctx.freeSamplerHandle(branchGrammar);
+    await child.prune();
   }
+
+  await root.prune();
 
   // Validate JSON outputs
   let validJsonCount = 0;
-  for (const b of branches) {
+  for (const b of results) {
     try {
       JSON.parse(b.output);
       validJsonCount++;
@@ -187,14 +158,11 @@ async function main() {
   }
 
   emit('complete', {
-    branchCount: branches.length,
+    branchCount: results.length,
     validJsonCount,
-    branches: branches.map(b => ({ city: b.city, output: b.output })),
+    branches: results.map(b => ({ city: b.city, output: b.output })),
   });
 
-  // Cleanup
-  ctx.freeSamplerHandle(grammarHandle);
-  ctx.freeSamplerHandle(grammarSnapshot);
   ctx.dispose();
 
   if (!jsonlMode) {
