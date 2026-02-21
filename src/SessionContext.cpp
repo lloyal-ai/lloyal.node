@@ -1944,7 +1944,7 @@ Napi::Value SessionContext::_branchModelEntropy(const Napi::CallbackInfo& info) 
   ensureNotDisposed();
 
   if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchModelEntropy requires (handle[, base])");
+    throw Napi::TypeError::New(env, "_branchModelEntropy requires (handle[, base])");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
@@ -1973,7 +1973,7 @@ Napi::Value SessionContext::_branchModelSurprisal(const Napi::CallbackInfo& info
   ensureNotDisposed();
 
   if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchModelSurprisal requires (handle, token[, base])");
+    throw Napi::TypeError::New(env, "_branchModelSurprisal requires (handle, token[, base])");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
@@ -2003,7 +2003,7 @@ Napi::Value SessionContext::_branchGetSamplingPerplexity(const Napi::CallbackInf
   ensureNotDisposed();
 
   if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchGetSamplingPerplexity requires (handle)");
+    throw Napi::TypeError::New(env, "_branchGetSamplingPerplexity requires (handle)");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
@@ -2017,13 +2017,13 @@ Napi::Value SessionContext::_branchSetLogitBias(const Napi::CallbackInfo& info) 
   ensureNotDisposed();
 
   if (info.Length() < 2) {
-    throw Napi::Error::New(env, "_branchSetLogitBias requires (handle, biases[])");
+    throw Napi::TypeError::New(env, "_branchSetLogitBias requires (handle, biases[])");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
 
   if (!info[1].IsArray()) {
-    throw Napi::Error::New(env, "_branchSetLogitBias: biases must be an array");
+    throw Napi::TypeError::New(env, "_branchSetLogitBias: biases must be an array");
   }
 
   Napi::Array biasArray = info[1].As<Napi::Array>();
@@ -2059,7 +2059,7 @@ Napi::Value SessionContext::_branchClearLogitBias(const Napi::CallbackInfo& info
   ensureNotDisposed();
 
   if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchClearLogitBias requires (handle)");
+    throw Napi::TypeError::New(env, "_branchClearLogitBias requires (handle)");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());

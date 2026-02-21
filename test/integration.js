@@ -1091,7 +1091,7 @@ async function testBranchStore() {
 
       // After store.commit, logits change — branch reflects new state
       const p = await b1.produce();
-      assert(!p.isStop, `getLogits: produce() should not hit EOG on first token`);
+      assert(!p.isStop, `modelEntropy: produce() should not hit EOG on first token`);
       await store.commit([[b1, p.token]]);
       const entropyAfter = b1.modelEntropy("nats");
       assert(isFinite(entropyAfter),
@@ -1831,10 +1831,10 @@ async function testBranchMetrics() {
     assert(Math.abs(surprisalBits - surprisal / Math.log(2)) < 0.01,
       `branch.modelSurprisal bits consistent with nats`);
 
-    // branch.samplingPerplexity — before any commits, should be Infinity
+    // branch.samplingPerplexity — before any commits, must be Infinity
     const pplBefore = branch.samplingPerplexity;
-    assert(pplBefore === Infinity || isFinite(pplBefore),
-      `branch.samplingPerplexity before commit → ${pplBefore}`);
+    assert(pplBefore === Infinity,
+      `branch.samplingPerplexity before commit should be Infinity, got ${pplBefore}`);
 
     // Commit a few tokens to accumulate sampling perplexity
     await branch.commit(token);
@@ -1845,11 +1845,12 @@ async function testBranchMetrics() {
     assert(isFinite(pplAfter) && pplAfter >= 1.0,
       `branch.samplingPerplexity after commits → ${pplAfter.toFixed(4)}`);
 
-    // setLogitBias — ban a token, verify it's not sampled
-    const bannedToken = token; // ban the token we just sampled
-    branch.setLogitBias([{ token: bannedToken, bias: -Infinity }]);
+    // setLogitBias — get greedy baseline, ban it, verify it changes
+    const baseline = Branch.create(ctx, 0, { temperature: 0 });
+    await baseline.prefill(tokens);
+    const bannedToken = baseline.sample();
+    await baseline.prune();
 
-    // With greedy (temp=0), the banned token should not appear
     const greedy = Branch.create(ctx, 0, { temperature: 0 });
     await greedy.prefill(tokens);
     greedy.setLogitBias([{ token: bannedToken, bias: -Infinity }]);
@@ -1857,15 +1858,12 @@ async function testBranchMetrics() {
     assert(alternative !== bannedToken,
       `setLogitBias: banned token ${bannedToken} not sampled (got ${alternative})`);
 
-    // clearLogitBias — after clearing, the original greedy token should come back
-    greedy.clearLogitBias();
-    // Need fresh logits for a clean test — use a new branch
+    // clearLogitBias — after clearing, the greedy baseline token should come back
     const greedy2 = Branch.create(ctx, 0, { temperature: 0 });
     await greedy2.prefill(tokens);
     const greedyToken = greedy2.sample();
-    // The greedy token should be the one we banned (it was the top choice)
     assert(greedyToken === bannedToken,
-      `clearLogitBias: greedy token ${greedyToken} === previously banned ${bannedToken}`);
+      `clearLogitBias: greedy token ${greedyToken} === baseline ${bannedToken}`);
 
     // setLogitBias cloned on fork
     const parent = Branch.create(ctx, 0, { temperature: 0 });
@@ -1879,7 +1877,7 @@ async function testBranchMetrics() {
     await branch.prune();
     await greedy.prune();
     await greedy2.prune();
-    await child.pruneSubtree();
+    await parent.pruneSubtree();
   } finally {
     ctx.dispose();
   }
