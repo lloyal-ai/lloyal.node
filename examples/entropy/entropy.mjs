@@ -73,8 +73,7 @@ async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
   const entropies = [];
 
   for (let i = 0; i < maxTokens; i++) {
-    const branchLogits = branch.getLogits();
-    const entropy = ctx.modelEntropy('nats', branchLogits);
+    const entropy = branch.modelEntropy('nats');
     entropies.push(entropy);
 
     const temp = strategy === 'edt' ? edtTemperature(entropy) : strategy;

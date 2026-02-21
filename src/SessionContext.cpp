@@ -10,7 +10,6 @@
 #include <lloyal/grammar.hpp>
 #include <lloyal/kv.hpp>
 #include <lloyal/embedding.hpp>
-#include <lloyal/logits.hpp>
 #include <lloyal/metrics.hpp>
 #include <cmath>
 #include <iostream>
@@ -738,7 +737,6 @@ private:
 Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(env, "SessionContext", {
     // ===== CORE =====
-    InstanceMethod("getLogits", &SessionContext::getLogits),
     InstanceMethod("tokenToText", &SessionContext::tokenToText),
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
     InstanceMethod("getEogToken", &SessionContext::getEogToken),
@@ -775,10 +773,6 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("getEmbeddingDimension", &SessionContext::getEmbeddingDimension),
     InstanceMethod("hasPooling", &SessionContext::hasPooling),
 
-    // ===== METRICS API =====
-    InstanceMethod("modelSurprisal", &SessionContext::modelSurprisal),
-    InstanceMethod("modelEntropy", &SessionContext::modelEntropy),
-
     // ===== LIFECYCLE =====
     InstanceMethod("dispose", &SessionContext::dispose),
 
@@ -802,6 +796,11 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
     InstanceMethod("_branchSetSamplerParams", &SessionContext::_branchSetSamplerParams),
     InstanceMethod("_branchSetGrammar", &SessionContext::_branchSetGrammar),
+    InstanceMethod("_branchModelEntropy", &SessionContext::_branchModelEntropy),
+    InstanceMethod("_branchModelSurprisal", &SessionContext::_branchModelSurprisal),
+    InstanceMethod("_branchGetSamplingPerplexity", &SessionContext::_branchGetSamplingPerplexity),
+    InstanceMethod("_branchSetLogitBias", &SessionContext::_branchSetLogitBias),
+    InstanceMethod("_branchClearLogitBias", &SessionContext::_branchClearLogitBias),
 
     // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
@@ -858,80 +857,6 @@ void SessionContext::initializeContext(
   std::cerr << "  Shared refcount: " << _model.use_count() << std::endl;
 }
 
-// ===== LOGITS BUFFER MANAGEMENT =====
-
-void SessionContext::invalidateLogits() {
-  // The Kill Switch: Detach any active logits buffer
-  //
-  // This is called before any operation that invalidates the logits pointer:
-  // - decode() - new forward pass overwrites logits
-  // - encode() - embedding pass overwrites logits
-  // - dispose() - context is destroyed
-  //
-  // After detach, any JS code holding a reference to the buffer will get
-  // a TypeError when trying to access it - exactly what we want.
-  if (!_logitsBufferRef.IsEmpty()) {
-    try {
-      Napi::ArrayBuffer buffer = _logitsBufferRef.Value();
-      if (!buffer.IsDetached()) {
-        buffer.Detach();
-      }
-    } catch (...) {
-      // Buffer may have been garbage collected - that's fine
-    }
-    _logitsBufferRef.Reset();
-  }
-
-  // Increment step counter - any new getLogits() call will create fresh buffer
-  _decodeStepId++;
-}
-
-Napi::Value SessionContext::getLogits(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  if (!_context) {
-    throw Napi::Error::New(env, "Context not initialized");
-  }
-
-  // ===== MEMOIZATION: Return same buffer if already created for this step =====
-  //
-  // Pattern: "Memoized Step-Scoped Views"
-  // If caller calls getLogits() twice in the same step, return the same buffer.
-  // This avoids creating multiple views into the same memory.
-  if (_logitsStepId == _decodeStepId && !_logitsBufferRef.IsEmpty()) {
-    // Same step, reuse existing buffer
-    Napi::ArrayBuffer existingBuffer = _logitsBufferRef.Value();
-    const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-    return Napi::Float32Array::New(env, n_vocab, existingBuffer, 0);
-  }
-
-  // ===== NEW BUFFER: Get logits via lloyal wrapper (handles null checks) =====
-  //
-  // lloyal::logits::get() throws descriptive errors if:
-  // - Context is null
-  // - Logits unavailable (decode() not called with logits=true)
-  float* logits;
-  try {
-    logits = lloyal::logits::get(_context, -1);
-  } catch (const std::exception& e) {
-    throw Napi::Error::New(env, e.what());
-  }
-
-  const int n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-
-  // Create ArrayBuffer wrapping the logits (zero-copy!)
-  // Store reference for memoization and future revocation
-  Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, logits, n_vocab * sizeof(float));
-
-  // Store weak reference for memoization
-  _logitsBufferRef = Napi::Reference<Napi::ArrayBuffer>::New(buffer, 1);
-  _logitsStepId = _decodeStepId;
-
-  // Return Float32Array view
-  return Napi::Float32Array::New(env, n_vocab, buffer, 0);
-}
-
 Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -981,97 +906,6 @@ Napi::Value SessionContext::detokenize(const Napi::CallbackInfo& info) {
   return worker->GetPromise();
 }
 
-// ===== METRICS API =====
-
-Napi::Value SessionContext::modelSurprisal(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Argument validation
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    throw Napi::TypeError::New(env, "Expected number (pickedTokenId)");
-  }
-
-  int32_t pickedTokenId = info[0].As<Napi::Number>().Int32Value();
-
-  // Optional base parameter (default: "nats")
-  std::string baseStr = "nats";
-  if (info.Length() >= 2 && info[1].IsString()) {
-    baseStr = info[1].As<Napi::String>().Utf8Value();
-  }
-
-  lloyal::metrics::Base base = parseBase(baseStr);
-
-  // Get logits - either from provided Float32Array or from current context
-  float* logits;
-  int n_vocab;
-
-  if (info.Length() >= 3 && info[2].IsTypedArray()) {
-    // Use provided logits (for captured/arbitrary logits)
-    auto arr = info[2].As<Napi::TypedArray>();
-    if (arr.TypedArrayType() != napi_float32_array) {
-      throw Napi::TypeError::New(env, "Expected Float32Array for logits parameter");
-    }
-    auto float32Arr = info[2].As<Napi::Float32Array>();
-    logits = float32Arr.Data();
-    n_vocab = static_cast<int>(float32Arr.ElementLength());
-  } else {
-    // Use current context logits (default behavior)
-    try {
-      logits = lloyal::logits::get(_context, -1);
-    } catch (const std::exception& e) {
-      throw Napi::Error::New(env, e.what());
-    }
-    n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-  }
-
-  // Compute surprisal
-  float surprisal = lloyal::metrics::model_surprisal(logits, n_vocab, pickedTokenId, base);
-
-  return Napi::Number::New(env, static_cast<double>(surprisal));
-}
-
-Napi::Value SessionContext::modelEntropy(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  ensureNotDisposed();
-
-  // Optional base parameter (default: "nats")
-  std::string baseStr = "nats";
-  if (info.Length() >= 1 && info[0].IsString()) {
-    baseStr = info[0].As<Napi::String>().Utf8Value();
-  }
-
-  lloyal::metrics::Base base = parseBase(baseStr);
-
-  // Get logits - either from provided Float32Array or from current context
-  float* logits;
-  int n_vocab;
-
-  if (info.Length() >= 2 && info[1].IsTypedArray()) {
-    // Use provided logits (for captured/arbitrary logits)
-    auto arr = info[1].As<Napi::TypedArray>();
-    if (arr.TypedArrayType() != napi_float32_array) {
-      throw Napi::TypeError::New(env, "Expected Float32Array for logits parameter");
-    }
-    auto float32Arr = info[1].As<Napi::Float32Array>();
-    logits = float32Arr.Data();
-    n_vocab = static_cast<int>(float32Arr.ElementLength());
-  } else {
-    // Use current context logits (default behavior)
-    try {
-      logits = lloyal::logits::get(_context, -1);
-    } catch (const std::exception& e) {
-      throw Napi::Error::New(env, e.what());
-    }
-    n_vocab = lloyal::tokenizer::vocab_size(_model.get());
-  }
-
-  // Compute entropy using metrics.hpp
-  float entropy = lloyal::metrics::model_entropy(logits, n_vocab, base);
-
-  return Napi::Number::New(env, static_cast<double>(entropy));
-}
-
 Napi::Value SessionContext::tokenToText(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -1097,9 +931,6 @@ Napi::Value SessionContext::encode(const Napi::CallbackInfo& info) {
   if (info.Length() < 1 || !info[0].IsArray()) {
     throw Napi::TypeError::New(env, "Expected (tokens: number[])");
   }
-
-  // Revoke any active logits buffer before encode
-  invalidateLogits();
 
   // Extract tokens
   Napi::Array jsTokens = info[0].As<Napi::Array>();
@@ -1300,9 +1131,6 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!_disposed) {
-    // Revoke any active logits buffer before disposing
-    invalidateLogits();
-
     // Drain branch store while context is still alive
     _branchStore.drain();
 
@@ -1520,11 +1348,6 @@ Napi::Value SessionContext::kvCacheRemove(const Napi::CallbackInfo& info) {
   if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsNumber() || !info[2].IsNumber()) {
     throw Napi::TypeError::New(env, "Expected (sequenceId: number, start: number, end: number)");
   }
-
-  // CRITICAL: Invalidate logits before KV cache modification
-  // Logits may reference positions that will be evicted
-  // (matches pattern from decode() line 801, encode() line 1035)
-  invalidateLogits();
 
   double sequenceId = info[0].As<Napi::Number>().DoubleValue();
   double start = info[1].As<Napi::Number>().DoubleValue();
@@ -2110,6 +1933,137 @@ Napi::Value SessionContext::_branchSetGrammar(const Napi::CallbackInfo& info) {
     grammar_str.empty() ? "" : grammar_str.c_str(),
     _branchStore
   );
+
+  return env.Undefined();
+}
+
+// ===== BRANCH METRICS & LOGIT BIAS =====
+
+Napi::Value SessionContext::_branchModelEntropy(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "_branchModelEntropy requires (handle[, base])");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  std::string baseStr = "nats";
+  if (info.Length() >= 2 && info[1].IsString()) {
+    baseStr = info[1].As<Napi::String>().Utf8Value();
+  }
+
+  auto* state = _branchStore.get(handle);
+  if (!state) {
+    throw Napi::Error::New(env, "_branchModelEntropy: invalid handle");
+  }
+  if (!state->has_logits) {
+    throw Napi::Error::New(env, "_branchModelEntropy: no logits captured (call prefill or commit first)");
+  }
+
+  float entropy = lloyal::metrics::model_entropy(
+    state->logits_snapshot.data(), state->n_vocab, parseBase(baseStr));
+
+  return Napi::Number::New(env, static_cast<double>(entropy));
+}
+
+Napi::Value SessionContext::_branchModelSurprisal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::TypeError::New(env, "_branchModelSurprisal requires (handle, token[, base])");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  auto token = static_cast<int32_t>(info[1].As<Napi::Number>().Int32Value());
+
+  std::string baseStr = "nats";
+  if (info.Length() >= 3 && info[2].IsString()) {
+    baseStr = info[2].As<Napi::String>().Utf8Value();
+  }
+
+  auto* state = _branchStore.get(handle);
+  if (!state) {
+    throw Napi::Error::New(env, "_branchModelSurprisal: invalid handle");
+  }
+  if (!state->has_logits) {
+    throw Napi::Error::New(env, "_branchModelSurprisal: no logits captured (call prefill or commit first)");
+  }
+
+  float surprisal = lloyal::metrics::model_surprisal(
+    state->logits_snapshot.data(), state->n_vocab, token, parseBase(baseStr));
+
+  return Napi::Number::New(env, static_cast<double>(surprisal));
+}
+
+Napi::Value SessionContext::_branchGetSamplingPerplexity(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "_branchGetSamplingPerplexity requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  float ppl = lloyal::branch::get_sampling_perplexity(handle, _branchStore);
+
+  return Napi::Number::New(env, static_cast<double>(ppl));
+}
+
+Napi::Value SessionContext::_branchSetLogitBias(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2) {
+    throw Napi::TypeError::New(env, "_branchSetLogitBias requires (handle, biases[])");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+
+  if (!info[1].IsArray()) {
+    throw Napi::TypeError::New(env, "_branchSetLogitBias: biases must be an array");
+  }
+
+  Napi::Array biasArray = info[1].As<Napi::Array>();
+  uint32_t length = biasArray.Length();
+
+  std::vector<llama_logit_bias> biases;
+  biases.reserve(length);
+
+  for (uint32_t i = 0; i < length; i++) {
+    Napi::Value item = biasArray[i];
+    if (!item.IsObject()) {
+      throw Napi::Error::New(env, "_branchSetLogitBias: each bias must be {token, bias}");
+    }
+    Napi::Object obj = item.As<Napi::Object>();
+
+    if (!obj.Has("token") || !obj.Has("bias")) {
+      throw Napi::Error::New(env, "_branchSetLogitBias: each bias must have 'token' and 'bias' properties");
+    }
+
+    llama_logit_bias bias;
+    bias.token = static_cast<llama_token>(obj.Get("token").As<Napi::Number>().Int32Value());
+    bias.bias = obj.Get("bias").As<Napi::Number>().FloatValue();
+    biases.push_back(bias);
+  }
+
+  lloyal::branch::set_logit_bias(handle, biases.data(), biases.size(), _branchStore);
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchClearLogitBias(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::TypeError::New(env, "_branchClearLogitBias requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  lloyal::branch::clear_logit_bias(handle, _branchStore);
 
   return env.Undefined();
 }

@@ -34,7 +34,7 @@ console.log('=== lloyal.node Integration Tests ===\n');
 console.log(`Model: ${path.basename(MODEL_PATH)}`);
 console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(1)} MB\n`);
 
-const { loadBinary, Branch, BranchStore, withLogits } = require('..');
+const { loadBinary, Branch, BranchStore } = require('..');
 let addon;
 try {
   addon = require('../build/Release/lloyal.node');
@@ -102,9 +102,9 @@ async function testCoreAPI(ctx) {
   }
   assert(hasNonZero && !hasNaN, 'branch logits valid (non-zero, no NaN)');
 
-  // modelEntropy with branch logits
-  const entropy = ctx.modelEntropy('nats', branchLogits);
-  assert(isFinite(entropy) && entropy >= 0, `modelEntropy(branchLogits) → ${entropy.toFixed(4)} nats`);
+  // branch.modelEntropy
+  const entropy = branch.modelEntropy('nats');
+  assert(isFinite(entropy) && entropy >= 0, `branch.modelEntropy() → ${entropy.toFixed(4)} nats`);
 
   // Branch greedy sampling (temperature: 0)
   const greedy = branch.sample();
@@ -113,24 +113,6 @@ async function testCoreAPI(ctx) {
   // isStopToken - EOS should be a stop token
   const eos = ctx.getEogToken();
   assert(ctx.isStopToken(eos), `isStopToken(EOS=${eos}) → true`);
-
-  // withLogits helper (context-level logits)
-  // Note: getLogits() reads from the shared context buffer, which is populated
-  // by branch decode operations
-  const maxLogit = withLogits(ctx, (l) => {
-    let max = l[0];
-    for (let i = 1; i < l.length; i++) if (l[i] > max) max = l[i];
-    return max;
-  });
-  assert(isFinite(maxLogit), `withLogits() sync → max=${maxLogit.toFixed(2)}`);
-
-  let asyncRejected = false;
-  try {
-    withLogits(ctx, async () => 1);
-  } catch {
-    asyncRejected = true;
-  }
-  assert(asyncRejected, 'withLogits() rejects async callbacks');
 
   await branch.prune();
 }
@@ -272,13 +254,12 @@ async function testMetrics(ctx) {
   const branch = Branch.create(ctx, 0, { temperature: 0 });
   await branch.prefill(tokens);
 
-  // modelSurprisal with branch logits
+  // branch.modelSurprisal
   const token1 = branch.sample();
-  const branchLogits = branch.getLogits();
-  const surprisal = ctx.modelSurprisal(token1, "nats", branchLogits);
-  assert(surprisal >= 0, `modelSurprisal(branchLogits) → ${surprisal.toFixed(2)} nats`);
+  const surprisal = branch.modelSurprisal(token1, "nats");
+  assert(surprisal >= 0, `branch.modelSurprisal() → ${surprisal.toFixed(2)} nats`);
 
-  const surprisalBits = ctx.modelSurprisal(token1, "bits", branchLogits);
+  const surprisalBits = branch.modelSurprisal(token1, "bits");
   assert(Math.abs(surprisalBits - surprisal / Math.log(2)) < 0.01, 'bits = nats / ln(2)');
 
   // Branch perplexity — built-in, accumulates through commit()
@@ -1103,20 +1084,18 @@ async function testBranchStore() {
       assert(logits.length === ctx.vocabSize,
         `getLogits: length=${logits.length} === vocabSize=${ctx.vocabSize}`);
 
-      // Feed branch logits into ctx.modelEntropy() — proves the returned
-      // buffer is a valid logits distribution consumable by metrics API
-      const entropyFromBranch = ctx.modelEntropy("nats", logits);
+      // branch.modelEntropy — proves the logits snapshot is a valid distribution
+      const entropyFromBranch = b1.modelEntropy("nats");
       assert(isFinite(entropyFromBranch) && entropyFromBranch > 0,
-        `getLogits→modelEntropy: ${entropyFromBranch.toFixed(4)} nats`);
+        `branch.modelEntropy: ${entropyFromBranch.toFixed(4)} nats`);
 
-      // After store.commit, logits change — getLogits() reflects new state
+      // After store.commit, logits change — branch reflects new state
       const p = await b1.produce();
-      assert(!p.isStop, `getLogits: produce() should not hit EOG on first token`);
+      assert(!p.isStop, `modelEntropy: produce() should not hit EOG on first token`);
       await store.commit([[b1, p.token]]);
-      const logitsAfter = b1.getLogits();
-      const entropyAfter = ctx.modelEntropy("nats", logitsAfter);
+      const entropyAfter = b1.modelEntropy("nats");
       assert(isFinite(entropyAfter),
-        `getLogits after commit: entropy=${entropyAfter.toFixed(4)} nats`);
+        `modelEntropy after commit: entropy=${entropyAfter.toFixed(4)} nats`);
 
       await b1.prune();
     }
@@ -1816,6 +1795,95 @@ ws ::= [ \\t\\n]*`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BRANCH METRICS & LOGIT BIAS
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testBranchMetrics() {
+  console.log('\n--- Branch Metrics & Logit Bias ---');
+
+  const ctx = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nThreads: 4,
+    nSeqMax: 8,
+  });
+
+  try {
+    const tokens = await ctx.tokenize("The capital of France is");
+    const branch = Branch.create(ctx, 0, { temperature: 0.8, seed: 42 });
+    await branch.prefill(tokens);
+
+    // branch.modelEntropy
+    const entropy = branch.modelEntropy('nats');
+    assert(isFinite(entropy) && entropy >= 0, `branch.modelEntropy('nats') → ${entropy.toFixed(4)}`);
+
+    const entropyBits = branch.modelEntropy('bits');
+    assert(Math.abs(entropyBits - entropy / Math.log(2)) < 0.01,
+      `branch.modelEntropy('bits') consistent with nats`);
+
+    // branch.modelSurprisal
+    const token = branch.sample();
+    const surprisal = branch.modelSurprisal(token, 'nats');
+    assert(isFinite(surprisal) && surprisal >= 0,
+      `branch.modelSurprisal(${token}, 'nats') → ${surprisal.toFixed(4)}`);
+
+    const surprisalBits = branch.modelSurprisal(token, 'bits');
+    assert(Math.abs(surprisalBits - surprisal / Math.log(2)) < 0.01,
+      `branch.modelSurprisal bits consistent with nats`);
+
+    // branch.samplingPerplexity — before any commits, must be Infinity
+    const pplBefore = branch.samplingPerplexity;
+    assert(pplBefore === Infinity,
+      `branch.samplingPerplexity before commit should be Infinity, got ${pplBefore}`);
+
+    // Commit a few tokens to accumulate sampling perplexity
+    await branch.commit(token);
+    const { token: t2 } = await branch.produce();
+    await branch.commit(t2);
+
+    const pplAfter = branch.samplingPerplexity;
+    assert(isFinite(pplAfter) && pplAfter >= 1.0,
+      `branch.samplingPerplexity after commits → ${pplAfter.toFixed(4)}`);
+
+    // setLogitBias — get greedy baseline, ban it, verify it changes
+    const baseline = Branch.create(ctx, 0, { temperature: 0 });
+    await baseline.prefill(tokens);
+    const bannedToken = baseline.sample();
+    await baseline.prune();
+
+    const greedy = Branch.create(ctx, 0, { temperature: 0 });
+    await greedy.prefill(tokens);
+    greedy.setLogitBias([{ token: bannedToken, bias: -Infinity }]);
+    const alternative = greedy.sample();
+    assert(alternative !== bannedToken,
+      `setLogitBias: banned token ${bannedToken} not sampled (got ${alternative})`);
+
+    // clearLogitBias — after clearing, the greedy baseline token should come back
+    const greedy2 = Branch.create(ctx, 0, { temperature: 0 });
+    await greedy2.prefill(tokens);
+    const greedyToken = greedy2.sample();
+    assert(greedyToken === bannedToken,
+      `clearLogitBias: greedy token ${greedyToken} === baseline ${bannedToken}`);
+
+    // setLogitBias cloned on fork
+    const parent = Branch.create(ctx, 0, { temperature: 0 });
+    await parent.prefill(tokens);
+    parent.setLogitBias([{ token: bannedToken, bias: -Infinity }]);
+    const child = await parent.fork();
+    const childToken = child.sample();
+    assert(childToken !== bannedToken,
+      `setLogitBias cloned on fork: child doesn't sample banned token`);
+
+    await branch.prune();
+    await greedy.prune();
+    await greedy2.prune();
+    await parent.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1858,6 +1926,7 @@ async function main() {
     await testAsyncIterator();
     await testSetSamplerParams();
     await testSetGrammar();
+    await testBranchMetrics();
     await testEmbeddings();
 
     // Summary
