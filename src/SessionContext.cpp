@@ -1713,38 +1713,60 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     nSeqMax = options.Get("nSeqMax").As<Napi::Number>().Int32Value();
   }
 
+  // Extract typeK (optional, default F16)
+  ggml_type typeK = GGML_TYPE_F16;
+  if (options.Has("typeK") && options.Get("typeK").IsString()) {
+    std::string s = options.Get("typeK").As<Napi::String>().Utf8Value();
+    ggml_type t = lloyal::kv::cache_type::from_str(s);
+    if (t == GGML_TYPE_COUNT) {
+      throw Napi::Error::New(env, "Unsupported typeK: " + s);
+    }
+    typeK = t;
+  }
+
+  // Extract typeV (optional, default F16)
+  ggml_type typeV = GGML_TYPE_F16;
+  if (options.Has("typeV") && options.Get("typeV").IsString()) {
+    std::string s = options.Get("typeV").As<Napi::String>().Utf8Value();
+    ggml_type t = lloyal::kv::cache_type::from_str(s);
+    if (t == GGML_TYPE_COUNT) {
+      throw Napi::Error::New(env, "Unsupported typeV: " + s);
+    }
+    typeV = t;
+  }
+
   // Ensure llama backend is initialized on main thread (thread-safe, once)
   BackendManager::ensureInitialized();
 
   // Normalize and validate path BEFORE queuing async work
   std::string fsPath = liblloyal_node::FileSystem::normalizePath(modelPath);
   if (fsPath != modelPath) {
-    std::cout << "[CreateContext] Normalized " << modelPath << " → " << fsPath << std::endl;
+    std::cerr << "[CreateContext] Normalized " << modelPath << " → " << fsPath << std::endl;
   }
 
   if (!liblloyal_node::FileSystem::exists(fsPath)) {
-    std::cout << "[CreateContext] File does not exist: " << fsPath << std::endl;
+    std::cerr << "[CreateContext] File does not exist: " << fsPath << std::endl;
     throw Napi::Error::New(env, "Model file not found: " + fsPath);
   }
 
   size_t fileSize = liblloyal_node::FileSystem::getSize(fsPath);
-  std::cout << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
+  std::cerr << "[CreateContext] File validated: " << fsPath << " (" << fileSize << " bytes)" << std::endl;
 
   // Load model on main thread
-  std::cout << "[CreateContext] Loading model..." << std::endl;
+  std::cerr << "[CreateContext] Loading model..." << std::endl;
 
   llama_model_params model_params = llama_model_default_params();
   // -1 = offload all layers to GPU (auto-detect), 0 = CPU only
   model_params.n_gpu_layers = -1;
 
-  std::cout << "[CreateContext] Acquiring from ModelRegistry..." << std::endl;
+  std::cerr << "[CreateContext] Acquiring from ModelRegistry..." << std::endl;
   auto sharedModel = lloyal::ModelRegistry::acquire(fsPath, model_params);
 
   if (!sharedModel) {
     throw Napi::Error::New(env, "Failed to load model from " + fsPath);
   }
 
-  std::cout << "[CreateContext] Model loaded (refcount: " << sharedModel.use_count() << ")" << std::endl;
+  std::cerr << "[CreateContext] Model loaded (refcount: " << sharedModel.use_count() << ")" << std::endl;
 
   // Create context
   llama_context_params ctx_params = llama_context_default_params();
@@ -1753,13 +1775,15 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   ctx_params.n_ubatch = static_cast<uint32_t>(nBatch);
   ctx_params.n_threads = static_cast<uint32_t>(nThreads);
   ctx_params.n_seq_max = static_cast<uint32_t>(nSeqMax);
+  ctx_params.type_k = typeK;
+  ctx_params.type_v = typeV;
   ctx_params.kv_unified = true;  // Share KV across sequences (efficient for branching)
 
   // Apply embedding-specific params
   ctx_params.embeddings = embeddingsMode;
   ctx_params.pooling_type = static_cast<enum llama_pooling_type>(poolingType);
 
-  std::cout << "[CreateContext] Creating context (embeddings=" << embeddingsMode
+  std::cerr << "[CreateContext] Creating context (embeddings=" << embeddingsMode
             << ", pooling=" << poolingType << ")..." << std::endl;
   llama_context* ctx = llama_init_from_model(sharedModel.get(), ctx_params);
 
@@ -1767,7 +1791,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "Failed to create context");
   }
 
-  std::cout << "[CreateContext] Context created successfully" << std::endl;
+  std::cerr << "[CreateContext] Context created successfully" << std::endl;
 
   // Create SessionContext instance
   Napi::Function ctor = env.GetInstanceData<Napi::FunctionReference>()->Value();
@@ -1777,7 +1801,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   // Initialize
   obj->initializeContext(std::move(sharedModel), ctx, nBatch);
 
-  std::cout << "[CreateContext] SessionContext initialized" << std::endl;
+  std::cerr << "[CreateContext] SessionContext initialized" << std::endl;
   return instance;
 }
 

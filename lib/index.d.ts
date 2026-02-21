@@ -32,6 +32,16 @@
 export type GpuVariant = 'default' | 'cuda' | 'vulkan';
 
 /**
+ * Supported KV cache quantization types
+ *
+ * Matches llama.cpp CLI `-ctk` / `-ctv` flags.
+ * Lower precision = less GPU memory, slight quality tradeoff.
+ *
+ * @category Core
+ */
+export type KvCacheType = 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1';
+
+/**
  * Options for binary loading
  *
  * Controls which native binary variant is loaded when creating a context.
@@ -76,6 +86,8 @@ export enum PoolingType {
   CLS = 2,
   /** Last token pooling - use last token embedding */
   LAST = 3,
+  /** Rank pooling - classification head output for reranking models */
+  RANK = 4,
 }
 
 /**
@@ -142,6 +154,27 @@ export interface ContextOptions {
    * Default: 1 (single sequence)
    */
   nSeqMax?: number;
+
+  /**
+   * KV cache data type for keys
+   *
+   * Quantize the key cache to reduce GPU memory. For a Q4_K_M model,
+   * F16 cache wastes precision — Q8_0 halves memory with minimal quality loss.
+   *
+   * Memory at nCtx=8192 (Qwen3-4B, 36 layers, 8 KV heads, 128 dim):
+   *   f16:  1152 MB    q8_0: ~576 MB    q4_0: ~288 MB
+   *
+   * Default: 'f16'
+   */
+  typeK?: KvCacheType;
+
+  /**
+   * KV cache data type for values
+   *
+   * Same options as typeK. V cache is slightly more quality-sensitive than K.
+   * Default: 'f16'
+   */
+  typeV?: KvCacheType;
 }
 
 /**
