@@ -81,6 +81,7 @@ export async function research(ctx: SessionContext, store: BranchStore, opts: {
       const suffixTokens = fullTokens.slice(sharedTokens.length);
 
       agents.push({
+        agentId: branch.handle,
         branch,
         suffixTokens,
         fmt: {

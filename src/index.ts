@@ -39,7 +39,7 @@ import type {
 
 import { Branch } from './Branch';
 import { BranchStore } from './BranchStore';
-import { Session } from './Session';
+import { Session, buildUserDelta, buildToolResultDelta } from './Session';
 import { forkAgent, runAgents } from './Agent';
 
 /**
@@ -250,7 +250,7 @@ export const createContext = async (
   return binary.createContext(options);
 };
 
-export { Branch, BranchStore, Session, forkAgent, runAgents };
+export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, forkAgent, runAgents };
 export { PoolingType, ChatFormat, ReasoningFormat, GrammarTriggerType } from './types';
 export type {
   GpuVariant,

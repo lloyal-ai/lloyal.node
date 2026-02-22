@@ -3,6 +3,52 @@ import type { BranchStore } from './BranchStore';
 import type { SessionContext } from './types';
 
 /**
+ * Build token delta for a user turn (sep + formatChat + tokenize)
+ *
+ * Usable with any branch — not tied to Session's trunk. This is the
+ * canonical way to build a user-turn delta for warm prefill.
+ *
+ * @category Branching
+ */
+export async function buildUserDelta(
+  ctx: SessionContext,
+  content: string,
+  opts: { tools?: string } = {}
+): Promise<number[]> {
+  const sep = ctx.getTurnSeparator();
+  const fmtOpts = opts.tools ? { tools: opts.tools } : {};
+  const { prompt } = await ctx.formatChat(
+    JSON.stringify([{ role: 'system', content: '' }, { role: 'user', content }]),
+    fmtOpts
+  );
+  const delta = await ctx.tokenize(prompt, false);
+  return [...sep, ...delta];
+}
+
+/**
+ * Build token delta for a tool result turn (sep + formatChat + tokenize)
+ *
+ * Usable with any branch — not tied to Session's trunk.
+ *
+ * @category Branching
+ */
+export async function buildToolResultDelta(
+  ctx: SessionContext,
+  resultStr: string,
+  callId: string
+): Promise<number[]> {
+  const sep = ctx.getTurnSeparator();
+  const { prompt } = await ctx.formatChat(
+    JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'tool', content: resultStr, tool_call_id: callId },
+    ])
+  );
+  const delta = await ctx.tokenize(prompt, false);
+  return [...sep, ...delta];
+}
+
+/**
  * Session - Trunk lifecycle + conversation delta helpers
  *
  * Owns the current "trunk" branch and provides promote() to crown a winner,
@@ -77,39 +123,22 @@ export class Session {
   /**
    * Prefill a user turn into trunk
    *
-   * Centralizes: sep + formatChat([system:'', user:content]) + tokenize(false) + prefill
-   *
    * @param content - User message content
    * @param opts - Optional tools JSON string
    */
   async prefillUser(content: string, opts: { tools?: string } = {}): Promise<void> {
-    const sep = this._ctx.getTurnSeparator();
-    const fmtOpts = opts.tools ? { tools: opts.tools } : {};
-    const { prompt } = await this._ctx.formatChat(
-      JSON.stringify([{ role: 'system', content: '' }, { role: 'user', content }]),
-      fmtOpts
-    );
-    const delta = await this._ctx.tokenize(prompt, false);
-    await this._trunk!.prefill([...sep, ...delta]);
+    const tokens = await buildUserDelta(this._ctx, content, opts);
+    await this._trunk!.prefill(tokens);
   }
 
   /**
    * Prefill a tool result turn into trunk
    *
-   * Centralizes: sep + formatChat([system:'', tool:result]) + tokenize(false) + prefill
-   *
    * @param resultStr - JSON-stringified tool result
    * @param callId - Tool call ID
    */
   async prefillToolResult(resultStr: string, callId: string): Promise<void> {
-    const sep = this._ctx.getTurnSeparator();
-    const { prompt } = await this._ctx.formatChat(
-      JSON.stringify([
-        { role: 'system', content: '' },
-        { role: 'tool', content: resultStr, tool_call_id: callId },
-      ])
-    );
-    const delta = await this._ctx.tokenize(prompt, false);
-    await this._trunk!.prefill([...sep, ...delta]);
+    const tokens = await buildToolResultDelta(this._ctx, resultStr, callId);
+    await this._trunk!.prefill(tokens);
   }
 }

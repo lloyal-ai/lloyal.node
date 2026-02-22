@@ -129,22 +129,23 @@ async function main(): Promise<void> {
   const session = new Session({ ctx, store });
 
   // Tool call display — shared across cold + warm paths
-  const onToolCall = (ai: number, toolName: string, argsStr: string): void => {
-    emit('tool_call', { agentIndex: ai, toolName, arguments: argsStr });
+  // agentId = branch handle — stable identifier, useful for C++/KV-level debugging
+  const onToolCall = (agentId: number, toolName: string, argsStr: string): void => {
+    emit('tool_call', { agentId, toolName, arguments: argsStr });
     let toolArgs: Record<string, string>;
     try { toolArgs = JSON.parse(argsStr); } catch { toolArgs = {}; }
     const argSummary = toolName === 'search'
       ? `"${toolArgs.query || ''}"`
       : toolName === 'report' ? ''
       : `${toolArgs.filename}` + (toolArgs.startLine ? ` L${toolArgs.startLine}-${toolArgs.endLine}` : '');
-    log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+    log(`    ${c.dim}├${c.reset} ${c.yellow}${agentId}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
   };
-  const onToolResult = (ai: number, toolName: string, resultStr: string): void => {
+  const onToolResult = (agentId: number, toolName: string, resultStr: string): void => {
     emit('tool_result', {
-      agentIndex: ai, toolName,
+      agentId, toolName,
       result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr,
     });
-    log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.dim}← ${toolName} ${resultStr.length}b${c.reset}`);
+    log(`    ${c.dim}├${c.reset} ${c.yellow}${agentId}${c.reset} ${c.dim}← ${toolName} ${resultStr.length}b${c.reset}`);
   };
 
   // ================================================================

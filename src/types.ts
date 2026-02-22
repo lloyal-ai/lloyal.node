@@ -1461,6 +1461,9 @@ export interface AgentTask {
  * @category Branching
  */
 export interface AgentState {
+  /** Stable identifier — the branch handle. Survives reordering, useful for
+   *  keying pending-tool maps and correlating with C++ / KV-level diagnostics. */
+  agentId: number;
   /** The agent's branch */
   branch: Branch;
   /** Tokens to prefill before the loop starts */
@@ -1500,12 +1503,12 @@ export interface RunAgentsOptions {
   executeTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Maximum tool-call turns per agent (default: 6) */
   maxTurns?: number;
-  /** Called when an agent dispatches a tool call */
-  onToolCall?: (agentIndex: number, toolName: string, args: string) => void;
-  /** Called when a tool result returns */
-  onToolResult?: (agentIndex: number, toolName: string, resultStr: string) => void;
-  /** Called when an agent submits a report */
-  onReport?: (agentIndex: number, findings: string) => void;
+  /** Called when an agent dispatches a tool call (agentId = branch handle) */
+  onToolCall?: (agentId: number, toolName: string, args: string) => void;
+  /** Called when a tool result returns (agentId = branch handle) */
+  onToolResult?: (agentId: number, toolName: string, resultStr: string) => void;
+  /** Called when an agent submits a report (agentId = branch handle) */
+  onReport?: (agentId: number, findings: string) => void;
 }
 
 /**

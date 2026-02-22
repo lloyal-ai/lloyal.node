@@ -7,6 +7,7 @@ import type {
   RunAgentsResult,
   SessionContext,
 } from './types';
+import { buildToolResultDelta } from './Session';
 
 /**
  * Fork an agent from a parent branch with its own system prompt + task
@@ -48,6 +49,7 @@ export async function forkAgent(
   const suffixTokens = [...sep, ...await ctx.tokenize(fmt.prompt, false)];
   if (task.seed != null) branch.reseedSampler(task.seed);
   return {
+    agentId: branch.handle,
     branch,
     suffixTokens,
     fmt: {
@@ -81,7 +83,7 @@ export async function forkAgent(
  *   store, ctx,
  *   executeTool: (name, args) => myToolDispatch(name, args),
  *   maxTurns: 6,
- *   onToolCall(ai, name, args) { console.log(`Agent ${ai}: ${name}`); },
+ *   onToolCall(agentId, name, args) { console.log(`Agent ${agentId}: ${name}`); },
  * });
  * ```
  *
@@ -92,7 +94,6 @@ export async function runAgents(
   opts: RunAgentsOptions
 ): Promise<RunAgentsResult> {
   const { store, ctx, executeTool, maxTurns = 6, onToolCall, onToolResult, onReport } = opts;
-  const sep = ctx.getTurnSeparator();
 
   let steps = 0;
   let totalToolCalls = 0;
@@ -104,12 +105,13 @@ export async function runAgents(
     idleTicks: 0,
   };
 
+  // Keyed by agentId (= branch handle) — stable across reordering
   const pendingTools = new Map<number, {
-    promise: Promise<{ ai: number; prefillTokens: number[] | null }>;
+    promise: Promise<{ agentId: number; prefillTokens: number[] | null }>;
     name: string;
   }>();
 
-  function dispatchTool(ai: number, w: AgentState, tc: ParsedToolCall): void {
+  function dispatchTool(w: AgentState, tc: ParsedToolCall): void {
     let toolArgs: Record<string, unknown>;
     try { toolArgs = JSON.parse(tc.arguments); } catch { toolArgs = {}; }
     const callId = tc.id || `call_${w.toolCallCount}`;
@@ -118,40 +120,36 @@ export async function runAgents(
     totalToolCalls++;
     w.turns++;
 
-    if (onToolCall) onToolCall(ai, tc.name, tc.arguments);
+    if (onToolCall) onToolCall(w.agentId, tc.name, tc.arguments);
 
     const promise = (async () => {
       try {
         const result = await executeTool(tc.name, toolArgs);
         const resultStr = JSON.stringify(result);
 
-        if (onToolResult) onToolResult(ai, tc.name, resultStr);
+        if (onToolResult) onToolResult(w.agentId, tc.name, resultStr);
 
-        const { prompt } = await ctx.formatChat(
-          JSON.stringify([
-            { role: 'system', content: '' },
-            { role: 'tool', content: resultStr, tool_call_id: callId },
-          ])
-        );
-        const delta = await ctx.tokenize(prompt, false);
-        return { ai, prefillTokens: [...sep, ...delta] as number[] | null };
+        const prefillTokens = await buildToolResultDelta(ctx, resultStr, callId);
+        return { agentId: w.agentId, prefillTokens: prefillTokens as number[] | null };
       } catch (err) {
         w.done = true;
         w.findings = `Tool error: ${(err as Error).message}`;
-        return { ai, prefillTokens: null };
+        return { agentId: w.agentId, prefillTokens: null };
       }
     })();
 
-    pendingTools.set(ai, { promise, name: tc.name });
+    pendingTools.set(w.agentId, { promise, name: tc.name });
     counters.maxConcurrentTools = Math.max(counters.maxConcurrentTools, pendingTools.size);
   }
+
+  // Build agentId → index lookup for SETTLE phase
+  const agentById = new Map(agents.map((w) => [w.agentId, w]));
 
   for (;;) {
     // -- Phase 1: PRODUCE -- sample from active agents
     const entries: [Branch, number][] = [];
-    for (let ai = 0; ai < agents.length; ai++) {
-      const w = agents[ai];
-      if (w.done || pendingTools.has(ai)) continue;
+    for (const w of agents) {
+      if (w.done || pendingTools.has(w.agentId)) continue;
 
       const { token, text, isStop } = w.branch.produceSync();
       if (isStop) {
@@ -173,13 +171,13 @@ export async function runAgents(
           w.done = true;
           w.toolCallCount++;
           totalToolCalls++;
-          if (onToolCall) onToolCall(ai, 'report', tc.arguments);
-          if (onReport) onReport(ai, w.findings!);
+          if (onToolCall) onToolCall(w.agentId, 'report', tc.arguments);
+          if (onReport) onReport(w.agentId, w.findings!);
           continue;
         }
 
         // Fire-and-forget — dispatch tool without blocking the decode loop
-        dispatchTool(ai, w, tc);
+        dispatchTool(w, tc);
         w.rawOutput = '';
         continue;
       }
@@ -197,12 +195,13 @@ export async function runAgents(
 
     // -- Phase 3: SETTLE -- non-blocking check for resolved tools
     const prefillPairs: [Branch, number[]][] = [];
-    for (const [ai, info] of pendingTools) {
+    for (const [id, info] of pendingTools) {
       const result = await Promise.race([info.promise, Promise.resolve(null)]);
       if (result !== null) {
-        pendingTools.delete(ai);
+        pendingTools.delete(id);
         if (result.prefillTokens) {
-          prefillPairs.push([agents[result.ai].branch, result.prefillTokens]);
+          const w = agentById.get(result.agentId)!;
+          prefillPairs.push([w.branch, result.prefillTokens]);
         }
       }
     }
