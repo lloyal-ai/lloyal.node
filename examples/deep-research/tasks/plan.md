@@ -1,0 +1,1 @@
+Break this into {{count}} independent sub-questions for parallel research: "{{query}}"
