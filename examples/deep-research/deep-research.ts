@@ -19,7 +19,7 @@
  * dispatches per step, regardless of branch count.
  *
  * Usage:
- *   node deep-research.mjs <model-path> --corpus <path> --query <text> [options]
+ *   node deep-research.ts <model-path> --corpus <path> --query <text> [options]
  *
  * Required:
  *   <model-path>     Path to generative model (e.g. Qwen3-4B-Instruct)
@@ -32,16 +32,22 @@
  *   --verbose        Show native llama.cpp logs
  *
  * Example:
- *   node deep-research.mjs ./models/Qwen3-4B.gguf \
+ *   node deep-research.ts ./models/Qwen3-4B.gguf \
  *     --corpus ~/docs --query "How does the auth system work?"
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import {
+  createContext, Branch, BranchStore, Session, forkAgent, runAgents,
+} from '../../dist/index.js';
+import type { SessionContext, AgentState } from '../../dist/index.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// ================================================================
+// CLI ARGS
+// ================================================================
+
 const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
@@ -55,7 +61,7 @@ const args = process.argv.slice(2);
 const jsonlMode = args.includes('--jsonl');
 const verbose = args.includes('--verbose');
 
-function argVal(flag) {
+function argVal(flag: string): string | null {
   const i = args.indexOf(flag);
   return i !== -1 ? args[i + 1] : null;
 }
@@ -79,7 +85,7 @@ if (!corpusDir || !QUERY) {
     !QUERY && '--query',
   ].filter(Boolean);
   process.stdout.write(
-    `Usage: node deep-research.mjs [model-path] --corpus <path> --query <text> [--reranker <path>]\n` +
+    `Usage: node deep-research.ts [model-path] --corpus <path> --query <text> [--reranker <path>]\n` +
     `Missing: ${missing.join(', ')}\n`
   );
   process.exit(1);
@@ -108,9 +114,9 @@ const c = isTTY ? {
   green: '\x1b[32m', cyan: '\x1b[36m', yellow: '\x1b[33m', red: '\x1b[31m',
 } : { bold: '', dim: '', reset: '', green: '', cyan: '', yellow: '', red: '' };
 
-const log = (...a) => { if (!jsonlMode) console.log(...a); };
+const log = (...a: unknown[]): void => { if (!jsonlMode) console.log(...a); };
 
-function emit(event, data) {
+function emit(event: string, data: Record<string, unknown>): void {
   if (jsonlMode) console.log(JSON.stringify({ event, ...data }));
 }
 
@@ -126,23 +132,27 @@ const MAX_TOOL_TURNS = 6;
 // CORPUS — load and chunk at ## boundaries
 // ================================================================
 
-function loadCorpus() {
-  if (!fs.existsSync(corpusDir)) {
+interface CorpusFile { name: string; content: string }
+interface Chunk { file: string; heading: string; text: string; tokens: number[] }
+interface SubChunk { heading: string; text: string }
+
+function loadCorpus(): CorpusFile[] {
+  if (!fs.existsSync(corpusDir!)) {
     process.stdout.write(`Error: corpus not found: ${corpusDir}\n`);
     process.exit(1);
   }
-  const stat = fs.statSync(corpusDir);
+  const stat = fs.statSync(corpusDir!);
   if (stat.isFile()) {
-    return [{ name: path.basename(corpusDir), content: fs.readFileSync(corpusDir, 'utf8') }];
+    return [{ name: path.basename(corpusDir!), content: fs.readFileSync(corpusDir!, 'utf8') }];
   }
-  const files = fs.readdirSync(corpusDir).filter((f) => f.endsWith('.md'));
+  const files = fs.readdirSync(corpusDir!).filter((f) => f.endsWith('.md'));
   if (!files.length) {
     process.stdout.write(`Error: no .md files in: ${corpusDir}\n`);
     process.exit(1);
   }
   return files.map((f) => ({
     name: f,
-    content: fs.readFileSync(path.join(corpusDir, f), 'utf8'),
+    content: fs.readFileSync(path.join(corpusDir!, f), 'utf8'),
   }));
 }
 
@@ -151,32 +161,32 @@ function loadCorpus() {
 // With reranker nCtx=8192: budget ≈ 8000 tokens × 3 = 24000 chars.
 const CHUNK_CHAR_LIMIT = 24000;
 
-function chunkCorpus(files) {
-  const out = [];
+function chunkCorpus(files: CorpusFile[]): Chunk[] {
+  const out: Chunk[] = [];
   for (const file of files) {
     for (const section of file.content.split(/(?=^## )/m)) {
-      const heading = (section.match(/^##?\s+(.+)/m) || [, file.name])[1];
+      const heading = (section.match(/^##?\s+(.+)/m) || [, file.name])[1]!;
       const trimmed = section.trim();
       if (trimmed.length <= CHUNK_CHAR_LIMIT) {
-        out.push({ file: file.name, heading, text: trimmed });
+        out.push({ file: file.name, heading, text: trimmed, tokens: [] });
         continue;
       }
       // Sub-split oversized sections: ### → paragraph → hard truncate
       for (const sub of subChunk(trimmed, heading)) {
-        out.push({ file: file.name, heading: sub.heading, text: sub.text });
+        out.push({ file: file.name, heading: sub.heading, text: sub.text, tokens: [] });
       }
     }
   }
   return out;
 }
 
-function subChunk(text, parentHeading) {
+function subChunk(text: string, parentHeading: string): SubChunk[] {
   // Try splitting at ### boundaries first
   const subSections = text.split(/(?=^### )/m);
   if (subSections.length > 1) {
-    const results = [];
+    const results: SubChunk[] = [];
     for (const sub of subSections) {
-      const subHeading = (sub.match(/^###?\s+(.+)/m) || [, parentHeading])[1];
+      const subHeading = (sub.match(/^###?\s+(.+)/m) || [, parentHeading])[1]!;
       const trimmed = sub.trim();
       if (trimmed.length <= CHUNK_CHAR_LIMIT) {
         results.push({ heading: subHeading, text: trimmed });
@@ -191,9 +201,9 @@ function subChunk(text, parentHeading) {
   return splitByParagraph(text, parentHeading);
 }
 
-function splitByParagraph(text, heading) {
+function splitByParagraph(text: string, heading: string): SubChunk[] {
   const paragraphs = text.split(/\n\n+/);
-  const results = [];
+  const results: SubChunk[] = [];
   let current = '';
   let partIndex = 0;
 
@@ -220,7 +230,7 @@ function splitByParagraph(text, heading) {
 }
 
 const corpus = loadCorpus();
-const chunks = chunkCorpus(corpus);
+const chunks: Chunk[] = chunkCorpus(corpus);
 
 // ================================================================
 // RERANKER — Qwen3-Reranker cross-encoder scoring via Branch API
@@ -238,16 +248,16 @@ const RERANK_PREFIX =
 const RERANK_MID = '\n\n<Document>: ';
 const RERANK_SUFFIX = '<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n';
 
-let rerankCtx = null;
+let rerankCtx: SessionContext | null = null;
 let yesId = 0;
 let noId = 0;
 
 // Pre-tokenized template segments — populated after reranker loads.
-let rerankPrefixTokens = null; // RERANK_PREFIX (with BOS)
-let rerankMidTokens = null;    // RERANK_MID
-let rerankSuffixTokens = null; // RERANK_SUFFIX
+let rerankPrefixTokens: number[] | null = null; // RERANK_PREFIX (with BOS)
+let rerankMidTokens: number[] | null = null;    // RERANK_MID
+let rerankSuffixTokens: number[] | null = null; // RERANK_SUFFIX
 
-function rerankScore(logits) {
+function rerankScore(logits: Float32Array): number {
   const max = Math.max(logits[yesId], logits[noId]);
   const yesExp = Math.exp(logits[yesId] - max);
   const noExp = Math.exp(logits[noId] - max);
@@ -258,20 +268,22 @@ function rerankScore(logits) {
 // TOOLS — reranker-backed search + snippet extraction
 // ================================================================
 
-async function toolSearch(query) {
-  const queryTokens = await rerankCtx.tokenize(query, false);
-  const scored = [];
+interface ScoredChunk { file: string; heading: string; score: number }
+
+async function toolSearch(query: string): Promise<ScoredChunk[]> {
+  const queryTokens = await rerankCtx!.tokenize(query, false);
+  const scored: ScoredChunk[] = [];
   for (const chunk of chunks) {
     // Pre-tokenized segments — no string concat, no per-chunk tokenize().
     // Boundary safety: all joints are at special tokens or newlines,
     // which are explicit token boundaries in Qwen3's BPE vocabulary.
     const tokens = [
-      ...rerankPrefixTokens, ...queryTokens,
-      ...rerankMidTokens, ...chunk.tokens,
-      ...rerankSuffixTokens,
+      ...rerankPrefixTokens!, ...queryTokens,
+      ...rerankMidTokens!, ...chunk.tokens,
+      ...rerankSuffixTokens!,
     ];
     // Fresh branch per chunk — position must start at 0 each time.
-    const branch = Branch.create(rerankCtx, 0, { temperature: 0 });
+    const branch = Branch.create(rerankCtx!, 0, { temperature: 0 });
     await branch.prefill(tokens);
     const score = rerankScore(branch.getLogits());
     await branch.prune();
@@ -280,7 +292,14 @@ async function toolSearch(query) {
   return scored.sort((a, b) => b.score - a.score).slice(0, 5);
 }
 
-function toolReadFile(filename, query) {
+interface ReadFileResult {
+  file: string;
+  content?: string;
+  snippets?: string[];
+  error?: string;
+}
+
+function toolReadFile(filename: string, query: string): ReadFileResult | { error: string } {
   const file = corpus.find((f) => f.name === filename);
   if (!file) {
     return { error: `File not found: ${filename}. Available: ${corpus.map((f) => f.name).join(', ')}` };
@@ -288,8 +307,8 @@ function toolReadFile(filename, query) {
   if (!query) return { file: file.name, content: file.content.slice(0, 800) };
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   const lines = file.content.split('\n');
-  const snippets = [];
-  const seen = new Set();
+  const snippets: string[] = [];
+  const seen = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
     if (!terms.some((t) => lines[i].toLowerCase().includes(t))) continue;
     const start = Math.max(0, i - 1);
@@ -304,12 +323,15 @@ function toolReadFile(filename, query) {
     : { file: file.name, snippets: ['No matches for: ' + query] };
 }
 
-async function executeTool(name, toolArgs) {
+async function executeTool(name: string, toolArgs: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case 'search':
-      return toolSearch(toolArgs.query || '');
+      return toolSearch((toolArgs.query as string) || '');
     case 'read_file':
-      return toolReadFile(toolArgs.filename || toolArgs.path || '', toolArgs.query || '');
+      return toolReadFile(
+        (toolArgs.filename as string) || (toolArgs.path as string) || '',
+        (toolArgs.query as string) || ''
+      );
     case 'report':
       return { acknowledged: true };
     default:
@@ -371,9 +393,9 @@ const AGENT_SYSTEM_PROMPT =
 // HELPERS
 // ================================================================
 
-const sec = (a, b) => ((b - a) / 1000).toFixed(1);
-const pad = (s, n) => String(s).padStart(n);
-const fmtSize = (bytes) => bytes > 1e9
+const sec = (a: number, b: number): string => ((b - a) / 1000).toFixed(1);
+const pad = (s: unknown, n: number): string => String(s).padStart(n);
+const fmtSize = (bytes: number): string => bytes > 1e9
   ? (bytes / 1e9).toFixed(1) + ' GB'
   : (bytes / 1e6).toFixed(0) + ' MB';
 
@@ -381,10 +403,15 @@ const fmtSize = (bytes) => bytes > 1e9
 // MAIN
 // ================================================================
 
-// Dynamic import — native module loads here, after fd 2 redirect
-const { createContext, Branch, BranchStore, Session, forkAgent, runAgents } = await import('../../lib/index.js');
+interface Attempt {
+  branch: InstanceType<typeof Branch>;
+  output: string;
+  done: boolean;
+  tokenCount: number;
+  ppl: number;
+}
 
-async function main() {
+async function main(): Promise<void> {
   const t0 = performance.now();
 
   const modelName = path.basename(modelPath).replace(/-Q\w+\.gguf$/, '');
@@ -399,7 +426,7 @@ async function main() {
   emit('start', {
     model: path.basename(modelPath),
     reranker: path.basename(rerankModelPath),
-    query: QUERY,
+    query: QUERY!,
     agentCount: AGENT_COUNT,
     verifyCount: VERIFY_COUNT,
     chunks: chunks.length,
@@ -437,10 +464,10 @@ async function main() {
     chunk.tokens = await rerankCtx.tokenize(chunk.text, false);
   }
 
-  const corpusIsFile = corpus.length === 1 && fs.statSync(corpusDir).isFile();
+  const corpusIsFile = corpus.length === 1 && fs.statSync(corpusDir!).isFile();
   const corpusLabel = corpusIsFile
-    ? path.basename(corpusDir)
-    : `${path.basename(corpusDir)}/ — ${corpus.length} files`;
+    ? path.basename(corpusDir!)
+    : `${path.basename(corpusDir!)}/ — ${corpus.length} files`;
   log(`  ${c.dim}  Corpus: ${corpusLabel} → ${chunks.length} chunks${c.reset}`);
 
   const store = new BranchStore(ctx);
@@ -486,7 +513,7 @@ async function main() {
   }
   await lead.prune();
 
-  let questions;
+  let questions: string[];
   try {
     const plan = JSON.parse(planOutput);
     questions = plan.questions.slice(0, AGENT_COUNT);
@@ -519,7 +546,7 @@ async function main() {
   await agentRoot.prefill(sharedTokens);
 
   // Fork N agents, compute divergent suffixes via token slicing
-  const agents = [];
+  const agents: AgentState[] = [];
   for (const q of questions) {
     const branch = await agentRoot.fork();
 
@@ -568,14 +595,14 @@ async function main() {
   // via batched decode (one llama_decode per commit/prefill), but individual
   // Branch.prefill calls on rerankCtx bypass that.
   let rerankLock = Promise.resolve();
-  function withRerankLock(fn) {
+  function withRerankLock<T>(fn: () => Promise<T>): Promise<T> {
     const prev = rerankLock;
-    let release;
+    let release: () => void;
     rerankLock = new Promise((r) => { release = r; });
-    return prev.then(fn).finally(release);
+    return prev.then(fn).finally(release!);
   }
 
-  const executeToolLocked = (name, args) =>
+  const executeToolLocked = (name: string, args: Record<string, unknown>): Promise<unknown> =>
     name === 'search'
       ? withRerankLock(() => executeTool(name, args))
       : executeTool(name, args);
@@ -585,9 +612,9 @@ async function main() {
       store, ctx,
       executeTool: executeToolLocked,
       maxTurns: MAX_TOOL_TURNS,
-      onToolCall(ai, toolName, args) {
+      onToolCall(ai: number, toolName: string, args: string) {
         emit('tool_call', { agentIndex: ai, toolName, arguments: args });
-        let toolArgs;
+        let toolArgs: Record<string, string>;
         try { toolArgs = JSON.parse(args); } catch { toolArgs = {}; }
         const argSummary = toolName === 'search'
           ? `"${toolArgs.query || ''}"`
@@ -595,7 +622,7 @@ async function main() {
           : toolArgs.filename + (toolArgs.query ? `, "${toolArgs.query}"` : '');
         log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
       },
-      onToolResult(ai, toolName, resultStr) {
+      onToolResult(ai: number, toolName: string, resultStr: string) {
         emit('tool_result', {
           agentIndex: ai, toolName,
           result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr,
@@ -607,7 +634,7 @@ async function main() {
   for (let i = 0; i < agents.length; i++) {
     const w = agents[i];
     const isLast = i === agents.length - 1;
-    const branch = isLast ? '└' : '├';
+    const branchChar = isLast ? '└' : '├';
 
     emit('agent_done', {
       index: i,
@@ -618,7 +645,7 @@ async function main() {
       tokenCount: w.tokenCount,
     });
 
-    log(`    ${c.dim}${branch}${c.reset} ${c.yellow}${i}${c.reset} ${c.green}done${c.reset} ${c.dim}${w.tokenCount} tok · ${w.toolCallCount} tools${c.reset}`);
+    log(`    ${c.dim}${branchChar}${c.reset} ${c.yellow}${i}${c.reset} ${c.green}done${c.reset} ${c.dim}${w.tokenCount} tok · ${w.toolCallCount} tools${c.reset}`);
 
     await w.branch.prune();
   }
@@ -653,7 +680,7 @@ async function main() {
   log();
   log(`  ${c.green}●${c.reset} ${c.bold}Verify${c.reset} ${c.dim}${VERIFY_COUNT} attempts · shared prefix ${synthTokens.length} tok${c.reset}`);
 
-  const attempts = [];
+  const attempts: Attempt[] = [];
   for (let i = 0; i < VERIFY_COUNT; i++) {
     const branch = await synthRoot.fork();
     branch.reseedSampler(2000 + i);
@@ -663,7 +690,7 @@ async function main() {
 
   let verifySteps = 0;
   for (;;) {
-    const entries = [];
+    const entries: [InstanceType<typeof Branch>, number][] = [];
     for (const a of attempts) {
       if (a.done) continue;
       const { token, text, isStop } = a.branch.produceSync();
@@ -685,7 +712,7 @@ async function main() {
   const totalVerifyTokens = attempts.reduce((s, a) => s + a.tokenCount, 0);
   for (let i = 0; i < attempts.length; i++) {
     const isLast = i === attempts.length - 1;
-    const branch = isLast ? '└' : '├';
+    const branchChar = isLast ? '└' : '├';
 
     emit('attempt_done', {
       index: i,
@@ -694,7 +721,7 @@ async function main() {
       ppl: attempts[i].ppl,
     });
 
-    log(`    ${c.dim}${branch} ${attempts[i].tokenCount} tok · ppl ${attempts[i].ppl.toFixed(2)}${c.reset}`);
+    log(`    ${c.dim}${branchChar} ${attempts[i].tokenCount} tok · ppl ${attempts[i].ppl.toFixed(2)}${c.reset}`);
   }
 
   // Pick lowest perplexity synthesis (most coherent) — same as best-of-n.mjs
@@ -746,7 +773,7 @@ async function main() {
   }
   await evalBranch.prune();
 
-  let converged;
+  let converged: boolean | null;
   try {
     converged = JSON.parse(evalOutput).converged;
   } catch {
@@ -812,7 +839,7 @@ async function main() {
   if (jsonlMode) {
     await bestAttempt.branch.prune();
     await synthRoot.prune();
-    rerankCtx.dispose();
+    rerankCtx!.dispose();
     ctx.dispose();
     return;
   }
@@ -829,28 +856,28 @@ async function main() {
   log(`  ${c.dim}Ask a follow-up question or /quit to exit${c.reset}`);
   log();
 
-  await new Promise((resolve) => {
+  await new Promise<void>((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     let exiting = false;
     let generating = false;
     let eofWhileGenerating = false;
 
-    async function exit() {
+    async function exit(): Promise<void> {
       if (exiting) return;
       exiting = true;
       rl.close();
       await session.dispose();
-      rerankCtx.dispose();
+      rerankCtx!.dispose();
       ctx.dispose();
       resolve();
     }
 
-    const ask = () => {
+    const ask = (): void => {
       if (exiting) return;
       rl.question(`  ${c.dim}>${c.reset} `, handleInput);
     };
 
-    async function handleInput(input) {
+    async function handleInput(input: string): Promise<void> {
       try {
       const trimmed = input.trim();
       if (!trimmed || trimmed === '/quit') {
@@ -865,9 +892,9 @@ async function main() {
       // naturally), gets reseeded for search diversity.
       log(`  ${c.dim}  researching...${c.reset}`);
 
-      const followUpAgents = [];
+      const followUpAgents: AgentState[] = [];
       for (let i = 0; i < AGENT_COUNT; i++) {
-        const agent = await forkAgent(session.trunk, {
+        const agent = await forkAgent(session.trunk!, {
           systemPrompt: AGENT_SYSTEM_PROMPT,
           content: trimmed,
           tools: TOOLS_JSON,
@@ -884,9 +911,9 @@ async function main() {
         store, ctx,
         executeTool: executeToolLocked,
         maxTurns: MAX_TOOL_TURNS,
-        onToolCall(ai, toolName, args) {
+        onToolCall(ai: number, toolName: string, args: string) {
           emit('tool_call', { agentIndex: ai, toolName, arguments: args });
-          let toolArgs;
+          let toolArgs: Record<string, string>;
           try { toolArgs = JSON.parse(args); } catch { toolArgs = {}; }
           const argSummary = toolName === 'search'
             ? `"${toolArgs.query || ''}"`
@@ -894,7 +921,7 @@ async function main() {
             : toolArgs.filename + (toolArgs.query ? `, "${toolArgs.query}"` : '');
           log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
         },
-        onToolResult(ai, toolName, resultStr) {
+        onToolResult(ai: number, toolName: string, resultStr: string) {
           emit('tool_result', { agentIndex: ai, toolName,
             result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr });
           log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.dim}← ${toolName} ${resultStr.length}b${c.reset}`);
@@ -921,7 +948,7 @@ async function main() {
 
       // Generate grounded response
       process.stdout.write(`  ${c.dim}<${c.reset} `);
-      for await (const { text } of session.trunk) {
+      for await (const { text } of session.trunk!) {
         process.stdout.write(text);
       }
       console.log('\n');
@@ -934,7 +961,7 @@ async function main() {
         ask();
       }
       } catch (err) {
-        log(`  ${c.red}Error: ${err.message}${c.reset}`);
+        log(`  ${c.red}Error: ${(err as Error).message}${c.reset}`);
         generating = false;
         ask();
       }
@@ -951,8 +978,8 @@ async function main() {
   });
 }
 
-main().catch((err) => {
+main().catch((err: unknown) => {
   // stderr is redirected in quiet mode — use stdout for errors
-  process.stdout.write(`Error: ${err.message}\n${err.stack}\n`);
+  process.stdout.write(`Error: ${(err as Error).message}\n${(err as Error).stack}\n`);
   process.exit(1);
 });

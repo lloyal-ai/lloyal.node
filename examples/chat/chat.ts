@@ -3,8 +3,8 @@
  * Simple chat example using lloyal.node
  *
  * Usage:
- *   node chat.mjs /path/to/model.gguf
- *   node chat.mjs  # uses default model path
+ *   npx tsx chat.ts /path/to/model.gguf
+ *   npx tsx chat.ts  # uses default model path
  *
  * This example demonstrates:
  * - Branch API for token generation (produce/commit two-phase)
@@ -15,23 +15,22 @@
 
 import * as readline from "node:readline";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, Branch } from "../../lib/index.js";
+import { createContext, Branch } from "../../dist/index.js";
+import type { SessionContext, FormattedChatResult } from "../../dist/index.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
   __dirname,
   "../../models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
 );
 
-async function main() {
+async function main(): Promise<void> {
   const modelPath = process.argv[2] || DEFAULT_MODEL;
 
   console.log(`Loading model: ${modelPath}`);
   console.log("This may take a moment...\n");
 
   const nCtx = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
-  const ctx = await createContext({
+  const ctx: SessionContext = await createContext({
     modelPath,
     nCtx,
     threads: 4,
@@ -40,19 +39,19 @@ async function main() {
   console.log("Model loaded! Type your message and press Enter.");
   console.log("Commands: /clear to reset, /quit to exit\n");
 
-  const messages = [];
-  let branch = null;
-  let fmt = null;
-  const sep = ctx.getTurnSeparator();
+  const messages: Array<{role: string; content: string; reasoning_content?: string}> = [];
+  let branch: InstanceType<typeof Branch> | null = null;
+  let fmt: FormattedChatResult | null = null;
+  const sep: number[] = ctx.getTurnSeparator();
 
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
-  const askUser = () => rl.question("> ", handleInput);
+  const askUser = (): void => { rl.question("> ", handleInput); };
 
-  async function handleInput(input) {
+  async function handleInput(input: string): Promise<void> {
     const trimmed = input.trim();
 
     if (trimmed === "/quit" || trimmed === "/exit") {
@@ -111,13 +110,13 @@ async function main() {
     console.log("\n");
 
     // Parse output: separates reasoning from content for thinking models
-    const parsed = ctx.parseChatOutput(rawOutput, fmt.format, {
-      reasoningFormat: fmt.reasoningFormat,
-      thinkingForcedOpen: fmt.thinkingForcedOpen,
-      parser: fmt.parser,
+    const parsed = ctx.parseChatOutput(rawOutput, fmt!.format, {
+      reasoningFormat: fmt!.reasoningFormat,
+      thinkingForcedOpen: fmt!.thinkingForcedOpen,
+      parser: fmt!.parser,
     });
 
-    const msg = { role: "assistant", content: parsed.content };
+    const msg: {role: string; content: string; reasoning_content?: string} = { role: "assistant", content: parsed.content };
     if (parsed.reasoningContent) {
       msg.reasoning_content = parsed.reasoningContent;
     }
@@ -129,7 +128,7 @@ async function main() {
   askUser();
 }
 
-main().catch((err) => {
-  console.error("Error:", err.message);
+main().catch((err: unknown) => {
+  console.error("Error:", (err as Error).message);
   process.exit(1);
 });

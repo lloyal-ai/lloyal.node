@@ -1,26 +1,42 @@
-/**
- * Agent - forkAgent + runAgents
- *
- * Two exported functions for the agentic loop pattern:
- * - forkAgent: fork from parent, format task, compute suffix tokens
- * - runAgents: three-phase tick loop (PRODUCE -> COMMIT -> SETTLE)
- *
- * Decoupled from Session — takes ctx directly, operates on agent branches.
- * Consumer wires tool dispatch, callbacks, and Session separately.
- */
+import type { Branch } from './Branch';
+import type {
+  AgentState,
+  AgentTask,
+  ParsedToolCall,
+  RunAgentsOptions,
+  RunAgentsResult,
+  SessionContext,
+} from './types';
 
 /**
- * Fork an agent from a parent branch with its own system prompt + task.
+ * Fork an agent from a parent branch with its own system prompt + task
  *
- * Always prepends getTurnSeparator() — forces clean break before agent's
- * system prompt. Returns AgentState ready for store.prefill().
+ * Always prepends getTurnSeparator() for a clean structural break before
+ * the agent's system prompt. Returns AgentState ready for store.prefill().
  *
- * @param {Branch} parent - Branch to fork from
- * @param {{ systemPrompt: string, content: string, tools?: string, seed?: number }} task
- * @param {SessionContext} ctx
- * @returns {Promise<AgentState>}
+ * @param parent - Branch to fork from
+ * @param task - Agent task description
+ * @param ctx - SessionContext for formatting and tokenization
+ * @returns AgentState with branch and suffixTokens
+ *
+ * @example
+ * ```typescript
+ * const agent = await forkAgent(trunk, {
+ *   systemPrompt: 'You are a research assistant.',
+ *   content: 'What is X?',
+ *   tools: toolsJson,
+ *   seed: Date.now(),
+ * }, ctx);
+ * await store.prefill([[agent.branch, agent.suffixTokens]]);
+ * ```
+ *
+ * @category Branching
  */
-async function forkAgent(parent, task, ctx) {
+export async function forkAgent(
+  parent: Branch,
+  task: AgentTask,
+  ctx: SessionContext
+): Promise<AgentState> {
   const branch = await parent.fork();
   const messages = [
     { role: 'system', content: task.systemPrompt },
@@ -50,29 +66,31 @@ async function forkAgent(parent, task, ctx) {
 }
 
 /**
- * Run agents in a batched three-phase tick loop.
+ * Run agents in a batched three-phase tick loop
  *
- * Mechanics preserved from runAgentSwarm:
- * - Three-phase tick: PRODUCE -> COMMIT -> SETTLE
- * - Fire-and-forget tool dispatch (tools run while other agents generate)
- * - Warm prefill with sep + delta when tools resolve
- * - `report` tool as completion signal (not dispatched to executeTool)
- * - Non-blocking settle via Promise.race
- * - Idle yield when all active agents are pending tools
+ * Preserves the mechanical execution wins from BranchStore:
+ * shared-prefix KV, batched decode, fire-and-forget tools, idle yield.
  *
- * @param {AgentState[]} agents
- * @param {{
- *   store: BranchStore,
- *   ctx: SessionContext,
- *   executeTool: (name: string, args: object) => Promise<any>,
- *   maxTurns?: number,
- *   onToolCall?: (agentIndex: number, toolName: string, args: string) => void,
- *   onToolResult?: (agentIndex: number, toolName: string, resultStr: string) => void,
- *   onReport?: (agentIndex: number, findings: string) => void,
- * }} opts
- * @returns {Promise<{ totalTokens: number, totalToolCalls: number, steps: number, counters: object }>}
+ * @param agents - Array of AgentState (from forkAgent or manual construction)
+ * @param opts - Configuration including store, ctx, executeTool, and callbacks
+ * @returns Aggregate statistics
+ *
+ * @example
+ * ```typescript
+ * const result = await runAgents(agents, {
+ *   store, ctx,
+ *   executeTool: (name, args) => myToolDispatch(name, args),
+ *   maxTurns: 6,
+ *   onToolCall(ai, name, args) { console.log(`Agent ${ai}: ${name}`); },
+ * });
+ * ```
+ *
+ * @category Branching
  */
-async function runAgents(agents, opts) {
+export async function runAgents(
+  agents: AgentState[],
+  opts: RunAgentsOptions
+): Promise<RunAgentsResult> {
   const { store, ctx, executeTool, maxTurns = 6, onToolCall, onToolResult, onReport } = opts;
   const sep = ctx.getTurnSeparator();
 
@@ -86,11 +104,13 @@ async function runAgents(agents, opts) {
     idleTicks: 0,
   };
 
-  // pendingTools: Map<agentIndex, { promise, name }>
-  const pendingTools = new Map();
+  const pendingTools = new Map<number, {
+    promise: Promise<{ ai: number; prefillTokens: number[] | null }>;
+    name: string;
+  }>();
 
-  function dispatchTool(ai, w, tc) {
-    let toolArgs;
+  function dispatchTool(ai: number, w: AgentState, tc: ParsedToolCall): void {
+    let toolArgs: Record<string, unknown>;
     try { toolArgs = JSON.parse(tc.arguments); } catch { toolArgs = {}; }
     const callId = tc.id || `call_${w.toolCallCount}`;
 
@@ -107,8 +127,6 @@ async function runAgents(agents, opts) {
 
         if (onToolResult) onToolResult(ai, tc.name, resultStr);
 
-        // Format warm prefill tokens — the assistant's tool-call turn is
-        // already in KV from generation; sep closes it.
         const { prompt } = await ctx.formatChat(
           JSON.stringify([
             { role: 'system', content: '' },
@@ -116,10 +134,10 @@ async function runAgents(agents, opts) {
           ])
         );
         const delta = await ctx.tokenize(prompt, false);
-        return { ai, prefillTokens: [...sep, ...delta] };
+        return { ai, prefillTokens: [...sep, ...delta] as number[] | null };
       } catch (err) {
         w.done = true;
-        w.findings = `Tool error: ${err.message}`;
+        w.findings = `Tool error: ${(err as Error).message}`;
         return { ai, prefillTokens: null };
       }
     })();
@@ -130,7 +148,7 @@ async function runAgents(agents, opts) {
 
   for (;;) {
     // -- Phase 1: PRODUCE -- sample from active agents
-    const entries = [];
+    const entries: [Branch, number][] = [];
     for (let ai = 0; ai < agents.length; ai++) {
       const w = agents[ai];
       if (w.done || pendingTools.has(ai)) continue;
@@ -156,7 +174,7 @@ async function runAgents(agents, opts) {
           w.toolCallCount++;
           totalToolCalls++;
           if (onToolCall) onToolCall(ai, 'report', tc.arguments);
-          if (onReport) onReport(ai, w.findings);
+          if (onReport) onReport(ai, w.findings!);
           continue;
         }
 
@@ -178,7 +196,7 @@ async function runAgents(agents, opts) {
     }
 
     // -- Phase 3: SETTLE -- non-blocking check for resolved tools
-    const prefillPairs = [];
+    const prefillPairs: [Branch, number[]][] = [];
     for (const [ai, info] of pendingTools) {
       const result = await Promise.race([info.promise, Promise.resolve(null)]);
       if (result !== null) {
@@ -212,5 +230,3 @@ async function runAgents(agents, opts) {
   const totalTokens = agents.reduce((s, w) => s + w.tokenCount, 0);
   return { totalTokens, totalToolCalls, steps, counters };
 }
-
-module.exports = { forkAgent, runAgents };

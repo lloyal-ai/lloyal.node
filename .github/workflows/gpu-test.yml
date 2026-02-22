@@ -6,7 +6,6 @@ on:
     paths:
       - 'liblloyal'
       - 'llama.cpp'
-      - 'lib/**'
       - 'src/**'
       - 'test/**'
       - 'CMakeLists.txt'

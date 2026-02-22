@@ -141,9 +141,9 @@ jobs:
           echo "📦 Package contents:"
           cat package-contents.txt
 
-          # Verify lib/ JavaScript is included
-          if ! grep -q "package/lib/index.js" package-contents.txt; then
-            echo "❌ ERROR: lib/index.js not in package!"
+          # Verify dist/ JavaScript is included
+          if ! grep -q "package/dist/index.js" package-contents.txt; then
+            echo "❌ ERROR: dist/index.js not in package!"
             exit 1
           fi
 

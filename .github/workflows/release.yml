@@ -218,7 +218,7 @@ jobs:
           export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
           echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
           node -e "
-            const { loadBinary } = require('./lib');
+            const { loadBinary } = require('./dist');
             const addon = loadBinary();
             console.log('✓ Platform package loaded successfully');
             console.log('  Exports:', Object.keys(addon));
@@ -255,7 +255,7 @@ jobs:
           Write-Host "VULKAN_SDK: $env:VULKAN_SDK"
           Write-Host "CUDA_PATH: $env:CUDA_PATH"
           node -e "
-            const { loadBinary } = require('./lib');
+            const { loadBinary } = require('./dist');
             const addon = loadBinary();
             console.log('✓ Platform package loaded successfully');
             console.log('  Exports:', Object.keys(addon));
