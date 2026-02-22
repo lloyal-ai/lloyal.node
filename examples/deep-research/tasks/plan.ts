@@ -8,6 +8,7 @@ const PLAN_PROMPT = fs.readFileSync(path.resolve(__dirname, 'plan.md'), 'utf8');
 export async function plan(ctx: SessionContext, opts: {
   query: string;
   agentCount: number;
+  parent?: InstanceType<typeof Branch>;
 }): Promise<{ questions: string[]; tokenCount: number }> {
   const schema = {
     type: 'object',
@@ -32,10 +33,21 @@ export async function plan(ctx: SessionContext, opts: {
     { role: 'user', content: userContent },
   ];
   const { prompt } = await ctx.formatChat(JSON.stringify(messages));
-  const tokens = await ctx.tokenize(prompt);
 
-  const lead = Branch.create(ctx, 0, { temperature: 0.3 }, undefined, grammar);
-  await lead.prefill(tokens);
+  let lead: InstanceType<typeof Branch>;
+  if (opts.parent) {
+    // Warm: fork from trunk — planner inherits conversation KV
+    lead = await opts.parent.fork();
+    lead.setGrammar(grammar);
+    const sep = ctx.getTurnSeparator();
+    const delta = await ctx.tokenize(prompt, false);
+    await lead.prefill([...sep, ...delta]);
+  } else {
+    // Cold: fresh branch at position 0
+    const tokens = await ctx.tokenize(prompt);
+    lead = Branch.create(ctx, 0, { temperature: 0.3 }, undefined, grammar);
+    await lead.prefill(tokens);
+  }
 
   let output = '';
   let tokenCount = 0;

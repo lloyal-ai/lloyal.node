@@ -269,18 +269,30 @@ async function main(): Promise<void> {
 
       await session.promote(verifyResult.bestBranch);
     } else {
-      // ─── warm: research → findings → grounded response ─
-      log(`  ${c.dim}  researching...${c.reset}`);
+      // ─── warm: plan → research → findings → grounded response ─
+      const { questions, tokenCount: planTokens } = await plan(ctx, {
+        query, agentCount: AGENT_COUNT,
+        parent: session.trunk!,
+      });
+
+      log(`\n  ${c.green}●${c.reset} ${c.bold}Plan${c.reset} ${c.dim}${planTokens} tok${c.reset}`);
+      questions.forEach((q, i) => log(`    ${c.dim}${i + 1}.${c.reset} ${q}`));
+
+      log(`\n  ${c.green}●${c.reset} ${c.bold}Research${c.reset} ${c.dim}${questions.length} agents${c.reset}`);
 
       const followUp = await research(ctx, store, {
-        questions: Array(AGENT_COUNT).fill(query),
+        questions,
         parent: session.trunk!,
         seed: Date.now(),
         toolsJson, executeTool,
         maxTurns: MAX_TOOL_TURNS, onToolCall, onToolResult,
       });
 
-      log(`  ${c.dim}  ${followUp.totalToolCalls} tools · ${followUp.totalTokens} tok${c.reset}`);
+      followUp.agents.forEach((a, i) => {
+        const tree = i === followUp.agents.length - 1 ? '└' : '├';
+        log(`    ${c.dim}${tree}${c.reset} ${c.yellow}${i}${c.reset} ${c.green}done${c.reset} ${c.dim}${a.tokenCount} tok · ${a.toolCallCount} tools${c.reset}`);
+      });
+      log(`    ${c.dim}${followUp.totalToolCalls} tools · ${followUp.totalTokens} tok${c.reset}`);
 
       const agentFindings = followUp.agents
         .map((a, i) => a.findings ? `[Agent ${i}] ${a.findings.trim()}` : null)
