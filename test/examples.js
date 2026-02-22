@@ -27,6 +27,16 @@ const EMBED_MODEL_PATH = process.env.EMBED_MODEL_PATH
   ? path.resolve(process.env.EMBED_MODEL_PATH)
   : path.join(__dirname, '../liblloyal/tests/fixtures/nomic-embed-text-v1.5.Q4_K_M.gguf');
 
+// Qwen3 model for deep-research (tool-calling, instruct model)
+const QWEN3_PATH = process.env.QWEN3_MODEL
+  ? path.resolve(process.env.QWEN3_MODEL)
+  : path.join(__dirname, '../models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf');
+
+// Qwen3 reranker for deep-research semantic search
+const RERANKER_PATH = process.env.RERANKER_MODEL
+  ? path.resolve(process.env.RERANKER_MODEL)
+  : path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf');
+
 
 if (!fs.existsSync(MODEL_PATH)) {
   console.error('❌ Test model not found!');
@@ -294,6 +304,49 @@ const EXAMPLES = {
 
       const complete = events.find(e => e.event === 'complete');
       assert(complete, 'should have complete event');
+    },
+  },
+
+  'deep-research': {
+    path: 'deep-research/deep-research.mjs',
+    timeout: 300000,
+    modelPath: QWEN3_PATH,
+    extraArgs: [
+      '--reranker', RERANKER_PATH,
+      '--corpus', process.env.DEEP_RESEARCH_CORPUS || '',
+      '--query', process.env.DEEP_RESEARCH_QUERY || '',
+    ],
+    skip: !fs.existsSync(QWEN3_PATH) || !fs.existsSync(RERANKER_PATH)
+      || !process.env.DEEP_RESEARCH_CORPUS || !process.env.DEEP_RESEARCH_QUERY,
+    skipReason: 'Requires QWEN3_MODEL, RERANKER_MODEL, DEEP_RESEARCH_CORPUS, and DEEP_RESEARCH_QUERY env vars',
+    validate(events) {
+      const start = events.find(e => e.event === 'start');
+      assert(start, 'should have start event');
+      assert(start.agentCount === 3, 'should have 3 agents');
+      assert(start.chunks > 0, 'should have corpus chunks');
+
+      const plan = events.find(e => e.event === 'plan');
+      assert(plan, 'should have plan event');
+      assert(plan.questions.length >= 2, 'should plan at least 2 sub-questions');
+
+      const researchStart = events.find(e => e.event === 'research_start');
+      assert(researchStart, 'should have research_start event');
+      assert(researchStart.sharedPrefixTokens > 0, 'should have shared prefix');
+
+      const toolCalls = events.filter(e => e.event === 'tool_call');
+      assert(toolCalls.length > 0, 'should make at least one tool call');
+
+      const agentsDone = events.filter(e => e.event === 'agent_done');
+      assert(agentsDone.length === 3, 'all 3 agents should finish');
+      for (const a of agentsDone) {
+        assert(a.tokenCount > 0, `agent ${a.index} should generate tokens`);
+      }
+
+      const complete = events.find(e => e.event === 'complete');
+      assert(complete, 'should have complete event');
+      assert(complete.totalToolCalls > 0, 'should have tool calls');
+      assert(complete.wallTimeMs > 0, 'should have wall time');
+      assert(complete.converged !== undefined, 'should have convergence result');
     },
   },
 };
