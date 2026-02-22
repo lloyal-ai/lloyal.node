@@ -2099,3 +2099,226 @@ export class BranchStore {
   /** Number of available seq_id leases */
   readonly available: number;
 }
+
+// ================================================================
+// Agent primitives
+// ================================================================
+
+/**
+ * Task description for forkAgent
+ *
+ * @category Branching
+ */
+export interface AgentTask {
+  /** System prompt for the agent */
+  systemPrompt: string;
+  /** User content / question for the agent */
+  content: string;
+  /** JSON-stringified tool definitions (optional) */
+  tools?: string;
+  /** PRNG seed for sampler diversity (optional) */
+  seed?: number;
+}
+
+/**
+ * State of a single agent in a runAgents loop
+ *
+ * Returned by forkAgent(). Also constructible manually for shared-prefix
+ * patterns (Phase 2 agentRoot + slice).
+ *
+ * @category Branching
+ */
+export interface AgentState {
+  /** The agent's branch */
+  branch: Branch;
+  /** Tokens to prefill before the loop starts */
+  suffixTokens: number[];
+  /** Format metadata for parseChatOutput */
+  fmt: {
+    format: ChatFormat;
+    reasoningFormat: ReasoningFormat;
+    thinkingForcedOpen: boolean;
+    parser: string;
+  };
+  /** Accumulated raw output text */
+  rawOutput: string;
+  /** Whether the agent has finished */
+  done: boolean;
+  /** Number of tokens generated */
+  tokenCount: number;
+  /** Number of tool calls made */
+  toolCallCount: number;
+  /** Number of tool-call turns completed */
+  turns: number;
+  /** Final findings (set by report tool or fallback content) */
+  findings: string | null;
+}
+
+/**
+ * Options for runAgents
+ *
+ * @category Branching
+ */
+export interface RunAgentsOptions {
+  /** BranchStore for commit/prefill */
+  store: BranchStore;
+  /** SessionContext for parseChatOutput, formatChat, tokenize */
+  ctx: SessionContext;
+  /** Tool executor — consumer wraps with locks as needed */
+  executeTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** Maximum tool-call turns per agent (default: 6) */
+  maxTurns?: number;
+  /** Called when an agent dispatches a tool call */
+  onToolCall?: (agentIndex: number, toolName: string, args: string) => void;
+  /** Called when a tool result returns */
+  onToolResult?: (agentIndex: number, toolName: string, resultStr: string) => void;
+  /** Called when an agent submits a report */
+  onReport?: (agentIndex: number, findings: string) => void;
+}
+
+/**
+ * Result from runAgents
+ *
+ * @category Branching
+ */
+export interface RunAgentsResult {
+  /** Total tokens generated across all agents */
+  totalTokens: number;
+  /** Total tool calls across all agents */
+  totalToolCalls: number;
+  /** Number of batched decode steps */
+  steps: number;
+  /** Performance counters */
+  counters: {
+    warmPrefillCalls: number;
+    warmPrefillBranches: number;
+    stalledTicks: number;
+    maxConcurrentTools: number;
+    idleTicks: number;
+  };
+}
+
+/**
+ * Fork an agent from a parent branch with its own system prompt + task
+ *
+ * Always prepends getTurnSeparator() for a clean structural break before
+ * the agent's system prompt. Returns AgentState ready for store.prefill().
+ *
+ * @param parent - Branch to fork from
+ * @param task - Agent task description
+ * @param ctx - SessionContext for formatting and tokenization
+ * @returns AgentState with branch and suffixTokens
+ *
+ * @example
+ * ```typescript
+ * const agent = await forkAgent(trunk, {
+ *   systemPrompt: 'You are a research assistant.',
+ *   content: 'What is X?',
+ *   tools: toolsJson,
+ *   seed: Date.now(),
+ * }, ctx);
+ * await store.prefill([[agent.branch, agent.suffixTokens]]);
+ * ```
+ *
+ * @category Branching
+ */
+export function forkAgent(
+  parent: Branch,
+  task: AgentTask,
+  ctx: SessionContext
+): Promise<AgentState>;
+
+/**
+ * Run agents in a batched three-phase tick loop
+ *
+ * Preserves the mechanical execution wins from BranchStore:
+ * shared-prefix KV, batched decode, fire-and-forget tools, idle yield.
+ *
+ * @param agents - Array of AgentState (from forkAgent or manual construction)
+ * @param opts - Configuration including store, ctx, executeTool, and callbacks
+ * @returns Aggregate statistics
+ *
+ * @example
+ * ```typescript
+ * const result = await runAgents(agents, {
+ *   store, ctx,
+ *   executeTool: (name, args) => myToolDispatch(name, args),
+ *   maxTurns: 6,
+ *   onToolCall(ai, name, args) { console.log(`Agent ${ai}: ${name}`); },
+ * });
+ * ```
+ *
+ * @category Branching
+ */
+export function runAgents(
+  agents: AgentState[],
+  opts: RunAgentsOptions
+): Promise<RunAgentsResult>;
+
+/**
+ * Session - Trunk lifecycle + conversation delta helpers
+ *
+ * Owns the current "trunk" branch and provides promote() to crown a winner,
+ * plus delta helpers that centralize the sep + formatChat + tokenize + prefill
+ * pattern for injecting new turns into an ongoing conversation.
+ *
+ * Session does NOT own the SessionContext or BranchStore — the consumer
+ * creates those and passes them in. dispose() prunes trunk only.
+ *
+ * @example
+ * ```typescript
+ * const session = new Session({ ctx, store });
+ * session.trunk = initialBranch;
+ *
+ * // After verification, promote the best attempt
+ * await session.promote(bestAttempt.branch);
+ *
+ * // Inject a user turn and generate
+ * await session.prefillUser('What about X?');
+ * for await (const { text } of session.trunk) {
+ *   process.stdout.write(text);
+ * }
+ *
+ * // Cleanup
+ * await session.dispose();
+ * ctx.dispose();
+ * ```
+ *
+ * @category Branching
+ */
+export class Session {
+  constructor(opts: { ctx: SessionContext; store: BranchStore });
+
+  /** Current trunk branch (or null before assignment) */
+  get trunk(): Branch | null;
+
+  /** Assign initial trunk without promote */
+  set trunk(branch: Branch | null);
+
+  /**
+   * Promote a winner to trunk — retainOnly + reassign
+   *
+   * Calls store.retainOnly(winner), then sets trunk = winner.
+   * Safe even if winner is the only branch.
+   */
+  promote(winner: Branch): Promise<void>;
+
+  /**
+   * Dispose trunk only — consumer owns ctx and other resources
+   */
+  dispose(): Promise<void>;
+
+  /**
+   * Prefill a user turn into trunk
+   *
+   * Centralizes: sep + formatChat + tokenize(false) + prefill
+   */
+  prefillUser(content: string, opts?: { tools?: string }): Promise<void>;
+
+  /**
+   * Prefill a tool result turn into trunk
+   *
+   * Centralizes: sep + formatChat + tokenize(false) + prefill
+   */
+  prefillToolResult(resultStr: string, callId: string): Promise<void>;
+}

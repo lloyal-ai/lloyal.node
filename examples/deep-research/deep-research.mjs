@@ -382,7 +382,7 @@ const fmtSize = (bytes) => bytes > 1e9
 // ================================================================
 
 // Dynamic import — native module loads here, after fd 2 redirect
-const { createContext, Branch, BranchStore } = await import('../../lib/index.js');
+const { createContext, Branch, BranchStore, Session, forkAgent, runAgents } = await import('../../lib/index.js');
 
 async function main() {
   const t0 = performance.now();
@@ -444,7 +444,6 @@ async function main() {
   log(`  ${c.dim}  Corpus: ${corpusLabel} → ${chunks.length} chunks${c.reset}`);
 
   const store = new BranchStore(ctx);
-  const sep = ctx.getTurnSeparator();
 
   log();
   log(`  ${c.dim}Query${c.reset}`);
@@ -541,7 +540,6 @@ async function main() {
         thinkingForcedOpen: fmt.thinkingForcedOpen,
         parser: fmt.parser,
       },
-      messages: [...fullMessages],
       rawOutput: '',
       done: false,
       tokenCount: 0,
@@ -563,8 +561,12 @@ async function main() {
   log();
   log(`  ${c.green}●${c.reset} ${c.bold}Research${c.reset} ${c.dim}${agents.length} agents · shared prefix ${sharedTokens.length} tok${c.reset}`);
 
-  // Reranker mutex — serializes llama_decode calls on rerankCtx so
-  // concurrent fire-and-forget searches don't race.
+  // Reranker mutex — serializes llama_decode calls on rerankCtx.
+  // Fire-and-forget tool dispatch means multiple agents can dispatch search
+  // concurrently; _branchPrefill runs on the libuv thread pool, so concurrent
+  // calls race llama_decode on the same llama_context. BranchStore serializes
+  // via batched decode (one llama_decode per commit/prefill), but individual
+  // Branch.prefill calls on rerankCtx bypass that.
   let rerankLock = Promise.resolve();
   function withRerankLock(fn) {
     const prev = rerankLock;
@@ -573,198 +575,34 @@ async function main() {
     return prev.then(fn).finally(release);
   }
 
-  // ── runAgentSwarm — reusable agentic loop ──
-  //
-  // Three-phase tick:
-  //   PRODUCE — produceSync() on active (non-pending, non-done) agents
-  //   COMMIT  — store.commit() for tokens produced this tick
-  //   SETTLE  — non-blocking check for resolved tools, batch warm-prefill
-  //
-  // Tool calls are dispatched as promises and don't block generation.
-  // Active agents keep producing tokens while tools run in background.
-  // When tools resolve, their agents get batched warm-prefilled back in.
-  async function runAgentSwarm(agents) {
-    let steps = 0;
-    let totalToolCalls = 0;
-    const counters = {
-      warmPrefillCalls: 0,
-      warmPrefillBranches: 0,
-      stalledTicks: 0,
-      maxConcurrentTools: 0,
-      idleTicks: 0,
-    };
-
-    // pendingTools: Map<agentIndex, { promise, name }>
-    const pendingTools = new Map();
-
-    function dispatchTool(ai, w, tc, parsed) {
-      let toolArgs;
-      try { toolArgs = JSON.parse(tc.arguments); } catch { toolArgs = {}; }
-      const callId = tc.id || `call_${w.toolCallCount}`;
-
-      w.toolCallCount++;
-      totalToolCalls++;
-      w.turns++;
-
-      emit('tool_call', { agentIndex: ai, toolName: tc.name, arguments: tc.arguments });
-      const argSummary = tc.name === 'search'
-        ? `"${toolArgs.query || ''}"`
-        : toolArgs.filename + (toolArgs.query ? `, "${toolArgs.query}"` : '');
-      log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${tc.name}${c.reset}(${argSummary})`);
-
-      const promise = (async () => {
-        try {
-          const result = tc.name === 'search'
-            ? await withRerankLock(() => executeTool(tc.name, toolArgs))
-            : await executeTool(tc.name, toolArgs);
-
-          const resultStr = JSON.stringify(result);
-          emit('tool_result', {
-            agentIndex: ai, toolName: tc.name,
-            result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr,
-          });
-          log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.dim}← ${tc.name} ${resultStr.length}b${c.reset}`);
-
-          w.messages.push({
-            role: 'assistant', content: parsed.content,
-            ...(parsed.reasoningContent && { reasoning_content: parsed.reasoningContent }),
-            tool_calls: [{ type: 'function', function: { name: tc.name, arguments: tc.arguments }, id: callId }],
-          });
-          w.messages.push({ role: 'tool', content: resultStr, tool_call_id: callId });
-
-          // Format warm prefill tokens — the assistant's tool-call turn is
-          // already in KV from generation; `sep` closes it. This formats just
-          // the tool-result turn + new assistant prompt.
-          const { prompt } = await ctx.formatChat(
-            JSON.stringify([
-              { role: 'system', content: '' },
-              { role: 'tool', content: resultStr, tool_call_id: callId },
-            ])
-          );
-          const delta = await ctx.tokenize(prompt, false);
-          return { ai: ai, prefillTokens: [...sep, ...delta] };
-        } catch (err) {
-          w.done = true;
-          w.findings = `Tool error: ${err.message}`;
-          return { ai: ai, prefillTokens: null };
-        }
-      })();
-
-      pendingTools.set(ai, { promise, name: tc.name });
-      counters.maxConcurrentTools = Math.max(counters.maxConcurrentTools, pendingTools.size);
-    }
-
-    for (;;) {
-      // ── Phase 1: PRODUCE — sample from active agents ──
-      const entries = [];
-      for (let ai = 0; ai < agents.length; ai++) {
-        const w = agents[ai];
-        if (w.done || pendingTools.has(ai)) continue;
-
-        const { token, text, isStop } = w.branch.produceSync();
-        if (isStop) {
-          const parsed = ctx.parseChatOutput(w.rawOutput, w.fmt.format, {
-            reasoningFormat: w.fmt.reasoningFormat,
-            thinkingForcedOpen: w.fmt.thinkingForcedOpen,
-            parser: w.fmt.parser,
-          });
-
-          const tc = parsed.toolCalls[0];
-          if (!tc || w.turns >= MAX_TOOL_TURNS) {
-            w.done = true;
-            if (!w.findings && parsed.content) w.findings = parsed.content;
-            continue;
-          }
-
-          if (tc.name === 'report') {
-            try { w.findings = JSON.parse(tc.arguments).findings; } catch { w.findings = tc.arguments; }
-            w.done = true;
-            w.toolCallCount++;
-            totalToolCalls++;
-            emit('tool_call', { agentIndex: ai, toolName: 'report', arguments: tc.arguments });
-            log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}report${c.reset}`);
-            continue;
-          }
-
-          // Fire-and-forget — dispatch tool without blocking the decode loop
-          dispatchTool(ai, w, tc, parsed);
-          w.rawOutput = '';
-          continue;
-        }
-
-        entries.push([w.branch, token]);
-        w.rawOutput += text;
-        w.tokenCount++;
-      }
-
-      // ── Phase 2: COMMIT — batch-decode produced tokens ──
-      if (entries.length > 0) {
-        await store.commit(entries);
-        steps++;
-      }
-
-      // ── Phase 3: SETTLE — non-blocking check for resolved tools ──
-      const prefillPairs = [];
-      for (const [ai, info] of pendingTools) {
-        const result = await Promise.race([info.promise, Promise.resolve(null)]);
-        if (result !== null) {
-          pendingTools.delete(ai);
-          if (result.prefillTokens) {
-            prefillPairs.push([agents[result.ai].branch, result.prefillTokens]);
-          }
-        }
-      }
-
-      if (prefillPairs.length > 0) {
-        await store.prefill(prefillPairs);
-        counters.warmPrefillCalls++;
-        counters.warmPrefillBranches += prefillPairs.length;
-      }
-
-      // ── Termination + idle yield ──
-      const allDone = agents.every((w) => w.done) && pendingTools.size === 0;
-      if (allDone) break;
-
-      if (entries.length === 0 && pendingTools.size > 0) {
-        counters.stalledTicks++;
-        if (prefillPairs.length === 0) {
-          // Nothing produced, nothing settled — yield until a tool resolves
-          await Promise.race([...pendingTools.values()].map((i) => i.promise));
-          counters.idleTicks++;
-        }
-      }
-    }
-
-    const totalTokens = agents.reduce((s, w) => s + w.tokenCount, 0);
-    return { totalTokens, totalToolCalls, steps, counters };
-  }
-
-  // ── forkAgent — fork from conversation trunk with own system prompt ──
-  //
-  // Different from Phase 2's shared-prefix optimization (agentRoot + slice).
-  // This pattern injects a full system prompt + tools via sep + delta onto
-  // an existing conversation branch — used for follow-up research agents.
-  async function forkAgent(trunk, systemPrompt, task, opts = {}) {
-    const branch = await trunk.fork();
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: task },
-    ];
-    const fmtOpts = opts.tools ? { tools: opts.tools } : {};
-    const fmt = await ctx.formatChat(JSON.stringify(messages), fmtOpts);
-    const suffixTokens = [...sep, ...await ctx.tokenize(fmt.prompt, false)];
-    return {
-      branch, suffixTokens,
-      fmt: { format: fmt.format, reasoningFormat: fmt.reasoningFormat,
-             thinkingForcedOpen: fmt.thinkingForcedOpen, parser: fmt.parser },
-      messages: [...messages],
-      rawOutput: '', done: false, tokenCount: 0,
-      toolCallCount: 0, turns: 0, findings: null,
-    };
-  }
+  const executeToolLocked = (name, args) =>
+    name === 'search'
+      ? withRerankLock(() => executeTool(name, args))
+      : executeTool(name, args);
 
   const { totalTokens: totalAgentTokens, totalToolCalls, steps: researchSteps, counters } =
-    await runAgentSwarm(agents);
+    await runAgents(agents, {
+      store, ctx,
+      executeTool: executeToolLocked,
+      maxTurns: MAX_TOOL_TURNS,
+      onToolCall(ai, toolName, args) {
+        emit('tool_call', { agentIndex: ai, toolName, arguments: args });
+        let toolArgs;
+        try { toolArgs = JSON.parse(args); } catch { toolArgs = {}; }
+        const argSummary = toolName === 'search'
+          ? `"${toolArgs.query || ''}"`
+          : toolName === 'report' ? ''
+          : toolArgs.filename + (toolArgs.query ? `, "${toolArgs.query}"` : '');
+        log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+      },
+      onToolResult(ai, toolName, resultStr) {
+        emit('tool_result', {
+          agentIndex: ai, toolName,
+          result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr,
+        });
+        log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.dim}← ${toolName} ${resultStr.length}b${c.reset}`);
+      },
+    });
 
   for (let i = 0; i < agents.length; i++) {
     const w = agents[i];
@@ -983,17 +821,16 @@ async function main() {
   // INTERACTIVE — readline follow-up loop with agent-swarm research
   // ================================================================
 
-  // retainOnly strips all sequences except the winner from KV in one pass.
-  // synthRoot's slot is freed, winner's topology resets to root (standalone).
-  // This frees AGENT_COUNT seq_ids for follow-up research agents.
-  await store.retainOnly(bestAttempt.branch);
+  // Session manages trunk lifecycle — promote crowns winner, freeing
+  // AGENT_COUNT seq_ids for follow-up research agents.
+  const session = new Session({ ctx, store });
+  await session.promote(bestAttempt.branch);
 
   log(`  ${c.dim}Ask a follow-up question or /quit to exit${c.reset}`);
   log();
 
   await new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const followUpBranch = bestAttempt.branch;
     let exiting = false;
     let generating = false;
     let eofWhileGenerating = false;
@@ -1002,7 +839,7 @@ async function main() {
       if (exiting) return;
       exiting = true;
       rl.close();
-      await followUpBranch.prune();
+      await session.dispose();
       rerankCtx.dispose();
       ctx.dispose();
       resolve();
@@ -1014,6 +851,7 @@ async function main() {
     };
 
     async function handleInput(input) {
+      try {
       const trimmed = input.trim();
       if (!trimmed || trimmed === '/quit') {
         await exit();
@@ -1029,8 +867,12 @@ async function main() {
 
       const followUpAgents = [];
       for (let i = 0; i < AGENT_COUNT; i++) {
-        const agent = await forkAgent(followUpBranch, AGENT_SYSTEM_PROMPT, trimmed, { tools: TOOLS_JSON });
-        agent.branch.reseedSampler(Date.now() + i);
+        const agent = await forkAgent(session.trunk, {
+          systemPrompt: AGENT_SYSTEM_PROMPT,
+          content: trimmed,
+          tools: TOOLS_JSON,
+          seed: Date.now() + i,
+        }, ctx);
         followUpAgents.push(agent);
       }
 
@@ -1038,7 +880,26 @@ async function main() {
       await store.prefill(followUpAgents.map((a) => [a.branch, a.suffixTokens]));
 
       // Run parallel research with batched decode
-      const swarmResult = await runAgentSwarm(followUpAgents);
+      const swarmResult = await runAgents(followUpAgents, {
+        store, ctx,
+        executeTool: executeToolLocked,
+        maxTurns: MAX_TOOL_TURNS,
+        onToolCall(ai, toolName, args) {
+          emit('tool_call', { agentIndex: ai, toolName, arguments: args });
+          let toolArgs;
+          try { toolArgs = JSON.parse(args); } catch { toolArgs = {}; }
+          const argSummary = toolName === 'search'
+            ? `"${toolArgs.query || ''}"`
+            : toolName === 'report' ? ''
+            : toolArgs.filename + (toolArgs.query ? `, "${toolArgs.query}"` : '');
+          log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.cyan}${toolName}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+        },
+        onToolResult(ai, toolName, resultStr) {
+          emit('tool_result', { agentIndex: ai, toolName,
+            result: resultStr.length > 200 ? resultStr.slice(0, 200) + '...' : resultStr });
+          log(`    ${c.dim}├${c.reset} ${c.yellow}${ai}${c.reset} ${c.dim}← ${toolName} ${resultStr.length}b${c.reset}`);
+        },
+      });
 
       log(`  ${c.dim}  ${swarmResult.totalToolCalls} tools · ${swarmResult.totalTokens} tok${c.reset}`);
 
@@ -1051,20 +912,16 @@ async function main() {
       // Prune all agent branches — their findings are captured
       for (const a of followUpAgents) await a.branch.prune();
 
-      // Format findings + question as user turn, prefill into trunk
+      // Format findings + question as user turn, prefill into trunk via Session
       const groundedContent = agentFindings
         ? `Research findings:\n${agentFindings}\n\nUser question: ${trimmed}\n\nAnswer based on the research findings above.`
         : trimmed;
 
-      const { prompt } = await ctx.formatChat(
-        JSON.stringify([{ role: 'system', content: '' }, { role: 'user', content: groundedContent }])
-      );
-      const delta = await ctx.tokenize(prompt, false);
-      await followUpBranch.prefill([...sep, ...delta]);
+      await session.prefillUser(groundedContent);
 
       // Generate grounded response
       process.stdout.write(`  ${c.dim}<${c.reset} `);
-      for await (const { text } of followUpBranch) {
+      for await (const { text } of session.trunk) {
         process.stdout.write(text);
       }
       console.log('\n');
@@ -1074,6 +931,11 @@ async function main() {
       if (eofWhileGenerating) {
         await exit();
       } else {
+        ask();
+      }
+      } catch (err) {
+        log(`  ${c.red}Error: ${err.message}${c.reset}`);
+        generating = false;
         ask();
       }
     }
