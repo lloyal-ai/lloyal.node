@@ -37,7 +37,7 @@ Thumbs.db
 .cache/
 
 tmp/
-
+dist/
 packages/darwin-arm64
 
 # CI infra scripts (injected from lloyal-infra during CI)
