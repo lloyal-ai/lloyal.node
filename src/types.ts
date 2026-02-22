@@ -16,6 +16,9 @@
  * Parallel and tree-structured generation with batched GPU dispatch.
  */
 
+import type { Branch } from './Branch';
+import type { BranchStore } from './BranchStore';
+
 /**
  * GPU variant for binary loading
  *
@@ -88,6 +91,71 @@ export enum PoolingType {
   LAST = 3,
   /** Rank pooling - classification head output for reranking models */
   RANK = 4,
+}
+
+/**
+ * Chat format detected by the template engine
+ *
+ * Identifies how the model formats tool calls, reasoning blocks, and content.
+ * Returned by {@link SessionContext.formatChat | formatChat()} in
+ * {@link FormattedChatResult.format} and consumed by
+ * {@link SessionContext.parseChatOutput | parseChatOutput()}.
+ *
+ * You generally don't need to inspect these values directly --
+ * just pass them through from the formatChat result to parseChatOutput.
+ *
+ * Only commonly-used values are listed. The full set matches llama.cpp's
+ * `common_chat_format` enum (30+ formats).
+ *
+ * @category Chat
+ */
+export enum ChatFormat {
+  /** Plain content, no special formatting */
+  CONTENT_ONLY = 0,
+  /** Generic tool call format */
+  GENERIC = 1,
+}
+
+/**
+ * Reasoning/thinking block format
+ *
+ * Controls how `<think>` blocks are handled during formatting and parsing.
+ *
+ * @see {@link FormatChatOptions.reasoningFormat} for input-side usage
+ * @see {@link ParseChatOutputOptions.reasoningFormat} for output-side usage
+ *
+ * @category Chat
+ */
+export enum ReasoningFormat {
+  /** No reasoning extraction (default) */
+  NONE = 0,
+  /** Auto-detect reasoning format from model template */
+  AUTO = 1,
+  /** DeepSeek legacy format (`<think>...</think>` in content) */
+  DEEPSEEK_LEGACY = 2,
+  /** DeepSeek format (structured reasoning extraction) */
+  DEEPSEEK = 3,
+}
+
+/**
+ * Grammar trigger type
+ *
+ * Determines how lazy grammar activation is triggered during generation.
+ *
+ * @see {@link GrammarTrigger}
+ * @see {@link FormattedChatResult.grammarTriggers}
+ *
+ * @category Chat
+ */
+export enum GrammarTriggerType {
+  /** Trigger on a specific token ID */
+  TOKEN = 0,
+  /** Trigger on a word boundary match */
+  WORD = 1,
+  /** Trigger on a regex pattern match */
+  PATTERN = 2,
+  /** Trigger on a full-string regex pattern match */
+  PATTERN_FULL = 3,
 }
 
 /**
@@ -175,71 +243,6 @@ export interface ContextOptions {
    * Default: 'f16'
    */
   typeV?: KvCacheType;
-}
-
-/**
- * Chat format detected by the template engine
- *
- * Identifies how the model formats tool calls, reasoning blocks, and content.
- * Returned by {@link SessionContext.formatChat | formatChat()} in
- * {@link FormattedChatResult.format} and consumed by
- * {@link SessionContext.parseChatOutput | parseChatOutput()}.
- *
- * You generally don't need to inspect these values directly --
- * just pass them through from the formatChat result to parseChatOutput.
- *
- * Only commonly-used values are listed. The full set matches llama.cpp's
- * `common_chat_format` enum (30+ formats).
- *
- * @category Chat
- */
-export enum ChatFormat {
-  /** Plain content, no special formatting */
-  CONTENT_ONLY = 0,
-  /** Generic tool call format */
-  GENERIC = 1,
-}
-
-/**
- * Reasoning/thinking block format
- *
- * Controls how `<think>` blocks are handled during formatting and parsing.
- *
- * @see {@link FormatChatOptions.reasoningFormat} for input-side usage
- * @see {@link ParseChatOutputOptions.reasoningFormat} for output-side usage
- *
- * @category Chat
- */
-export enum ReasoningFormat {
-  /** No reasoning extraction (default) */
-  NONE = 0,
-  /** Auto-detect reasoning format from model template */
-  AUTO = 1,
-  /** DeepSeek legacy format (`<think>...</think>` in content) */
-  DEEPSEEK_LEGACY = 2,
-  /** DeepSeek format (structured reasoning extraction) */
-  DEEPSEEK = 3,
-}
-
-/**
- * Grammar trigger type
- *
- * Determines how lazy grammar activation is triggered during generation.
- *
- * @see {@link GrammarTrigger}
- * @see {@link FormattedChatResult.grammarTriggers}
- *
- * @category Chat
- */
-export enum GrammarTriggerType {
-  /** Trigger on a specific token ID */
-  TOKEN = 0,
-  /** Trigger on a word boundary match */
-  WORD = 1,
-  /** Trigger on a regex pattern match */
-  PATTERN = 2,
-  /** Trigger on a full-string regex pattern match */
-  PATTERN_FULL = 3,
 }
 
 /**
@@ -824,7 +827,7 @@ export interface SessionContext {
    * - Forgetting specific messages
    * - Preparing for injection of new context
    *
-   * ⚠️ CRITICAL: Call BEFORE next decode(), not after!
+   * CRITICAL: Call BEFORE next decode(), not after!
    * The model needs to know about the removal before processing new tokens.
    *
    * Cost: ~1-5ms depending on range
@@ -884,7 +887,6 @@ export interface SessionContext {
    * Use when starting a completely new conversation.
    *
    * Cost: ~1ms
-   *
    */
   kvCacheClear(): Promise<void>;
 
@@ -902,8 +904,8 @@ export interface SessionContext {
    * **Why not naive eviction?** Selective eviction (`kvCacheRemove`) preserves
    * original position IDs, which grow without bound. Across 5 architectures,
    * naive eviction produces PPL spanning 3 orders of magnitude — ranging from
-   * 1.15× baseline (Llama, lucky config) to 198× (Phi, sinks present).
-   * Under Blink KV reconstruction, all 5 converge to 3–16% of baseline.
+   * 1.15x baseline (Llama, lucky config) to 198x (Phi, sinks present).
+   * Under Blink KV reconstruction, all 5 converge to 3-16% of baseline.
    *
    * **Sinks are optional.** Under reconstruction, the 0+N (sinkless) config
    * matches 4+N (with sinks) within <2% across all tested architectures.
@@ -921,7 +923,7 @@ export interface SessionContext {
    * @param sinks First N tokens from conversation start (typically 4, or empty).
    *   Must be the same tokens every reseed — reusing different tokens degrades
    *   any attention-sink patterns the model may have learned for early positions.
-   * @param tail Recent M tokens to preserve (typically 252–1020)
+   * @param tail Recent M tokens to preserve (typically 252-1020)
    * @returns Promise that resolves when reconstruction completes.
    *   Next decode continues at position `sinks.length + tail.length`.
    *
@@ -960,7 +962,7 @@ export interface SessionContext {
    * physical KV entries for the shared prefix; only tokens decoded after
    * the fork point allocate new storage. This is what makes tree-structured
    * generation (best-of-N, beam search, speculative decoding) memory-efficient:
-   * N branches sharing a 1000-token prefix cost ~1000 KV entries, not N×1000.
+   * N branches sharing a 1000-token prefix cost ~1000 KV entries, not N*1000.
    *
    * The higher-level {@link Branch.fork} wraps this and additionally clones
    * the sampler chain, grammar state, logits snapshot, and perplexity tracker.
@@ -1050,7 +1052,7 @@ export interface SessionContext {
   /**
    * Format messages using model's chat template
    *
-   * Converts [{role, content}] → formatted prompt string with full format awareness.
+   * Converts [{role, content}] -> formatted prompt string with full format awareness.
    * Uses model's built-in template (ChatML, Llama, Mistral, etc.).
    *
    * The returned `format` and `reasoningFormat` fields should be passed to
@@ -1333,208 +1335,92 @@ export interface SessionContext {
 
   // ===== BRANCH API (internal, wrapped by Branch class) =====
 
-  /** @internal Create a new branch for parallel generation */
-  _branchCreate(position: number, params?: SamplingParams, nBatch?: number): number;
+  /** @internal */
+  _branchCreate(position: number, params?: SamplingParams, nBatch?: number, grammar?: string): number;
 
-  /** @internal Fork a branch to a new sequence */
+  /** @internal */
   _branchFork(handle: number): number;
 
-  /** @internal Decode multiple tokens in n_batch-sized chunks and capture logits */
+  /** @internal */
   _branchPrefill(handle: number, tokens: number[]): Promise<void>;
 
-  /** @internal Sample next token from branch's logits snapshot */
+  /** @internal */
   _branchSample(handle: number): number;
 
-  /** @internal Accept token (update sampler state for penalties) */
+  /** @internal */
   _branchAccept(handle: number, token: number): void;
 
-  /** @internal Get branch's current position */
+  /** @internal */
   _branchGetPosition(handle: number): number;
 
-  /** @internal Get branch's perplexity */
+  /** @internal */
   _branchGetPerplexity(handle: number): number;
 
-  /** @internal Get copy of branch's logits snapshot */
+  /** @internal */
   _branchGetLogits(handle: number): Float32Array;
 
-  /** @internal Prune branch (remove KV cache entries and free handle) — RESTRICT: throws if children */
+  /** @internal */
   _branchPrune(handle: number): void;
 
-  /** @internal Prune branch and all descendants — CASCADE */
+  /** @internal */
   _branchPruneSubtree(handle: number): void;
 
-  /** @internal Get parent branch handle (0 = INVALID_HANDLE if root) */
+  /** @internal */
   _branchParent(handle: number): number;
 
-  /** @internal Get child branch handles */
+  /** @internal */
   _branchChildren(handle: number): number[];
 
-  /** @internal Check if branch has no children */
+  /** @internal */
   _branchIsLeaf(handle: number): boolean;
 
-  /** @internal Check if branch holds a KV lease */
+  /** @internal */
   _branchIsActive(handle: number): boolean;
 
-  /** @internal Reseed branch sampler PRNG for diversity after fork */
+  /** @internal */
   _branchSamplerChainReseed(handle: number, seed: number): void;
 
-  /** @internal Set dynamic logit biases for a branch */
+  /** @internal */
   _branchSteer(handle: number, biases: Array<{ token: number; bias: number }>): void;
 
-  /** @internal Clear all dynamic logit biases from a branch */
+  /** @internal */
   _branchClearSteer(handle: number): void;
 
-  /** @internal Replace sampler chain with new parameters (memoized) */
+  /** @internal */
   _branchSetSamplerParams(handle: number, params: SamplingParams): void;
 
-  /** @internal Replace or remove grammar constraint */
+  /** @internal */
   _branchSetGrammar(handle: number, grammarStr: string): void;
 
-  /** @internal Compute entropy from branch's logits snapshot */
+  /** @internal */
   _branchModelEntropy(handle: number, base?: string): number;
 
-  /** @internal Compute surprisal from branch's logits snapshot */
+  /** @internal */
   _branchModelSurprisal(handle: number, token: number, base?: string): number;
 
-  /** @internal Get sampling-level perplexity */
+  /** @internal */
   _branchGetSamplingPerplexity(handle: number): number;
 
-  /** @internal Set static logit biases on a branch */
+  /** @internal */
   _branchSetLogitBias(handle: number, biases: Array<{ token: number; bias: number }>): void;
 
-  /** @internal Clear all static logit biases from a branch */
+  /** @internal */
   _branchClearLogitBias(handle: number): void;
 
   // ===== STORE API (internal, wrapped by BranchStore) =====
 
-  /** @internal Batched accept + decode_each + capture for N branches */
+  /** @internal */
   _storeCommit(handles: number[], tokens: number[]): Promise<void>;
 
-  /** @internal Batched decode_scatter + capture for N branches with variable token counts */
+  /** @internal */
   _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
 
-  /** @internal Retain winner branch, evict all others */
+  /** @internal */
   _storeRetainOnly(handle: number): void;
 
-  /** @internal Get number of available seq_id leases */
+  /** @internal */
   _storeAvailable(): number;
 }
-
-/**
- * Create a new inference context
- *
- * Entry point for all inference. Resolves the correct native binary (see
- * {@link loadBinary} for the platform/GPU fallback chain), loads the model
- * via a reference-counted registry (multiple contexts can share one model's
- * weight tensors in memory), and allocates a `llama_context` with its own
- * KV cache and compute scratch buffers.
- *
- * **What gets allocated:**
- * - KV cache: `nCtx * 2 * nLayers * dHead` bytes per KV type (fp16 default).
- *   For a 7B model with `nCtx: 4096`, expect ~1-2 GB of KV memory.
- * - Compute scratch: temporary buffers for the forward pass, sized to `nBatch`.
- *
- * **Model sharing:** If two contexts use the same `modelPath`, the model
- * weights are loaded once and shared. Only the KV cache and compute buffers
- * are per-context. This makes multi-context setups (e.g., one context per
- * conversation) memory-efficient.
- *
- * @param options Context creation options
- * @param loadOptions Optional binary loading options (GPU variant selection)
- * @returns Promise resolving to SessionContext instance
- *
- * @example Basic usage
- * ```typescript
- * const ctx = await createContext({
- *   modelPath: './model.gguf',
- *   nCtx: 2048,
- *   nThreads: 4
- * });
- *
- * try {
- *   const tokens = await ctx.tokenize("Hello");
- *   const branch = Branch.create(ctx, 0, { temperature: 0.7 });
- *   await branch.prefill(tokens);
- *   for await (const { text } of branch) process.stdout.write(text);
- * } finally {
- *   ctx.dispose();
- * }
- * ```
- *
- * @example Multi-branch context (tree search, best-of-N)
- * ```typescript
- * const ctx = await createContext({
- *   modelPath: './model.gguf',
- *   nCtx: 8192,
- *   nBatch: 512,     // Bin-packing capacity for BranchStore.prefill
- *   nSeqMax: 33,     // 32 branches + 1 root sequence
- * });
- * ```
- *
- * @example With GPU variant selection
- * ```typescript
- * const ctx = await createContext(
- *   { modelPath: './model.gguf', nCtx: 4096 },
- *   { gpuVariant: 'cuda' }
- * );
- * ```
- *
- * @category Core
- */
-export function createContext(
-  options: ContextOptions,
-  loadOptions?: LoadOptions
-): Promise<SessionContext>;
-
-/**
- * Load native binary for a specific GPU variant
- *
- * lloyal.node ships as a family of platform-specific npm packages, each
- * containing a prebuilt native addon:
- * `@lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]`
- * (e.g., `darwin-arm64`, `linux-x64-cuda`, `win32-x64-vulkan`).
- *
- * `loadBinary()` resolves the correct package at runtime with a prioritized
- * fallback chain:
- *
- * 1. Requested GPU variant package (if `variant` or `LLOYAL_GPU` env var set)
- * 2. Local development build (`build/Release/lloyal.node`)
- * 3. Default CPU platform package
- *
- * Most callers should use {@link createContext} directly — it calls
- * `loadBinary()` internally. Use this function when you need to:
- * - Pre-check whether a GPU variant is available before creating contexts
- * - Share one loaded binary across multiple context creations
- * - Inspect or test the binary loading logic in isolation
- *
- * **Environment variables:**
- * - `LLOYAL_LOCAL=1` — Force local build only; throws if not found
- *   (use during development to test local C++ changes)
- * - `LLOYAL_GPU=cuda|vulkan` — Request GPU variant (equivalent to `variant` param)
- * - `LLOYAL_NO_FALLBACK=1` — Disable silent CPU fallback; throws if GPU
- *   variant fails (use in CI to catch missing runtime libraries)
- *
- * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
- * @returns Native binary module with createContext method
- * @throws Error if no binary available for the current platform
- *
- * @example
- * ```typescript
- * // Load default (CPU) binary
- * const binary = loadBinary();
- *
- * // Load CUDA binary (falls back to CPU if unavailable)
- * const binary = loadBinary('cuda');
- *
- * // Create context from loaded binary
- * const ctx = await binary.createContext({ modelPath: './model.gguf' });
- * ```
- *
- * @category Core
- */
-export function loadBinary(variant?: GpuVariant): {
-  createContext(options: ContextOptions): Promise<SessionContext>;
-};
 
 /**
  * Result from Branch.produce()
@@ -1551,551 +1437,104 @@ export interface Produced {
 }
 
 /**
- * Forkable inference handle for covalent generation
- *
- * A Branch owns everything needed for independent generation: a KV cache
- * sequence, sampler chain, logits snapshot, and perplexity tracker.
- *
- * Forking is cheap — the KV prefix is shared in memory (metadata-only operation under unified KV —
- * no KV tensor buffers are copied), so sibling branches read from the same physical KV entries.
- * Only tokens decoded after the fork point are exclusive to each branch.
- *
- * Branches form trees, not just flat lists. Fork from root for best-of-N,
- * fork from children for tree search/beam search, fork from a draft for speculative
- * decoding.
- *
- * The produce/commit protocol separates sampling from state advancement:
- * produce() samples without writing to KV, letting you inspect the result
- * before deciding to commit().
- *
- * @example Best-of-N with perplexity selection
- * ```typescript
- * const root = Branch.create(ctx, tokens.length, { temperature: 0.8 });
- * await root.prefill(tokens);
- *
- * const results = [];
- * for (let i = 0; i < 5; i++) {
- *   const branch = await root.fork();
- *   branch.reseedSampler(1000 + i);
- *   const tokens = [];
- *   for await (const { token } of branch) tokens.push(token);
- *   results.push({ branch, tokens, ppl: branch.perplexity });
- * }
- *
- * const best = results.reduce((a, b) => a.ppl < b.ppl ? a : b);
- * for (const r of results) { if (r !== best) await r.branch.prune(); }
- * ```
+ * Task description for forkAgent
  *
  * @category Branching
  */
-export class Branch {
-  /**
-   * Create a root branch at the given position
-   *
-   * The branch takes ownership of the sequence and creates its own sampler
-   * chain from the provided params. Call prefill() to decode prompt tokens
-   * and capture the logit distribution before forking.
-   *
-   * @param ctx SessionContext to create branch on
-   * @param position Starting position (typically prompt token count)
-   * @param params Sampling parameters (temperature, topP, etc.)
-   * @param nBatch Per-branch batch size override (defaults to context nBatch)
-   * @param grammar GBNF grammar string for constrained generation. When provided,
-   *   sample() returns only grammar-valid tokens. The grammar state is cloned on
-   *   fork(), so sibling branches can diverge independently.
-   */
-  static create(
-    ctx: SessionContext,
-    position: number,
-    params?: SamplingParams,
-    nBatch?: number,
-    grammar?: string
-  ): Branch;
-
-  /**
-   * Fork this branch to a new sequence
-   *
-   * The child shares the parent's KV prefix in memory (metadata-only under unified KV, no KV buffer copy).
-   * Logits, sampler state, and perplexity tracker are cloned so the child
-   * can diverge independently. Fork from any branch — root or intermediate —
-   * to build arbitrarily deep trees.
-   *
-   */
-  fork(): Promise<Branch>;
-
-  /**
-   * Get a copy of this branch's captured logits snapshot.
-   *
-   * Returns n_vocab floats — the raw logit distribution from the last
-   * prefill() or commit() call.
-   *
-   * Returns an independent copy of the branch's internal snapshot.
-   * The returned Float32Array is safe to hold across async boundaries
-   * and is not affected by subsequent decode operations.
-   *
-   * @returns Independent copy of the logits snapshot (n_vocab elements)
-   * @throws If no logits have been captured yet
-   */
-  getLogits(): Float32Array;
-
-  /**
-   * Bulk-decode tokens into the branch's KV cache and capture logits.
-   *
-   * `tokens.length` is the total count to process; the branch's `nBatch`
-   * (set at `Branch.create`) controls how many are sent per `llama_decode`
-   * call. E.g. 500 tokens with `nBatch=64` → 8 calls (7×64 + 1×52).
-   *
-   * Advances `position` by `tokens.length`. Stores final logits into the
-   * branch's internal snapshot — the next `produce()`/`sample()` reads
-   * from it.
-   *
-   * Does NOT accept tokens into the repeat-penalty window — for external
-   * tokens (user input between turns), not model-generated tokens.
-   * For model output, use `commit()` which does accept + decode.
-   *
-   * The primary way to feed tokens into a branch's KV cache.
-   *
-   * @param tokens - Token IDs to decode
-   */
-  prefill(tokens: number[]): Promise<void>;
-
-  /** Sample next token from branch's frozen logits snapshot */
-  sample(): number;
-
-  /** Accept token for repeat-penalty tracking */
-  accept(token: number): void;
-
-  /**
-   * Discard this branch — remove its divergent KV entries and free the handle
-   *
-   * Only removes KV entries divergent from the shared prefix; sibling branches
-   * are unaffected. The disposed flag is set synchronously — any call to
-   * produce(), commit(), etc. after prune() will throw immediately, even
-   * before the returned promise resolves.
-   *
-   * RESTRICT mode: throws if children exist. Use {@link pruneSubtree} to
-   * cascade-delete an entire subtree.
-   */
-  prune(): Promise<void>;
-
-  /**
-   * Discard this branch and all its descendants — CASCADE delete
-   *
-   * Iterative post-order traversal: prunes children first, then this branch.
-   * Use when tearing down an entire subtree (e.g. abandoned search path).
-   * Sets disposed synchronously, like {@link prune}.
-   */
-  pruneSubtree(): Promise<void>;
-
-  /**
-   * Reseed the sampler's PRNG for diversity after fork()
-   *
-   * CRITICAL for parallel generation: Without reseeding, all forked branches
-   * produce identical outputs because they share the same PRNG state.
-   *
-   * Only affects stochastic samplers (temperature > 0). Greedy samplers are unchanged.
-   *
-   * @param seed - New seed for the PRNG
-   */
-  reseedSampler(seed: number): void;
-
-  /**
-   * Apply dynamic logit adjustments for this branch only
-   *
-   * Unlike `logit_bias` in sampling params (which is cloned on fork), steer biases
-   * are NOT inherited by child branches. Each branch manages its own steer state
-   * independently. This makes steer ideal for path-dependent constraints.
-   *
-   * **Use cases:**
-   * - **tsampler**: Block tokens that would create repeated N-grams based on
-   *   this branch's specific generation history
-   * - **Diverse beam search**: Penalize tokens already chosen by sibling beams
-   *   to encourage output diversity across the beam
-   * - **Dynamic constraints**: Apply token restrictions that change per-step
-   *
-   * **Sampling order:** Grammar → Logit Bias → Steer → Sampler Chain
-   *
-   * @param biases - Array of token adjustments. Use `-Infinity` to completely
-   *   block a token, positive values to boost probability, negative to reduce.
-   *
-   * @example Block tokens for N-gram deduplication (tsampler pattern)
-   * ```ts
-   * // Compute which tokens would create repeated 4-grams
-   * const blocked = computeNgramBlocks(generatedTokens, n=4);
-   *
-   * // Block those tokens for this sample only
-   * branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
-   *
-   * const { token } = await branch.produce();  // Blocked tokens won't be sampled
-   * await branch.commit(token);
-   *
-   * // Clear for next iteration (recompute based on new history)
-   * branch.clearSteer();
-   * ```
-   *
-   * @example Diverse beam search
-   * ```ts
-   * // Each beam penalizes tokens chosen by siblings this step
-   * for (const beam of beams) {
-   *   // Collect tokens chosen by other beams
-   *   const siblingTokens = beams
-   *     .filter(b => b !== beam && b.lastToken !== undefined)
-   *     .map(b => b.lastToken);
-   *
-   *   // Penalize sibling choices to encourage diversity
-   *   beam.branch.steer(siblingTokens.map(t => ({ token: t, bias: -2.0 })));
-   *
-   *   const { token } = await beam.branch.produce();
-   *   await beam.branch.commit(token);
-   *   beam.lastToken = token;
-   *   beam.branch.clearSteer();
-   * }
-   * ```
-   *
-   * @example Boost specific tokens
-   * ```ts
-   * // Boost "yes" and "no" tokens for a yes/no question
-   * branch.steer([
-   *   { token: yesTokenId, bias: 5.0 },
-   *   { token: noTokenId, bias: 5.0 }
-   * ]);
-   * ```
-   */
-  steer(biases: Array<{ token: number; bias: number }>): void;
-
-  /**
-   * Clear all steer biases from this branch
-   *
-   * Removes any dynamic logit adjustments set by `steer()`. Call this after
-   * each generation step if your steer constraints are computed per-step
-   * (e.g., N-gram blocking where the blocked set changes as text grows).
-   *
-   * @example Per-step steer pattern
-   * ```ts
-   * for (let i = 0; i < maxTokens; i++) {
-   *   // Compute constraints based on current state
-   *   const blocked = computeConstraints(generatedTokens);
-   *   branch.steer(blocked.map(t => ({ token: t, bias: -Infinity })));
-   *
-   *   const { token, isStop } = await branch.produce();
-   *   if (isStop) break;
-   *
-   *   await branch.commit(token);
-   *   branch.clearSteer();  // Reset for next iteration
-   *   generatedTokens.push(token);
-   * }
-   * ```
-   */
-  clearSteer(): void;
-
-  /**
-   * Compute entropy of the branch's logits distribution
-   *
-   * Measures model uncertainty from the branch's captured logits snapshot:
-   * - Low entropy: Model is confident (peaked distribution)
-   * - High entropy: Model is uncertain (flat distribution)
-   *
-   * Operates directly on `state->logits_snapshot` — no JS round-trip.
-   *
-   * @param base - Logarithm base: "nats" (default) or "bits"
-   * @returns Entropy value in specified base
-   *
-   * COST: O(n_vocab) - must sum over all token probabilities
-   */
-  modelEntropy(base?: 'nats' | 'bits'): number;
-
-  /**
-   * Compute surprisal (negative log-likelihood) for a specific token
-   *
-   * Measures how "surprising" the model finds the given token from
-   * the branch's captured logits snapshot:
-   * - Low surprisal: Model expected this token (high probability)
-   * - High surprisal: Model didn't expect this token (low probability)
-   *
-   * Operates directly on `state->logits_snapshot` — no JS round-trip.
-   *
-   * @param token - Token ID to compute surprisal for
-   * @param base - Logarithm base: "nats" (default) or "bits"
-   * @returns Surprisal value in specified base
-   *
-   * COST: O(n_vocab) - softmax normalization required
-   */
-  modelSurprisal(token: number, base?: 'nats' | 'bits'): number;
-
-  /**
-   * Sampling-level perplexity (from filtered distribution)
-   *
-   * Returns perplexity from the distribution actually sampled from
-   * (after top-k/p/temp/penalties). Useful for policy priors and
-   * monitoring sampler chain impact.
-   *
-   * Compare with {@link perplexity} which is model-level (raw logits).
-   */
-  readonly samplingPerplexity: number;
-
-  /**
-   * Set static logit biases on this branch
-   *
-   * Unlike {@link steer} (which is NOT inherited on fork), logit biases
-   * ARE cloned when forking. Use for persistent constraints that should
-   * propagate to child branches.
-   *
-   * Applied during sample() in order: Grammar -> Logit Bias -> Steer -> Sampler Chain
-   *
-   * @param biases - Array of token adjustments. Use `-Infinity` to block,
-   *   positive to boost, negative to reduce.
-   */
-  setLogitBias(biases: Array<{ token: number; bias: number }>): void;
-
-  /**
-   * Clear all static logit biases from this branch
-   */
-  clearLogitBias(): void;
-
-  /**
-   * Replace the sampler chain with new parameters (memoized)
-   *
-   * If the new params match the current chain's params, this is a no-op.
-   * Otherwise the old chain is freed and a new one is created. Use for
-   * Entropy-Driven Temperature (EDT) and other adaptive sampling strategies
-   * that adjust parameters per-step.
-   *
-   * @param params - New sampling parameters
-   *
-   * @example Entropy-Driven Temperature
-   * ```typescript
-   * const entropy = branch.modelEntropy('nats');
-   * branch.setSamplerParams({ temperature: edtTemperature(entropy) });
-   * const { token } = await branch.produce();
-   * await branch.commit(token);
-   * ```
-   */
-  setSamplerParams(params: SamplingParams): void;
-
-  /**
-   * Replace or remove the grammar constraint
-   *
-   * Pass a GBNF grammar string to constrain generation. Pass empty string
-   * or undefined to remove the constraint. The grammar state is cloned on
-   * fork(), so sibling branches can diverge independently after hot-swap.
-   *
-   * @param grammarStr - GBNF grammar string, or empty/undefined to remove
-   *
-   * @example Hot-swap grammar mid-generation
-   * ```typescript
-   * // Start unconstrained, then switch to JSON after detecting tool call
-   * branch.setGrammar(jsonGrammar);
-   * const { token } = await branch.produce();
-   * ```
-   */
-  setGrammar(grammarStr?: string): void;
-
-  /**
-   * Sample next token without advancing state (async)
-   *
-   * Async contract: local branches resolve immediately; cloud branches
-   * may perform an HTTP round-trip. Use {@link produceSync} when you know
-   * the branch is local and want zero-overhead sampling.
-   */
-  produce(): Promise<Produced>;
-
-  /**
-   * Sample next token without advancing state (sync)
-   *
-   * Same as {@link produce} but synchronous. Use when you know the branch
-   * is local and want to avoid the microtick overhead of a promise.
-   */
-  produceSync(): Produced;
-
-  /**
-   * Accept and decode — update branch state, then write token to KV
-   *
-   * Accepts the token into the sampler penalty window (for correct PPL
-   * measurement), then decodes (writing to KV cache via AsyncWorker on
-   * the libuv thread pool) and captures the resulting logits for the next
-   * produce() call. Accept-first ordering with rollback: if decode throws,
-   * sampler/grammar/metrics are restored from clones.
-   *
-   * @param token Token to commit (from produce())
-   */
-  commit(token: number): Promise<void>;
-
-  /** Branch's current position */
-  readonly position: number;
-
-  /** Branch's perplexity */
-  readonly perplexity: number;
-
-  /** Internal handle (for debugging) */
-  readonly handle: number;
-
-  /** Whether this branch has been disposed */
-  readonly disposed: boolean;
-
-  /** Parent branch handle, or null if root */
-  readonly parent: number | null;
-
-  /** Child branch handles */
-  readonly children: number[];
-
-  /** True if this branch has no children */
-  readonly isLeaf: boolean;
-
-  /** True if this branch holds a KV lease */
-  readonly isActive: boolean;
-
-  /**
-   * Async iterator — generate tokens until EOG
-   *
-   * Commit-before-yield semantics: every yielded token is already written
-   * to KV and accepted into the sampler. Breaking out of the loop is clean —
-   * no orphaned uncommitted tokens, perplexity reflects all yielded tokens.
-   *
-   * For inspect-before-commit (speculative decoding, tree search), use
-   * the {@link produce}/{@link commit} protocol directly.
-   *
-   * @example Generate to completion
-   * ```typescript
-   * for await (const { token, text } of branch) {
-   *   process.stdout.write(text);
-   * }
-   * ```
-   *
-   * @example Generate with consumer-side bound
-   * ```typescript
-   * const tokens = [];
-   * for await (const { token } of branch) {
-   *   tokens.push(token);
-   *   if (tokens.length >= limit) break;
-   * }
-   * ```
-   */
-  [Symbol.asyncIterator](): AsyncIterableIterator<{ token: number; text: string }>;
+export interface AgentTask {
+  /** System prompt for the agent */
+  systemPrompt: string;
+  /** User content / question for the agent */
+  content: string;
+  /** JSON-stringified tool definitions (optional) */
+  tools?: string;
+  /** PRNG seed for sampler diversity (optional) */
+  seed?: number;
 }
 
 /**
- * High-throughput multi-branch decode operations
+ * State of a single agent in a runAgents loop
  *
- * The naive approach to N-branch generation is N sequential llama_decode()
- * calls — each paying full GPU kernel launch overhead, memory barrier, and
- * PCIe round-trip. BranchStore eliminates this by packing all branches into
- * a single llama_batch and dispatching once: O(1) GPU round-trips regardless
- * of branch count. The GPU parallelizes across sequences within the batch,
- * so N branches approach the wall-time cost of 1.
- *
- * Two operations, two packing strategies:
- *
- * **commit()** — Generation step. Each branch contributes exactly 1 token.
- * Packs N tokens into a single batch via `decode_each` (one row per sequence,
- * all at their respective positions). Single `llama_decode()` call. Logits
- * captured per-branch at batch index `i`. O(N) total work, O(1) GPU
- * dispatches, O(1) amortized dispatch overhead per branch. Accept-first
- * ordering with rollback: accepts each token into its branch's repeat-penalty
- * window before decode, restores from clones if decode throws.
- *
- * **prefill()** — Bulk token injection. Each branch contributes a
- * variable-length token array. Uses a two-pass bin-packing algorithm:
- *
- * - *Pass 1 (planning)*: Greedy first-fit packs items into chunks ≤ nBatch.
- *   Items larger than nBatch get a dedicated chunk and fall through to
- *   decode_many's internal auto-chunking (ceil(nTokens / nBatch) calls).
- * - *Pass 2 (dispatch)*: Normal chunks dispatch via `decode_scatter` (one
- *   `llama_decode` per chunk). Logits are indexed by flattened cursor
- *   position: for item k in a chunk, logits live at `cursor + nTokens[k] - 1`.
- *
- * For T total tokens across N branches with batch capacity B:
- * - Best case (T ≤ B): 1 GPU dispatch, all branches in one batch.
- * - Worst case: ceil(T / B) dispatches. Each dispatch is fully packed.
- * - Amortized per-token GPU overhead: O(1/B) — vanishes as batch fills.
- *
- * Does NOT accept tokens into the sampler penalty window — use for
- * external/replayed tokens where repeat-penalty tracking is unwanted.
- * For model-generated tokens, use {@link commit} instead.
- *
- * Both methods take `[branch, token(s)]` tuples — the branch-to-token
- * binding is structural, not positional. After either call, each branch's
- * logits snapshot is updated with the output distribution from its decoded
- * token(s), ready for the next `produce()`/`sample()` call.
- *
- * @example 32-branch generation step — one GPU dispatch
- * ```typescript
- * const store = new BranchStore(ctx);
- * const entries = await Promise.all(branches.map(async b => [b, (await b.produce()).token] as [Branch, number]));
- * await store.commit(entries);  // 32 tokens, 1 llama_decode()
- * ```
- *
- * @example Best-of-N with batched commit
- * ```typescript
- * const store = new BranchStore(ctx);
- * const branches = [];
- * for (const _ of [1, 2, 3]) branches.push(await root.fork());
- *
- * for (let step = 0; step < 50; step++) {
- *   const produced = await Promise.all(branches.map(async b => [b, await b.produce()] as const));
- *   const live = produced.filter(([, p]) => !p.isStop);
- *   if (!live.length) break;
- *   await store.commit(live.map(([b, p]) => [b, p.token]));
- * }
- * ```
- *
- * @example Asymmetric prefill — variable-length injections, auto-chunked
- * ```typescript
- * await store.prefill([
- *   [branchA, systemPromptTokens],   // 200 tokens
- *   [branchB, shortQueryTokens],     //  12 tokens
- *   [branchC, longDocumentTokens],   // 800 tokens
- * ]);
- * // Bin-packed into ceil(1012 / nBatch) GPU dispatches
- * ```
+ * Returned by forkAgent(). Also constructible manually for shared-prefix
+ * patterns (Phase 2 agentRoot + slice).
  *
  * @category Branching
  */
-export class BranchStore {
-  constructor(ctx: SessionContext);
+export interface AgentState {
+  /** The agent's branch */
+  branch: Branch;
+  /** Tokens to prefill before the loop starts */
+  suffixTokens: number[];
+  /** Format metadata for parseChatOutput */
+  fmt: {
+    format: ChatFormat;
+    reasoningFormat: ReasoningFormat;
+    thinkingForcedOpen: boolean;
+    parser: string;
+  };
+  /** Accumulated raw output text */
+  rawOutput: string;
+  /** Whether the agent has finished */
+  done: boolean;
+  /** Number of tokens generated */
+  tokenCount: number;
+  /** Number of tool calls made */
+  toolCallCount: number;
+  /** Number of tool-call turns completed */
+  turns: number;
+  /** Final findings (set by report tool or fallback content) */
+  findings: string | null;
+}
 
-  /**
-   * Batched single-token commit for model-generated tokens
-   *
-   * Each tuple `[branch, token]` binds one token to one branch.
-   * Accepts each token into its branch's repeat-penalty window (for correct
-   * PPL measurement), then decodes all N tokens in a single llama_decode()
-   * call via decode_each and captures logits per-branch. Accept-first
-   * ordering with rollback: if decode throws, sampler/grammar/metrics are
-   * restored from clones taken before the accept.
-   *
-   * @param entries - Array of `[branch, token]` tuples (branches must not be disposed)
-   * @throws If any branch is disposed
-   */
-  commit(entries: [Branch, number][]): Promise<void>;
+/**
+ * Options for runAgents
+ *
+ * @category Branching
+ */
+export interface RunAgentsOptions {
+  /** BranchStore for commit/prefill */
+  store: BranchStore;
+  /** SessionContext for parseChatOutput, formatChat, tokenize */
+  ctx: SessionContext;
+  /** Tool executor — consumer wraps with locks as needed */
+  executeTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** Maximum tool-call turns per agent (default: 6) */
+  maxTurns?: number;
+  /** Called when an agent dispatches a tool call */
+  onToolCall?: (agentIndex: number, toolName: string, args: string) => void;
+  /** Called when a tool result returns */
+  onToolResult?: (agentIndex: number, toolName: string, resultStr: string) => void;
+  /** Called when an agent submits a report */
+  onReport?: (agentIndex: number, findings: string) => void;
+}
 
-  /**
-   * Batched variable-length prefill for external tokens
-   *
-   * Each tuple `[branch, tokens]` binds a token array to one branch.
-   * Each branch can receive a different number of tokens — decode_scatter
-   * handles variable-length runs and auto-chunks to fit nBatch.
-   *
-   * Does NOT call accept_token — use for external/replayed tokens where
-   * repeat-penalty tracking is unwanted. For model-generated tokens,
-   * use {@link commit} instead.
-   *
-   * @param entries - Array of `[branch, tokens]` tuples (branches must not be disposed)
-   * @throws If any branch is disposed
-   */
-  prefill(entries: [Branch, number[]][]): Promise<void>;
+/**
+ * Result from runAgents
+ *
+ * @category Branching
+ */
+export interface RunAgentsResult {
+  /** Total tokens generated across all agents */
+  totalTokens: number;
+  /** Total tool calls across all agents */
+  totalToolCalls: number;
+  /** Number of batched decode steps */
+  steps: number;
+  /** Performance counters */
+  counters: {
+    warmPrefillCalls: number;
+    warmPrefillBranches: number;
+    stalledTicks: number;
+    maxConcurrentTools: number;
+    idleTicks: number;
+  };
+}
 
-  /**
-   * Retain only the winner branch — evict all other leases and free their slots.
-   *
-   * Nuclear operation: calls `kv::seq_keep` on the winner's seq_id (stripping all
-   * other sequences from KV cache in a single pass), then frees all loser slots
-   * and rebuilds the vacancy list. The winner's topology is reset (no parent, no children).
-   *
-   * @param winner - The branch to keep (must not be disposed, must hold a lease)
-   * @throws If winner is disposed or has no lease
-   */
-  retainOnly(winner: Branch): Promise<void>;
-
-  /** Number of available seq_id leases */
-  readonly available: number;
+/**
+ * Native binding interface — what loadBinary() returns
+ *
+ * @category Core
+ */
+export interface NativeBinding {
+  createContext(options: ContextOptions): Promise<SessionContext>;
 }

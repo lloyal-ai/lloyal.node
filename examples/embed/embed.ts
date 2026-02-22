@@ -3,9 +3,9 @@
  * Embedding extraction example using lloyal.node
  *
  * Usage:
- *   node embed.mjs /path/to/embedding-model.gguf          # Human-readable output
- *   node embed.mjs /path/to/embedding-model.gguf --jsonl  # JSONL output for testing
- *   node embed.mjs  # uses default nomic-embed model path
+ *   npx tsx embed.ts /path/to/embedding-model.gguf          # Human-readable output
+ *   npx tsx embed.ts /path/to/embedding-model.gguf --jsonl  # JSONL output for testing
+ *   npx tsx embed.ts  # uses default nomic-embed model path
  *
  * This example demonstrates:
  * - Creating an embedding context with pooling enabled
@@ -14,10 +14,8 @@
  */
 
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createContext } from '../../lib/index.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { createContext, PoolingType } from '../../dist/index.js';
+import type { SessionContext } from '../../dist/index.js';
 
 // Default to nomic-embed-text model in fixtures
 const DEFAULT_MODEL = path.resolve(
@@ -31,24 +29,16 @@ const jsonlMode = args.includes('--jsonl');
 const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
 
 /** Emit output - JSONL or human-readable */
-function emit(event, data) {
+function emit(event: string, data: Record<string, unknown>): void {
   if (jsonlMode) {
     console.log(JSON.stringify({ event, ...data }));
   }
 }
 
-// Pooling types (matches llama.cpp LLAMA_POOLING_TYPE_*)
-const PoolingType = {
-  NONE: 0,
-  MEAN: 1,
-  CLS: 2,
-  LAST: 3,
-};
-
 /**
  * Compute cosine similarity between two vectors
  */
-function cosineSimilarity(a, b) {
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length) {
     throw new Error('Vectors must have same dimension');
   }
@@ -73,7 +63,7 @@ function cosineSimilarity(a, b) {
 /**
  * Get embedding for a text
  */
-async function getEmbedding(ctx, text) {
+async function getEmbedding(ctx: SessionContext, text: string): Promise<Float32Array> {
   // Tokenize the text
   const tokens = await ctx.tokenize(text);
 
@@ -89,7 +79,7 @@ async function getEmbedding(ctx, text) {
   return embedding;
 }
 
-async function main() {
+async function main(): Promise<void> {
   if (!jsonlMode) {
     console.log('='.repeat(60));
     console.log('lloyal.node Embedding Example');
@@ -134,7 +124,7 @@ async function main() {
   }
 
   // Get embeddings for all texts
-  const embeddings = [];
+  const embeddings: { text: string; embedding: Float32Array }[] = [];
   for (const text of texts) {
     const start = performance.now();
     const embedding = await getEmbedding(ctx, text);
@@ -167,7 +157,7 @@ async function main() {
       emit('similarity', { i, j, similarity: sim });
 
       if (!jsonlMode) {
-        const bar = '█'.repeat(Math.round(sim * 20));
+        const bar = '\u2588'.repeat(Math.round(sim * 20));
         console.log(`  [${i}] vs [${j}]: ${sim.toFixed(4)} ${bar}`);
         console.log(`      "${texts[i].substring(0, 30)}..."`);
         console.log(`      "${texts[j].substring(0, 30)}..."`);
@@ -204,7 +194,7 @@ async function main() {
   if (!jsonlMode) {
     console.log('Results (ranked by similarity):\n');
     ranked.forEach((result, i) => {
-      const bar = '█'.repeat(Math.round(result.similarity * 20));
+      const bar = '\u2588'.repeat(Math.round(result.similarity * 20));
       console.log(`  ${i + 1}. ${result.similarity.toFixed(4)} ${bar}`);
       console.log(`     "${result.text}"`);
       console.log();
@@ -222,7 +212,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Error:', err.message);
-  console.error(err.stack);
+  console.error('Error:', (err as Error).message);
+  console.error((err as Error).stack);
   process.exit(1);
 });

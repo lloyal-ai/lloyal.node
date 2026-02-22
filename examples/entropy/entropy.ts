@@ -14,15 +14,14 @@
  *
  *
  * Usage:
- *   node entropy.mjs [model-path]          # Human-readable output
- *   node entropy.mjs [model-path] --jsonl  # JSONL output for testing
+ *   npx tsx entropy.ts [model-path]          # Human-readable output
+ *   npx tsx entropy.ts [model-path] --jsonl  # JSONL output for testing
  */
 
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createContext, Branch } from '../../lib/index.js';
+import { createContext, Branch } from '../../dist/index.js';
+import type { SessionContext } from '../../dist/index.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = path.resolve(
   __dirname,
   '../../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf'
@@ -34,7 +33,7 @@ const jsonlMode = args.includes('--jsonl');
 const modelPath = args.find(a => !a.startsWith('--')) || DEFAULT_MODEL;
 
 /** Emit output - JSONL or human-readable */
-function emit(event, data) {
+function emit(event: string, data: Record<string, unknown>): void {
   if (jsonlMode) {
     console.log(JSON.stringify({ event, ...data }));
   }
@@ -48,7 +47,7 @@ const THETA = 1.5; // Scale factor
 /**
  * Calculate EDT temperature from entropy
  */
-function edtTemperature(entropy) {
+function edtTemperature(entropy: number): number {
   const safeEntropy = Math.max(entropy, 0.1);
   return T0 * Math.pow(N, THETA / safeEntropy);
 }
@@ -59,7 +58,7 @@ function edtTemperature(entropy) {
  * Uses Branch API with per-token setSamplerParams() for EDT adaptation.
  * Each token gets a temperature computed from the current logit entropy.
  */
-async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
+async function generate(ctx: SessionContext, prompt: string, strategy: number | 'edt', strategyName: string, maxTokens: number = 50): Promise<{text: string; avgEntropy: number; avgTemp: number; tokenCount: number; temps: number[]; entropies: number[]}> {
   const messages = [{ role: 'user', content: prompt }];
   const { prompt: formatted } = await ctx.formatChat(JSON.stringify(messages));
   const tokens = await ctx.tokenize(formatted);
@@ -68,9 +67,9 @@ async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
   const branch = Branch.create(ctx, 0, { temperature: baseTemp, topP: 0.9 });
   await branch.prefill(tokens);
 
-  const output = [];
-  const temps = [];
-  const entropies = [];
+  const output: number[] = [];
+  const temps: number[] = [];
+  const entropies: number[] = [];
 
   for (let i = 0; i < maxTokens; i++) {
     const entropy = branch.modelEntropy('nats');
@@ -100,10 +99,12 @@ async function generate(ctx, prompt, strategy, strategyName, maxTokens = 50) {
   return { text, avgEntropy, avgTemp, tokenCount: output.length, temps, entropies };
 }
 
+type GenerateResult = Awaited<ReturnType<typeof generate>>;
+
 /**
  * Run comparison for a single prompt
  */
-async function compareStrategies(ctx, prompt, label) {
+async function compareStrategies(ctx: SessionContext, prompt: string, label: string): Promise<{fixed: GenerateResult; edt: GenerateResult}> {
   if (!jsonlMode) {
     console.log(`\n${'='.repeat(70)}`);
     console.log(`${label}: "${prompt}"`);
@@ -152,7 +153,7 @@ async function compareStrategies(ctx, prompt, label) {
   return { fixed, edt };
 }
 
-async function main() {
+async function main(): Promise<void> {
   if (!jsonlMode) {
     console.log('EDT vs Fixed Temperature Comparison');
     console.log('Based on Zhang et al. 2024: https://arxiv.org/abs/2403.14541\n');
@@ -209,7 +210,7 @@ don't add randomness - let it output what it knows.
 }
 
 main().catch((err) => {
-  console.error('Error:', err.message);
-  console.error(err.stack);
+  console.error('Error:', (err as Error).message);
+  console.error((err as Error).stack);
   process.exit(1);
 });

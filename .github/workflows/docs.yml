@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'lib/index.d.ts'
-      - 'lib/Branch.js'
+      - 'src/types.ts'
+      - 'src/Branch.ts'
       - 'package.json'
       - 'typedoc.json'
       - 'README.md'

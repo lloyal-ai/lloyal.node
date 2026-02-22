@@ -2,25 +2,27 @@
   "name": "@lloyal-labs/lloyal.node",
   "version": "1.6.0",
   "description": "Node.js client for liblloyal+llama.cpp",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "gypfile": false,
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "download-models": "bash scripts/download-test-models.sh",
-    "build": "node scripts/build.js",
+    "build:native": "node scripts/build.js",
+    "build:ts": "tsc",
+    "build": "npm run build:ts && npm run build:native",
     "build:debug": "cmake-js compile --debug",
     "rebuild": "cmake-js rebuild",
-    "clean": "cmake-js clean && rm -rf build_test/",
+    "clean": "cmake-js clean && rm -rf build_test/ dist/",
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
     "test": "npm run test:integration",
-    "test:integration": "node test/integration.js",
-    "test:examples": "node test/examples.js",
+    "test:integration": "npx tsx test/integration.ts",
+    "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
-    "example": "node examples/chat/chat.mjs"
+    "example": "npx tsx examples/chat/chat.ts"
   },
   "repository": {
     "type": "git",
@@ -47,10 +49,13 @@
     "node-addon-api": "^8.5.0"
   },
   "devDependencies": {
+    "@types/node": "^25.3.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
+    "tsx": "^4.21.0",
     "typedoc": "^0.28.16",
-    "typedoc-rhineai-theme": "^1.2.0"
+    "typedoc-rhineai-theme": "^1.2.0",
+    "typescript": "^5.9.3"
   },
   "optionalDependencies": {
     "@lloyal-labs/lloyal.node-darwin-arm64": "1.6.0",
@@ -71,7 +76,7 @@
     "node": ">=22.0.0"
   },
   "files": [
-    "lib/",
+    "dist/",
     "scripts/"
   ]
 }
