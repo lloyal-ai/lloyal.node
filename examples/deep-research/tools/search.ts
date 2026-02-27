@@ -16,8 +16,15 @@ export function createSearchTool(chunks: Chunk[], reranker: Reranker): Tool {
         },
       },
     },
-    async execute(args) {
-      return reranker.score((args.query as string) || '', chunks);
+    async execute(args, context?) {
+      const query = (args.query as string)?.trim();
+      if (!query) return { error: 'query must not be empty' };
+      let last;
+      for await (const { results, filled, total } of reranker.score(query, chunks)) {
+        if (context?.onProgress) context.onProgress({ filled, total });
+        last = results;
+      }
+      return last;
     },
   };
 }

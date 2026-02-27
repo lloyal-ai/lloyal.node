@@ -9,6 +9,7 @@ const DEFAULT_SYSTEM_PROMPT = fs.readFileSync(path.resolve(__dirname, 'research.
 export { DEFAULT_SYSTEM_PROMPT as RESEARCH_SYSTEM_PROMPT };
 
 export interface AgentResult {
+  agentId: number;
   findings: string | null;
   toolCallCount: number;
   tokenCount: number;
@@ -31,8 +32,11 @@ export async function research(ctx: SessionContext, store: BranchStore, opts: {
   toolsJson: string;
   executeTool: ExecuteToolFn;
   maxTurns?: number;
-  onToolCall?: (agentIndex: number, toolName: string, args: string) => void;
-  onToolResult?: (agentIndex: number, toolName: string, resultStr: string) => void;
+  onProduce?: (agentId: number, text: string, tokenCount: number) => void;
+  onToolCall?: (agentId: number, toolName: string, args: string) => void;
+  onToolResult?: (agentId: number, toolName: string, resultStr: string) => void;
+  onToolProgress?: (agentId: number, toolName: string, progress: { filled: number; total: number }) => void;
+  onReport?: (agentId: number, findings: string) => void;
 }): Promise<ResearchResult> {
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
 
@@ -89,6 +93,9 @@ export async function research(ctx: SessionContext, store: BranchStore, opts: {
           reasoningFormat: fmt.reasoningFormat,
           thinkingForcedOpen: fmt.thinkingForcedOpen,
           parser: fmt.parser,
+          grammar: fmt.grammar,
+          grammarLazy: fmt.grammarLazy,
+          grammarTriggers: fmt.grammarTriggers,
         },
         rawOutput: '',
         done: false,
@@ -108,8 +115,11 @@ export async function research(ctx: SessionContext, store: BranchStore, opts: {
     store, ctx,
     executeTool: opts.executeTool,
     maxTurns: opts.maxTurns ?? 6,
+    onProduce: opts.onProduce,
     onToolCall: opts.onToolCall,
     onToolResult: opts.onToolResult,
+    onToolProgress: opts.onToolProgress,
+    onReport: opts.onReport,
   });
 
   for (const a of agents) await a.branch.prune();
@@ -117,6 +127,7 @@ export async function research(ctx: SessionContext, store: BranchStore, opts: {
 
   return {
     agents: agents.map((a) => ({
+      agentId: a.agentId,
       findings: a.findings,
       toolCallCount: a.toolCallCount,
       tokenCount: a.tokenCount,

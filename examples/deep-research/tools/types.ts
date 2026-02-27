@@ -8,8 +8,14 @@ export interface ScoredChunk {
   endLine: number;
 }
 
+export interface ScoredResult {
+  results: ScoredChunk[];
+  filled: number;
+  total: number;
+}
+
 export interface Reranker {
-  score(query: string, chunks: Chunk[]): Promise<ScoredChunk[]>;
+  score(query: string, chunks: Chunk[]): AsyncIterable<ScoredResult>;
   tokenizeChunks(chunks: Chunk[]): Promise<void>;
   dispose(): void;
 }
@@ -17,7 +23,14 @@ export interface Reranker {
 export interface Tool {
   name: string;
   schema: object;
-  execute: (args: Record<string, unknown>) => Promise<unknown>;
+  execute: (
+    args: Record<string, unknown>,
+    context?: { onProgress?: (p: { filled: number; total: number }) => void },
+  ) => Promise<unknown>;
 }
 
-export type ExecuteToolFn = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+export type ExecuteToolFn = (
+  name: string,
+  args: Record<string, unknown>,
+  context?: { onProgress?: (p: { filled: number; total: number }) => void },
+) => Promise<unknown>;

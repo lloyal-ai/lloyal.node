@@ -9,7 +9,25 @@ export const c = isTTY ? {
   green: '\x1b[32m', cyan: '\x1b[36m', yellow: '\x1b[33m', red: '\x1b[31m',
 } : { bold: '', dim: '', reset: '', green: '', cyan: '', yellow: '', red: '' };
 
-export const log = (...a: unknown[]): void => { if (!_jsonlMode) console.log(...a); };
+let _statusText = '';
+
+export function status(text: string): void {
+  if (_jsonlMode || !isTTY) return;
+  _statusText = text;
+  process.stdout.write('\r\x1b[K' + text);
+}
+
+export function statusClear(): void {
+  if (!_statusText) return;
+  _statusText = '';
+  process.stdout.write('\r\x1b[K');
+}
+
+export const log = (...a: unknown[]): void => {
+  if (_jsonlMode) return;
+  statusClear();
+  console.log(...a);
+};
 
 export function emit(event: string, data: Record<string, unknown>): void {
   if (_jsonlMode) console.log(JSON.stringify({ event, ...data }));
