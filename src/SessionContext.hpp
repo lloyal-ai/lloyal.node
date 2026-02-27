@@ -249,6 +249,7 @@ private:
   Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
   Napi::Value _branchSetSamplerParams(const Napi::CallbackInfo& info);
   Napi::Value _branchSetGrammar(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetGrammarLazy(const Napi::CallbackInfo& info);
   Napi::Value _branchModelEntropy(const Napi::CallbackInfo& info);
   Napi::Value _branchModelSurprisal(const Napi::CallbackInfo& info);
   Napi::Value _branchGetSamplingPerplexity(const Napi::CallbackInfo& info);
@@ -261,6 +262,10 @@ private:
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
+
+  // ===== SCORING API =====
+
+  Napi::Value _scoreGroup(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====

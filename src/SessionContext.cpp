@@ -9,9 +9,11 @@
 #include <lloyal/chat_out.hpp>
 #include <lloyal/grammar.hpp>
 #include <lloyal/kv.hpp>
+#include <lloyal/logits.hpp>
 #include <lloyal/embedding.hpp>
 #include <lloyal/metrics.hpp>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 
 namespace liblloyal_node {
@@ -708,6 +710,68 @@ private:
 };
 
 /**
+ * AsyncWorker for batch logit scoring (process_chunks)
+ * Owns token storage and logit output buffers
+ */
+class ScoreGroupWorker : public Napi::AsyncWorker {
+public:
+  ScoreGroupWorker(Napi::Env env,
+                   llama_context* ctx,
+                   llama_model* model,
+                   int32_t nSeqMax,
+                   std::vector<std::vector<llama_token>> tokenStorage)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _model(model),
+      _nSeqMax(nSeqMax), _tokenStorage(std::move(tokenStorage)) {}
+
+  void Execute() override {
+    try {
+      if (static_cast<int32_t>(_tokenStorage.size()) > _nSeqMax) {
+        SetError("_scoreGroup: input size " + std::to_string(_tokenStorage.size()) +
+                 " exceeds n_seq_max " + std::to_string(_nSeqMax));
+        return;
+      }
+
+      int32_t n_vocab = lloyal::tokenizer::vocab_size(_model);
+      size_t n = _tokenStorage.size();
+
+      _logitsStorage.resize(n);
+      std::vector<std::span<const llama_token>> spans(n);
+      std::vector<float*> outputs(n);
+      for (size_t i = 0; i < n; ++i) {
+        _logitsStorage[i].resize(n_vocab);
+        spans[i] = _tokenStorage[i];
+        outputs[i] = _logitsStorage[i].data();
+      }
+
+      lloyal::logits::process_chunks(_ctx, spans, outputs, n_vocab);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::Array result = Napi::Array::New(env, _logitsStorage.size());
+    for (size_t i = 0; i < _logitsStorage.size(); ++i) {
+      auto buf = Napi::Float32Array::New(env, _logitsStorage[i].size());
+      std::memcpy(buf.Data(), _logitsStorage[i].data(),
+                  _logitsStorage[i].size() * sizeof(float));
+      result.Set(static_cast<uint32_t>(i), buf);
+    }
+    _deferred.Resolve(result);
+  }
+
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  llama_model* _model;
+  int32_t _nSeqMax;
+  std::vector<std::vector<llama_token>> _tokenStorage;
+  std::vector<std::vector<float>> _logitsStorage;
+};
+
+/**
  * AsyncWorker for JSON schema → GBNF grammar conversion
  * Pure CPU, no shared state — cleanest worker
  */
@@ -796,6 +860,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchClearSteer", &SessionContext::_branchClearSteer),
     InstanceMethod("_branchSetSamplerParams", &SessionContext::_branchSetSamplerParams),
     InstanceMethod("_branchSetGrammar", &SessionContext::_branchSetGrammar),
+    InstanceMethod("_branchSetGrammarLazy", &SessionContext::_branchSetGrammarLazy),
     InstanceMethod("_branchModelEntropy", &SessionContext::_branchModelEntropy),
     InstanceMethod("_branchModelSurprisal", &SessionContext::_branchModelSurprisal),
     InstanceMethod("_branchGetSamplingPerplexity", &SessionContext::_branchGetSamplingPerplexity),
@@ -807,6 +872,9 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
     InstanceMethod("_storeRetainOnly", &SessionContext::_storeRetainOnly),
     InstanceMethod("_storeAvailable", &SessionContext::_storeAvailable),
+
+    // ===== SCORING API =====
+    InstanceMethod("_scoreGroup", &SessionContext::_scoreGroup),
 
     // ===== PROPERTIES =====
     InstanceAccessor("vocabSize", &SessionContext::getVocabSize, nullptr),
@@ -1479,6 +1547,42 @@ Napi::Value SessionContext::kvCacheReadFile(const Napi::CallbackInfo& info) {
   return worker->GetPromise();
 }
 
+// ===== SCORING API =====
+
+Napi::Value SessionContext::_scoreGroup(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    throw Napi::Error::New(env, "_scoreGroup requires (tokenArrays: number[][])");
+  }
+
+  Napi::Array jsTokenArrays = info[0].As<Napi::Array>();
+  uint32_t n = jsTokenArrays.Length();
+
+  if (n == 0) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(Napi::Array::New(env, 0));
+    return deferred.Promise();
+  }
+
+  std::vector<std::vector<llama_token>> tokenStorage(n);
+  for (uint32_t i = 0; i < n; i++) {
+    Napi::Array jsArr = jsTokenArrays.Get(i).As<Napi::Array>();
+    uint32_t len = jsArr.Length();
+    tokenStorage[i].resize(len);
+    for (uint32_t j = 0; j < len; j++) {
+      tokenStorage[i][j] = static_cast<llama_token>(
+        jsArr.Get(j).As<Napi::Number>().Int32Value());
+    }
+  }
+
+  int32_t nSeqMax = static_cast<int32_t>(llama_n_seq_max(_context));
+  auto* worker = new ScoreGroupWorker(env, _context, _model.get(), nSeqMax, std::move(tokenStorage));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
 // ===== FACTORY FUNCTION =====
 
 Napi::Value CreateContext(const Napi::CallbackInfo& info) {
@@ -1956,6 +2060,39 @@ Napi::Value SessionContext::_branchSetGrammar(const Napi::CallbackInfo& info) {
     _model.get(),
     grammar_str.empty() ? "" : grammar_str.c_str(),
     _branchStore
+  );
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchSetGrammarLazy(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 4) {
+    throw Napi::Error::New(env, "_branchSetGrammarLazy requires (handle, grammarStr, triggerPatterns, triggerTokens)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  std::string grammar_str = info[1].As<Napi::String>().Utf8Value();
+
+  // Extract trigger patterns (string[])
+  std::vector<std::string> trigger_patterns;
+  Napi::Array pArr = info[2].As<Napi::Array>();
+  for (uint32_t i = 0; i < pArr.Length(); i++) {
+    trigger_patterns.push_back(pArr.Get(i).As<Napi::String>().Utf8Value());
+  }
+
+  // Extract trigger tokens (number[])
+  std::vector<llama_token> trigger_tokens;
+  Napi::Array tArr = info[3].As<Napi::Array>();
+  for (uint32_t i = 0; i < tArr.Length(); i++) {
+    trigger_tokens.push_back(static_cast<llama_token>(tArr.Get(i).As<Napi::Number>().Int32Value()));
+  }
+
+  lloyal::branch::set_grammar_lazy(
+    handle, _model.get(), grammar_str.c_str(),
+    trigger_patterns, trigger_tokens, _branchStore
   );
 
   return env.Undefined();

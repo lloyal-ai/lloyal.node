@@ -10,11 +10,14 @@
  *
  * Optional embedding tests:
  *   LLAMA_EMBED_MODEL=models/nomic-embed-text-v1.5.Q4_K_M.gguf npm run test:integration
+ *
+ * Optional rerank tests:
+ *   LLAMA_RERANK_MODEL=models/bge-reranker-v2-m3-Q4_K_M.gguf npm run test:integration
  */
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { loadBinary, Branch, BranchStore } from '../dist/index.js';
+import { loadBinary, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
 const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
@@ -23,6 +26,10 @@ const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
 const EMBED_MODEL_PATH: string | null = process.env.LLAMA_EMBED_MODEL ||
   (fs.existsSync(path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'))
     ? path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf')
+    : null);
+const RERANK_MODEL_PATH: string | null = process.env.LLAMA_RERANK_MODEL ||
+  (fs.existsSync(path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf'))
+    ? path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf')
     : null);
 
 const CTX_SIZE: number = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
@@ -1889,6 +1896,221 @@ async function testBranchMetrics(): Promise<void> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RERANK TESTS (optional)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testRerank(): Promise<void> {
+  if (!RERANK_MODEL_PATH) {
+    console.log('\n--- Rerank (SKIPPED - no LLAMA_RERANK_MODEL) ---');
+    return;
+  }
+
+  console.log('\n--- Rerank ---');
+  console.log(`  Model: ${path.basename(RERANK_MODEL_PATH)}`);
+
+  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH });
+
+  try {
+    // Tokenize documents
+    const query = 'What is the capital of France?';
+    const docs = [
+      'Berlin is the capital of Germany and its largest city.',
+      'Paris is the capital and most populous city of France.',
+      'The Amazon rainforest produces about 20% of the world\'s oxygen.',
+      'France is a country in Western Europe, with its capital being Paris.',
+    ];
+    const tokenized: number[][] = await Promise.all(docs.map(d => rerank.tokenize(d)));
+
+    // Score all documents — drain async iterable to final progress
+    let results!: { score: number; index: number }[];
+    let progressCount = 0;
+    for await (const p of rerank.score(query, tokenized)) {
+      progressCount++;
+      results = p.results;
+    }
+    assert(progressCount > 0, `rerank: received progress updates (got ${progressCount})`);
+
+    // All results returned (no topK)
+    assert(results.length === docs.length,
+      `rerank: returns all ${docs.length} results when no topK`);
+
+    // Scores are valid probabilities (0-1) and sorted descending
+    for (let i = 0; i < results.length; i++) {
+      assert(results[i].score >= 0 && results[i].score <= 1,
+        `rerank: score[${i}] = ${results[i].score} is in [0, 1]`);
+      assert(Number.isInteger(results[i].index) && results[i].index >= 0 && results[i].index < docs.length,
+        `rerank: index[${i}] = ${results[i].index} is valid`);
+      if (i > 0) {
+        assert(results[i].score <= results[i - 1].score,
+          `rerank: sorted descending (${results[i - 1].score} >= ${results[i].score})`);
+      }
+    }
+
+    // Semantic: Paris docs (index 1, 3) should rank above Amazon doc (index 2)
+    const topIndices = results.slice(0, 2).map(r => r.index);
+    assert(topIndices.includes(1) || topIndices.includes(3),
+      `rerank: a Paris doc in top 2 (top indices: [${topIndices}])`);
+
+    const amazonRank = results.findIndex(r => r.index === 2);
+    assert(amazonRank >= 2,
+      `rerank: Amazon doc not in top 2 (rank: ${amazonRank})`);
+    ok(`rerank: semantic ordering correct (top: [${topIndices}], amazon rank: ${amazonRank})`);
+
+    // topK parameter
+    let top2!: { score: number; index: number }[];
+    for await (const p of rerank.score(query, tokenized, 2)) { top2 = p.results; }
+    assert(top2.length === 2, `rerank: topK=2 returns 2 results`);
+    assert(top2[0].score === results[0].score && top2[0].index === results[0].index,
+      `rerank: topK=2 matches top of full results`);
+
+    // tokenize() produces consistent output
+    const tokens1 = await rerank.tokenize('hello');
+    const tokens2 = await rerank.tokenize('hello');
+    assert(tokens1.length === tokens2.length && tokens1.every((t, i) => t === tokens2[i]),
+      `rerank: tokenize() is deterministic`);
+  } finally {
+    rerank.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LARGE CORPUS RERANK — >n_seq_max documents via C++ grouping
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testRerankLargeCorpus(): Promise<void> {
+  if (!RERANK_MODEL_PATH) {
+    console.log('\n--- Rerank Large Corpus (SKIPPED - no LLAMA_RERANK_MODEL) ---');
+    return;
+  }
+
+  console.log('\n--- Rerank Large Corpus ---');
+  console.log(`  Model: ${path.basename(RERANK_MODEL_PATH)}`);
+
+  // n_seq_max=8 so 20 documents requires 3 groups (8+8+4)
+  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH, nSeqMax: 8 });
+
+  try {
+    const query = 'What is the capital of France?';
+    const relevantDoc = 'Paris is the capital and most populous city of France.';
+
+    // Build 20 documents: 1 relevant + 19 irrelevant
+    const docTexts: string[] = [
+      relevantDoc,
+      'The Amazon rainforest produces about 20% of the world\'s oxygen.',
+      'Berlin is the capital of Germany and its largest city.',
+      'The Great Wall of China is over 13,000 miles long.',
+      'Tokyo is the most populous metropolitan area in the world.',
+      'The Sahara Desert is the largest hot desert in the world.',
+      'Mount Everest is the highest mountain above sea level.',
+      'The Pacific Ocean is the largest and deepest ocean.',
+      'Antarctica is the coldest continent on Earth.',
+      'The Nile is traditionally considered the longest river.',
+      'Australia is both a country and a continent.',
+      'The human body contains approximately 206 bones.',
+      'Jupiter is the largest planet in our solar system.',
+      'The speed of light is approximately 299,792 kilometers per second.',
+      'DNA was first identified by Friedrich Miescher in 1869.',
+      'The International Space Station orbits Earth every 90 minutes.',
+      'Honey never spoils due to its low moisture content.',
+      'Venice is built on more than 100 small islands.',
+      'The deepest point in the ocean is the Mariana Trench.',
+      'Photosynthesis converts carbon dioxide and water into glucose.',
+    ];
+
+    const tokenized: number[][] = await Promise.all(docTexts.map(d => rerank.tokenize(d)));
+    assert(tokenized.length === 20, `large corpus: 20 documents tokenized`);
+
+    // Single score() call — drain iterable, verify incremental progress
+    let results!: { score: number; index: number }[];
+    let progressCount = 0;
+    for await (const p of rerank.score(query, tokenized)) {
+      progressCount++;
+      assert(p.total === 20, `large corpus: total is 20 (got ${p.total})`);
+      assert(p.filled <= p.total, `large corpus: filled ${p.filled} <= total ${p.total}`);
+      results = p.results;
+    }
+    assert(progressCount >= 3, `large corpus: ≥3 progress updates for 20 docs / n_seq_max=8 (got ${progressCount})`);
+
+    assert(results.length === 20, `large corpus: all 20 results returned`);
+
+    // Scores sorted descending
+    for (let i = 1; i < results.length; i++) {
+      assert(results[i].score <= results[i - 1].score,
+        `large corpus: sorted descending at index ${i}`);
+    }
+
+    // Relevant doc (index 0) should rank in top 3
+    const relevantRank = results.findIndex(r => r.index === 0);
+    assert(relevantRank < 3,
+      `large corpus: relevant doc ranks ${relevantRank} (expected < 3)`);
+
+    // topK across group boundary
+    let top5!: { score: number; index: number }[];
+    for await (const p of rerank.score(query, tokenized, 5)) { top5 = p.results; }
+    assert(top5.length === 5, `large corpus: topK=5 returns 5 results`);
+    assert(top5[0].score === results[0].score && top5[0].index === results[0].index,
+      `large corpus: topK=5 top result matches full ranking`);
+
+    ok(`large corpus: 20 docs with n_seq_max=8 → relevant doc at rank ${relevantRank}`);
+  } finally {
+    rerank.dispose();
+  }
+}
+
+async function testRerankConcurrent(): Promise<void> {
+  if (!RERANK_MODEL_PATH) {
+    console.log('\n--- Rerank Concurrent (SKIPPED - no LLAMA_RERANK_MODEL) ---');
+    return;
+  }
+
+  console.log('\n--- Rerank Concurrent ---');
+
+  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH, nSeqMax: 4 });
+
+  try {
+    const docs = [
+      'Paris is the capital of France.',
+      'Machine learning is a branch of artificial intelligence.',
+      'The sun is a star at the center of the solar system.',
+      'Deep learning uses neural networks with many layers.',
+      'London is the capital of the United Kingdom.',
+      'Gradient descent is an optimization algorithm.',
+    ];
+    const tokenized: number[][] = await Promise.all(docs.map(d => rerank.tokenize(d)));
+
+    // Drain helper — collects final results from score() async iterable
+    async function drain(iter: AsyncIterable<{ results: { score: number; index: number }[] }>)
+        : Promise<{ score: number; index: number }[]> {
+      let last!: { score: number; index: number }[];
+      for await (const p of iter) last = p.results;
+      return last;
+    }
+
+    // Fire both score calls concurrently — exercises the queue's round-robin
+    const [r1, r2] = await Promise.all([
+      drain(rerank.score('What is the capital of France?', tokenized)),
+      drain(rerank.score('What is machine learning?', tokenized)),
+    ]);
+
+    assert(r1.length === docs.length, 'concurrent: caller 1 gets all results');
+    assert(r2.length === docs.length, 'concurrent: caller 2 gets all results');
+
+    // Paris doc (index 0) should rank high for query 1
+    assert(r1[0].index === 0 || r1[1].index === 0,
+      `concurrent: Paris doc in top 2 for query 1 (got [${r1.slice(0, 2).map(r => r.index)}])`);
+
+    // ML docs (index 1 or 3 or 5) should rank high for query 2
+    const top2q2 = r2.slice(0, 2).map(r => r.index);
+    assert(top2q2.includes(1) || top2q2.includes(3) || top2q2.includes(5),
+      `concurrent: ML doc in top 2 for query 2 (got [${top2q2}])`);
+
+    ok(`concurrent: two callers scored ${docs.length} docs each with independent results`);
+  } finally {
+    rerank.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1932,6 +2154,9 @@ async function main(): Promise<void> {
     await testSetSamplerParams();
     await testSetGrammar();
     await testBranchMetrics();
+    await testRerank();
+    await testRerankLargeCorpus();
+    await testRerankConcurrent();
     await testEmbeddings();
 
     // Summary

@@ -1,11 +1,12 @@
 import type { Branch } from './Branch';
-import type {
-  AgentState,
-  AgentTask,
-  ParsedToolCall,
-  RunAgentsOptions,
-  RunAgentsResult,
-  SessionContext,
+import {
+  GrammarTriggerType,
+  type AgentState,
+  type AgentTask,
+  type ParsedToolCall,
+  type RunAgentsOptions,
+  type RunAgentsResult,
+  type SessionContext,
 } from './types';
 import { buildToolResultDelta } from './Session';
 
@@ -57,6 +58,9 @@ export async function forkAgent(
       reasoningFormat: fmt.reasoningFormat,
       thinkingForcedOpen: fmt.thinkingForcedOpen,
       parser: fmt.parser,
+      grammar: fmt.grammar,
+      grammarLazy: fmt.grammarLazy,
+      grammarTriggers: fmt.grammarTriggers,
     },
     rawOutput: '',
     done: false,
@@ -93,7 +97,7 @@ export async function runAgents(
   agents: AgentState[],
   opts: RunAgentsOptions
 ): Promise<RunAgentsResult> {
-  const { store, ctx, executeTool, maxTurns = 6, onToolCall, onToolResult, onReport } = opts;
+  const { store, ctx, executeTool, maxTurns = 100, onProduce, onToolCall, onToolResult, onToolProgress, onReport } = opts;
 
   let steps = 0;
   let totalToolCalls = 0;
@@ -122,9 +126,13 @@ export async function runAgents(
 
     if (onToolCall) onToolCall(w.agentId, tc.name, tc.arguments);
 
+    const toolContext = onToolProgress ? {
+      onProgress: (p: { filled: number; total: number }) => onToolProgress(w.agentId, tc.name, p),
+    } : undefined;
+
     const promise = (async () => {
       try {
-        const result = await executeTool(tc.name, toolArgs);
+        const result = await executeTool(tc.name, toolArgs, toolContext);
         const resultStr = JSON.stringify(result);
 
         if (onToolResult) onToolResult(w.agentId, tc.name, resultStr);
@@ -145,6 +153,30 @@ export async function runAgents(
   // Build agentId → index lookup for SETTLE phase
   const agentById = new Map(agents.map((w) => [w.agentId, w]));
 
+  // Lazy grammar: unconstrained until trigger fires, then grammar-constrained.
+  // Prevents Qwen3 from generating JSON tool calls instead of expected XML.
+  //
+  // Upstream triggers include tool_start (e.g. "<tool_call>\n<function="),
+  // which fires AFTER the model has already committed to XML — useless when
+  // the model diverges to JSON. Truncate WORD triggers to scope_start only
+  // (e.g. "<tool_call>\n") so the grammar activates at the divergence point
+  // and forces the correct format.
+  const applyLazyGrammar = (w: AgentState): void => {
+    if (w.fmt.grammar && w.fmt.grammarLazy && w.fmt.grammarTriggers.length > 0) {
+      const triggers = w.fmt.grammarTriggers.map(t => {
+        if (t.type === GrammarTriggerType.WORD) {
+          const nlIdx = t.value.indexOf('\n');
+          if (nlIdx >= 0 && nlIdx < t.value.length - 1) {
+            return { ...t, value: t.value.slice(0, nlIdx + 1) };
+          }
+        }
+        return t;
+      });
+      w.branch.setGrammarLazy(w.fmt.grammar, triggers);
+    }
+  };
+  for (const w of agents) applyLazyGrammar(w);
+
   for (;;) {
     // -- Phase 1: PRODUCE -- sample from active agents
     const entries: [Branch, number][] = [];
@@ -162,11 +194,28 @@ export async function runAgents(
         const tc = parsed.toolCalls[0];
         if (!tc || w.turns >= maxTurns) {
           w.done = true;
-          if (!w.findings && parsed.content) w.findings = parsed.content;
+          // Accept content as findings only if agent did actual research
+          if (!w.findings && w.toolCallCount > 0 && parsed.content) {
+            w.findings = parsed.content;
+            if (onReport) onReport(w.agentId, w.findings);
+          }
           continue;
         }
 
         if (tc.name === 'report') {
+          if (w.toolCallCount === 0) {
+            // Reject report without prior research — force the agent to use tools first
+            const callId = tc.id || `call_${w.toolCallCount}`;
+            const errorMsg = 'You must search or read the corpus before reporting. Use search, grep, or read_file first.';
+            w.turns++;
+            const promise = (async () => {
+              const prefillTokens = await buildToolResultDelta(ctx, JSON.stringify({ error: errorMsg }), callId);
+              return { agentId: w.agentId, prefillTokens: prefillTokens as number[] | null };
+            })();
+            pendingTools.set(w.agentId, { promise, name: tc.name });
+            w.rawOutput = '';
+            continue;
+          }
           try { w.findings = JSON.parse(tc.arguments).findings; } catch { w.findings = tc.arguments; }
           w.done = true;
           w.toolCallCount++;
@@ -185,6 +234,7 @@ export async function runAgents(
       entries.push([w.branch, token]);
       w.rawOutput += text;
       w.tokenCount++;
+      if (onProduce) onProduce(w.agentId, text, w.tokenCount);
     }
 
     // -- Phase 2: COMMIT -- batch-decode produced tokens
@@ -210,6 +260,13 @@ export async function runAgents(
       await store.prefill(prefillPairs);
       counters.warmPrefillCalls++;
       counters.warmPrefillBranches += prefillPairs.length;
+
+      // Reset lazy grammar — previous grammar consumed the tool call and is
+      // now in a terminal state. Fresh grammar awaits the next trigger.
+      for (const [branch] of prefillPairs) {
+        const w = agents.find(a => a.branch === branch);
+        if (w) applyLazyGrammar(w);
+      }
     }
 
     // -- Termination + idle yield

@@ -41,6 +41,7 @@ import { Branch } from './Branch';
 import { BranchStore } from './BranchStore';
 import { Session, buildUserDelta, buildToolResultDelta } from './Session';
 import { forkAgent, runAgents } from './Agent';
+import { Rerank } from './Rerank';
 
 /**
  * Platform package naming: @lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]
@@ -250,7 +251,7 @@ export const createContext = async (
   return binary.createContext(options);
 };
 
-export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, forkAgent, runAgents };
+export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, forkAgent, runAgents, Rerank };
 export { PoolingType, ChatFormat, ReasoningFormat, GrammarTriggerType } from './types';
 export type {
   GpuVariant,
@@ -275,5 +276,8 @@ export type {
   AgentState,
   RunAgentsOptions,
   RunAgentsResult,
+  RerankOptions,
+  RerankResult,
+  RerankProgress,
   NativeBinding,
 } from './types';

@@ -1,4 +1,5 @@
-import type { SessionContext, SamplingParams, Produced } from './types';
+import type { SessionContext, SamplingParams, Produced, GrammarTrigger } from './types';
+import { GrammarTriggerType } from './types';
 
 /**
  * Forkable inference handle for covalent generation
@@ -343,6 +344,46 @@ export class Branch {
   setGrammar(grammarStr?: string): void {
     this._ensureNotDisposed();
     this._ctx._branchSetGrammar(this._handle, grammarStr || '');
+  }
+
+  /**
+   * Set lazy grammar — unconstrained until trigger, then grammar-constrained
+   *
+   * Generation runs freely until a trigger pattern or token fires, at which
+   * point the grammar activates and constrains subsequent tokens. Used for
+   * tool-call generation: model writes freely until `<tool_call>`, then
+   * grammar forces valid XML structure.
+   *
+   * The grammar state is cloned on fork(), so sibling branches can diverge
+   * independently. Call again after a tool result prefill to reset.
+   *
+   * @param grammar - GBNF grammar string
+   * @param triggers - Trigger conditions from formatChat().grammarTriggers
+   */
+  setGrammarLazy(grammar: string, triggers: GrammarTrigger[]): void {
+    this._ensureNotDisposed();
+    const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const patterns: string[] = [];
+    const tokens: number[] = [];
+    for (const t of triggers) {
+      switch (t.type) {
+        case GrammarTriggerType.WORD:
+          patterns.push(escapeRegex(t.value));
+          break;
+        case GrammarTriggerType.PATTERN:
+          patterns.push(t.value);
+          break;
+        case GrammarTriggerType.PATTERN_FULL: {
+          const p = t.value;
+          patterns.push((p[0] !== '^' ? '^' : '') + p + (p[p.length - 1] !== '$' ? '$' : ''));
+          break;
+        }
+        case GrammarTriggerType.TOKEN:
+          tokens.push(t.token);
+          break;
+      }
+    }
+    this._ctx._branchSetGrammarLazy(this._handle, grammar, patterns, tokens);
   }
 
   /**

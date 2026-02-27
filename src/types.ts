@@ -1393,6 +1393,9 @@ export interface SessionContext {
   _branchSetGrammar(handle: number, grammarStr: string): void;
 
   /** @internal */
+  _branchSetGrammarLazy(handle: number, grammar: string, patterns: string[], tokens: number[]): void;
+
+  /** @internal */
   _branchModelEntropy(handle: number, base?: string): number;
 
   /** @internal */
@@ -1420,6 +1423,11 @@ export interface SessionContext {
 
   /** @internal */
   _storeAvailable(): number;
+
+  // ===== SCORING API =====
+
+  /** @internal — processes ≤ n_seq_max prompts in a single group */
+  _scoreGroup(tokenArrays: number[][]): Promise<Float32Array[]>;
 }
 
 /**
@@ -1468,12 +1476,15 @@ export interface AgentState {
   branch: Branch;
   /** Tokens to prefill before the loop starts */
   suffixTokens: number[];
-  /** Format metadata for parseChatOutput */
+  /** Format metadata for parseChatOutput + grammar constraints */
   fmt: {
     format: ChatFormat;
     reasoningFormat: ReasoningFormat;
     thinkingForcedOpen: boolean;
     parser: string;
+    grammar: string;
+    grammarLazy: boolean;
+    grammarTriggers: GrammarTrigger[];
   };
   /** Accumulated raw output text */
   rawOutput: string;
@@ -1485,7 +1496,7 @@ export interface AgentState {
   toolCallCount: number;
   /** Number of tool-call turns completed */
   turns: number;
-  /** Final findings (set by report tool or fallback content) */
+  /** Final findings (set by report tool, or extracted from content if agent researched but didn't report) */
   findings: string | null;
 }
 
@@ -1500,13 +1511,21 @@ export interface RunAgentsOptions {
   /** SessionContext for parseChatOutput, formatChat, tokenize */
   ctx: SessionContext;
   /** Tool executor — consumer wraps with locks as needed */
-  executeTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  executeTool: (
+    name: string,
+    args: Record<string, unknown>,
+    context?: { onProgress?: (p: { filled: number; total: number }) => void },
+  ) => Promise<unknown>;
   /** Maximum tool-call turns per agent (default: 6) */
   maxTurns?: number;
+  /** Called when an agent produces a token (agentId = branch handle) */
+  onProduce?: (agentId: number, text: string, tokenCount: number) => void;
   /** Called when an agent dispatches a tool call (agentId = branch handle) */
   onToolCall?: (agentId: number, toolName: string, args: string) => void;
   /** Called when a tool result returns (agentId = branch handle) */
   onToolResult?: (agentId: number, toolName: string, resultStr: string) => void;
+  /** Called during tool execution with intermediate progress */
+  onToolProgress?: (agentId: number, toolName: string, progress: { filled: number; total: number }) => void;
   /** Called when an agent submits a report (agentId = branch handle) */
   onReport?: (agentId: number, findings: string) => void;
 }
@@ -1531,6 +1550,47 @@ export interface RunAgentsResult {
     maxConcurrentTools: number;
     idleTicks: number;
   };
+}
+
+/**
+ * Options for Rerank context creation
+ * @category Core
+ */
+export interface RerankOptions {
+  /** Path to reranker .gguf model */
+  modelPath: string;
+  /** Max prompts per GPU dispatch (default: 8) */
+  nSeqMax?: number;
+  /** Context window size (default: 4096) */
+  nCtx?: number;
+  /** KV cache key quantization (default: 'q4_0') */
+  typeK?: KvCacheType;
+  /** KV cache value quantization (default: 'q4_0') */
+  typeV?: KvCacheType;
+}
+
+/**
+ * A single rerank result — score for one document
+ * @category Core
+ */
+export interface RerankResult {
+  /** Relevance probability (0–1) */
+  score: number;
+  /** Original index in the input array */
+  index: number;
+}
+
+/**
+ * Progress yielded by Rerank.score() after each scoring group completes
+ * @category Core
+ */
+export interface RerankProgress {
+  /** Number of documents scored so far */
+  filled: number;
+  /** Total documents to score */
+  total: number;
+  /** Sorted results — partial until filled === total */
+  results: RerankResult[];
 }
 
 /**
