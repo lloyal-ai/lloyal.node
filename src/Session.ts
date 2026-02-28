@@ -1,52 +1,7 @@
 import type { Branch } from './Branch';
 import type { BranchStore } from './BranchStore';
 import type { SessionContext } from './types';
-
-/**
- * Build token delta for a user turn (sep + formatChat + tokenize)
- *
- * Usable with any branch — not tied to Session's trunk. This is the
- * canonical way to build a user-turn delta for warm prefill.
- *
- * @category Branching
- */
-export async function buildUserDelta(
-  ctx: SessionContext,
-  content: string,
-  opts: { tools?: string } = {}
-): Promise<number[]> {
-  const sep = ctx.getTurnSeparator();
-  const fmtOpts = opts.tools ? { tools: opts.tools } : {};
-  const { prompt } = await ctx.formatChat(
-    JSON.stringify([{ role: 'system', content: '' }, { role: 'user', content }]),
-    fmtOpts
-  );
-  const delta = await ctx.tokenize(prompt, false);
-  return [...sep, ...delta];
-}
-
-/**
- * Build token delta for a tool result turn (sep + formatChat + tokenize)
- *
- * Usable with any branch — not tied to Session's trunk.
- *
- * @category Branching
- */
-export async function buildToolResultDelta(
-  ctx: SessionContext,
-  resultStr: string,
-  callId: string
-): Promise<number[]> {
-  const sep = ctx.getTurnSeparator();
-  const { prompt } = await ctx.formatChat(
-    JSON.stringify([
-      { role: 'system', content: '' },
-      { role: 'tool', content: resultStr, tool_call_id: callId },
-    ])
-  );
-  const delta = await ctx.tokenize(prompt, false);
-  return [...sep, ...delta];
-}
+import { buildUserDelta, buildToolResultDelta } from './agents/deltas';
 
 /**
  * Session - Trunk lifecycle + conversation delta helpers

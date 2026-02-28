@@ -1,3 +1,5 @@
+Synthesize the research findings into a coherent, concise summary.
+---
 Research findings:
 
 {{findings}}

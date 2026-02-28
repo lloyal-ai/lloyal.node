@@ -1,30 +1,19 @@
+import { createToolkit } from '../../../dist/agents/index.js';
+import type { Toolkit } from '../../../dist/agents/index.js';
 import type { Resource, Chunk } from '../resources/types.js';
-import type { Reranker, Tool, ExecuteToolFn } from './types.js';
-import { createSearchTool } from './search.js';
-import { createReadFileTool } from './read-file.js';
-import { createGrepTool } from './grep.js';
-import { createReportTool } from './report.js';
+import type { Reranker } from './types.js';
+import { SearchTool } from './search.js';
+import { ReadFileTool } from './read-file.js';
+import { GrepTool } from './grep.js';
 
 export function createTools(opts: {
   resources: Resource[];
   chunks: Chunk[];
   reranker: Reranker;
-}): { tools: Tool[]; toolsJson: string; executeTool: ExecuteToolFn } {
-  const tools = [
-    createSearchTool(opts.chunks, opts.reranker),
-    createReadFileTool(opts.resources),
-    createGrepTool(opts.resources),
-    createReportTool(),
-  ];
-
-  const toolsJson = JSON.stringify(tools.map((t) => t.schema));
-  const toolMap = new Map(tools.map((t) => [t.name, t]));
-
-  const executeTool: ExecuteToolFn = async (name, args, context?) => {
-    const tool = toolMap.get(name);
-    if (!tool) return { error: `Unknown tool: ${name}` };
-    return tool.execute(args, context);
-  };
-
-  return { tools, toolsJson, executeTool };
+}): Toolkit {
+  return createToolkit([
+    new SearchTool(opts.chunks, opts.reranker),
+    new ReadFileTool(opts.resources),
+    new GrepTool(opts.resources),
+  ]);
 }

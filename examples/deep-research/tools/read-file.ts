@@ -1,39 +1,41 @@
+import { Tool } from '../../../dist/agents/index.js';
+import type { JsonSchema } from '../../../dist/agents/index.js';
 import type { Resource } from '../resources/types.js';
-import type { Tool } from './types.js';
 
-export function createReadFileTool(resources: Resource[]): Tool {
-  return {
-    name: 'read_file',
-    schema: {
-      type: 'function',
-      function: {
-        name: 'read_file',
-        description: 'Read content from a file at specific line ranges. Use startLine/endLine from search results.',
-        parameters: {
-          type: 'object',
-          properties: {
-            filename: {
-              type: 'string',
-              description: 'Filename from search results',
-              enum: resources.map((r) => r.name),
-            },
-            startLine: { type: 'number', description: 'Start line (1-indexed, from search results)' },
-            endLine: { type: 'number', description: 'End line (1-indexed, from search results)' },
-          },
-          required: ['filename'],
+export class ReadFileTool extends Tool<{ filename: string; startLine?: number; endLine?: number }> {
+  readonly name = 'read_file';
+  readonly description = 'Read content from a file at specific line ranges. Use startLine/endLine from search results.';
+  readonly parameters: JsonSchema;
+
+  private _resources: Resource[];
+
+  constructor(resources: Resource[]) {
+    super();
+    this._resources = resources;
+    this.parameters = {
+      type: 'object',
+      properties: {
+        filename: {
+          type: 'string',
+          description: 'Filename from search results',
+          enum: resources.map(r => r.name),
         },
+        startLine: { type: 'number', description: 'Start line (1-indexed, from search results)' },
+        endLine: { type: 'number', description: 'End line (1-indexed, from search results)' },
       },
-    },
-    async execute(args) {
-      const filename = (args.filename as string) || (args.path as string) || '';
-      const file = resources.find((r) => r.name === filename);
-      if (!file) {
-        return { error: `File not found: ${filename}. Available: ${resources.map((r) => r.name).join(', ')}` };
-      }
-      const lines = file.content.split('\n');
-      const s = Math.max(0, ((args.startLine as number) ?? 1) - 1);
-      const e = Math.min(lines.length, (args.endLine as number) ?? Math.min(100, lines.length));
-      return { file: file.name, content: lines.slice(s, e).join('\n') };
-    },
-  };
+      required: ['filename'],
+    };
+  }
+
+  async execute(args: { filename: string; startLine?: number; endLine?: number } & Record<string, unknown>): Promise<unknown> {
+    const filename = args.filename || (args.path as string) || '';
+    const file = this._resources.find(r => r.name === filename);
+    if (!file) {
+      return { error: `File not found: ${filename}. Available: ${this._resources.map(r => r.name).join(', ')}` };
+    }
+    const lines = file.content.split('\n');
+    const s = Math.max(0, (args.startLine ?? 1) - 1);
+    const e = Math.min(lines.length, args.endLine ?? Math.min(100, lines.length));
+    return { file: file.name, content: lines.slice(s, e).join('\n') };
+  }
 }

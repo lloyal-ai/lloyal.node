@@ -39,8 +39,8 @@ import type {
 
 import { Branch } from './Branch';
 import { BranchStore } from './BranchStore';
-import { Session, buildUserDelta, buildToolResultDelta } from './Session';
-import { forkAgent, runAgents } from './Agent';
+import { Session } from './Session';
+import { buildUserDelta, buildToolResultDelta } from './agents/deltas';
 import { Rerank } from './Rerank';
 
 /**
@@ -251,7 +251,42 @@ export const createContext = async (
   return binary.createContext(options);
 };
 
-export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, forkAgent, runAgents, Rerank };
+// ── Layer 1: Substrate (unchanged) ──────────────────────────────
+export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, Rerank };
+
+// ── Layer 2: Agents (structured concurrency) ────────────────────
+export {
+  Ctx, Store, Events,
+  Tool,
+  useAgentPool,
+  runAgents,
+  generate,
+  diverge,
+  createToolkit,
+  initAgents,
+  withSharedRoot,
+} from './agents/index';
+
+export type {
+  Toolkit,
+  AgentHandle,
+  SharedRootOptions,
+  JsonSchema,
+  ToolSchema,
+  ToolContext,
+  AgentTaskSpec,
+  AgentPoolOptions,
+  AgentResult,
+  AgentPoolResult,
+  GenerateOptions,
+  GenerateResult,
+  DivergeOptions,
+  DivergeAttempt,
+  DivergeResult,
+  AgentEvent,
+} from './agents/index';
+
+// ── Enums + types from types.ts ─────────────────────────────────
 export { PoolingType, ChatFormat, ReasoningFormat, GrammarTriggerType } from './types';
 export type {
   GpuVariant,
@@ -272,10 +307,6 @@ export type {
   SamplingParams,
   SessionContext,
   Produced,
-  AgentTask,
-  AgentState,
-  RunAgentsOptions,
-  RunAgentsResult,
   RerankOptions,
   RerankResult,
   RerankProgress,

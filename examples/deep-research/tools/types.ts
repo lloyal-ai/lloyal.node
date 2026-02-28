@@ -19,18 +19,3 @@ export interface Reranker {
   tokenizeChunks(chunks: Chunk[]): Promise<void>;
   dispose(): void;
 }
-
-export interface Tool {
-  name: string;
-  schema: object;
-  execute: (
-    args: Record<string, unknown>,
-    context?: { onProgress?: (p: { filled: number; total: number }) => void },
-  ) => Promise<unknown>;
-}
-
-export type ExecuteToolFn = (
-  name: string,
-  args: Record<string, unknown>,
-  context?: { onProgress?: (p: { filled: number; total: number }) => void },
-) => Promise<unknown>;

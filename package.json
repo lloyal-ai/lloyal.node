@@ -46,6 +46,7 @@
   "homepage": "https://github.com/lloyal-ai/lloyal.node#readme",
   "dependencies": {
     "@lloyal-labs/tsampler": "^0.2.0",
+    "effection": "^4.0.2",
     "node-addon-api": "^8.5.0"
   },
   "devDependencies": {

@@ -175,6 +175,13 @@ export class Branch {
    */
   async prune(): Promise<void> {
     if (this._disposed) return;
+    const kids = this.children;
+    if (kids.length > 0) {
+      throw new Error(
+        `Branch.prune(): branch ${this._handle} has ${kids.length} active child(ren) ` +
+        `[${kids.join(', ')}]. Prune children first or use pruneSubtree().`,
+      );
+    }
     this._ctx._branchPrune(this._handle);
     this._disposed = true;
   }
