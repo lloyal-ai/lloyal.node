@@ -298,7 +298,7 @@ export interface DivergeResult {
 /**
  * Events emitted by the runtime during agent pool execution
  *
- * Subscribe to these via the `events` signal from {@link initAgents}.
+ * Subscribe to these via the `events` channel from {@link initAgents}.
  * Harnesses can extend this union with phase-level events for display.
  *
  * @category Agents

@@ -1,5 +1,5 @@
-import { resource, call, action, useScope } from 'effection';
-import type { Operation, Scope } from 'effection';
+import { resource, call, action, useScope, createSignal, spawn, each } from 'effection';
+import type { Operation, Scope, Channel } from 'effection';
 import type { Branch } from '../Branch';
 import { GrammarTriggerType, type GrammarTrigger, type ParsedToolCall, type SessionContext } from '../types';
 import type { BranchStore } from '../BranchStore';
@@ -14,7 +14,6 @@ import type {
   AgentResult,
   AgentEvent,
 } from './types';
-import type { Signal } from 'effection';
 
 // ── Internal agent state machine ───────────────────────────────
 // generating → awaiting_tool → generating  (tool result prefilled)
@@ -172,13 +171,30 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
   return resource(function*(provide) {
     const ctx: SessionContext = yield* Ctx.expect();
     const store: BranchStore = yield* Store.expect();
-    const events: Signal<AgentEvent, void> = yield* Events.expect();
+    const events: Channel<AgentEvent, void> = yield* Events.expect();
     const scope: Scope = yield* useScope();
+
+    // Bridge for onProgress callbacks — Signal is correct here (external callback).
+    // A spawned forwarder drains the bridge into the Channel with proper scope context.
+    const progressBridge = createSignal<AgentEvent, void>();
+    yield* spawn(function*() {
+      for (const ev of yield* each(progressBridge)) {
+        yield* events.send(ev);
+        yield* each.next();
+      }
+    });
     const { tasks, tools, maxTurns = 100, trace = false } = opts;
 
     // ── Setup: fork branches, collect suffix tokens ──────────
     const agents: AgentInternal[] = [];
     const prefillSetup: [Branch, number[]][] = [];
+
+    // try/finally wraps everything from agent creation through provide().
+    // Agent branches are plain Branch objects (not Effection resources) —
+    // their cleanup is manual. Placing it here guarantees any branch that
+    // makes it into agents[] is pruned on ANY exit path: normal completion,
+    // tick loop error, or scope cancellation.
+    try {
 
     for (const task of tasks) {
       // Per-task parent for tree topology, or first task's parent as shared root
@@ -234,7 +250,7 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       idleTicks: 0,
     };
 
-    function dispatchTool(agent: AgentInternal, tc: ParsedToolCall): void {
+    function* dispatchTool(agent: AgentInternal, tc: ParsedToolCall): Operation<void> {
       let toolArgs: Record<string, unknown>;
       try { toolArgs = JSON.parse(tc.arguments); } catch { toolArgs = {}; }
       const callId = tc.id || `call_${agent.toolCallCount}`;
@@ -244,19 +260,20 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       agent.turns++;
       agent.state = 'awaiting_tool';
 
-      events.send({ type: 'agent:tool_call', agentId: agent.id, tool: tc.name, args: tc.arguments });
+      yield* events.send({ type: 'agent:tool_call', agentId: agent.id, tool: tc.name, args: tc.arguments });
 
       const tool = tools.get(tc.name);
       pendingToolCount++;
       counters.maxConcurrentTools = Math.max(counters.maxConcurrentTools, pendingToolCount);
 
       // scope.run() — eager start, child of agent pool scope, cancelled if scope exits.
-      // spawn() is lazy (Operation), but we're in a plain function — scope.run() is eager.
+      // spawn() is lazy (Operation), but we're in a generator — scope.run() is eager.
       scope.run(function*() {
         try {
           const toolContext = {
             onProgress: (p: { filled: number; total: number }) => {
-              events.send({ type: 'agent:tool_progress', agentId: agent.id, tool: tc.name, filled: p.filled, total: p.total });
+              // Signal bridge — onProgress is an external callback, Signal.send() is correct here.
+              progressBridge.send({ type: 'agent:tool_progress', agentId: agent.id, tool: tc.name, filled: p.filled, total: p.total });
             },
           };
 
@@ -264,7 +281,7 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
             tool ? tool.execute(toolArgs, toolContext) : Promise.resolve({ error: `Unknown tool: ${tc.name}` })
           );
           const resultStr = JSON.stringify(result);
-          events.send({ type: 'agent:tool_result', agentId: agent.id, tool: tc.name, result: resultStr });
+          yield* events.send({ type: 'agent:tool_result', agentId: agent.id, tool: tc.name, result: resultStr });
 
           const prefillTokens: number[] = yield* call(() => buildToolResultDelta(ctx, resultStr, callId));
           settledBuffer.push({ agentId: agent.id, prefillTokens, toolName: tc.name });
@@ -298,9 +315,9 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
             a.state = 'done';
             if (!a.findings && a.toolCallCount > 0 && parsed.content) {
               a.findings = parsed.content;
-              events.send({ type: 'agent:report', agentId: a.id, findings: a.findings });
+              yield* events.send({ type: 'agent:report', agentId: a.id, findings: a.findings });
             }
-            events.send({ type: 'agent:done', agentId: a.id });
+            yield* events.send({ type: 'agent:done', agentId: a.id });
             continue;
           }
 
@@ -330,14 +347,14 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
             a.state = 'done';
             a.toolCallCount++;
             totalToolCalls++;
-            events.send({ type: 'agent:tool_call', agentId: a.id, tool: 'report', args: tc.arguments });
-            events.send({ type: 'agent:report', agentId: a.id, findings: a.findings! });
-            events.send({ type: 'agent:done', agentId: a.id });
+            yield* events.send({ type: 'agent:tool_call', agentId: a.id, tool: 'report', args: tc.arguments });
+            yield* events.send({ type: 'agent:report', agentId: a.id, findings: a.findings! });
+            yield* events.send({ type: 'agent:done', agentId: a.id });
             continue;
           }
 
           // Fire-and-forget — dispatch tool without blocking the decode loop
-          dispatchTool(a, tc);
+          yield* dispatchTool(a, tc);
           a.rawOutput = '';
           continue;
         }
@@ -349,12 +366,12 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
           const entropy = a.branch.modelEntropy();
           const surprisal = a.branch.modelSurprisal(token);
           a.traceBuffer.push({ text, entropy, surprisal });
-          events.send({
+          yield* events.send({
             type: 'agent:produce', agentId: a.id, text, tokenCount: a.tokenCount,
             entropy, surprisal,
           });
         } else {
-          events.send({ type: 'agent:produce', agentId: a.id, text, tokenCount: a.tokenCount });
+          yield* events.send({ type: 'agent:produce', agentId: a.id, text, tokenCount: a.tokenCount });
         }
       }
 
@@ -426,16 +443,14 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       counters,
     };
 
-    try {
-      yield* provide(result);
+    yield* provide(result);
+
     } finally {
       // Structured cleanup: prune all agent branches when scope exits.
-      // Must be in finally — provide() suspends via yield* suspend(),
-      // and halting jumps to finally blocks, skipping non-finally code.
+      // Covers setup errors, tick loop errors, and normal scope teardown
+      // (provide() suspends via yield* suspend(), halting jumps to finally).
       for (const a of agents) {
-        if (!a.branch.disposed) {
-          try { yield* call(() => a.branch.prune()); } catch { /* branch may already be pruned */ }
-        }
+        yield* call(() => a.branch.prune());
       }
     }
   });

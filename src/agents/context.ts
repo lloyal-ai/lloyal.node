@@ -1,7 +1,7 @@
 import { createContext } from 'effection';
 import type { SessionContext } from '../types';
 import type { BranchStore } from '../BranchStore';
-import type { Signal } from 'effection';
+import type { Channel } from 'effection';
 import type { AgentEvent } from './types';
 
 /**
@@ -26,12 +26,11 @@ export const Ctx = createContext<SessionContext>('lloyal.ctx');
 export const Store = createContext<BranchStore>('lloyal.store');
 
 /**
- * Effection context holding the agent event signal
+ * Effection context holding the agent event channel
  *
  * Set by {@link initAgents}. {@link useAgentPool} emits {@link AgentEvent}
- * values through this signal. Harnesses can extend the event type with
- * phase-level events for display subscribers.
+ * values through this channel via `yield* channel.send()`.
  *
  * @category Agents
  */
-export const Events = createContext<Signal<AgentEvent, void>>('lloyal.events');
+export const Events = createContext<Channel<AgentEvent, void>>('lloyal.events');

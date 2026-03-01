@@ -1,7 +1,7 @@
-import { Tool } from '../../../dist/agents/index.js';
-import type { JsonSchema, ToolContext } from '../../../dist/agents/index.js';
-import type { Chunk } from '../resources/types.js';
-import type { Reranker } from './types.js';
+import { Tool } from '../../../dist/agents';
+import type { JsonSchema, ToolContext } from '../../../dist/agents';
+import type { Chunk } from '../resources/types';
+import type { Reranker } from './types';
 
 export class SearchTool extends Tool<{ query: string }> {
   readonly name = 'search';

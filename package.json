@@ -20,6 +20,7 @@
     "docs": "npx typedoc",
     "test": "npm run test:integration",
     "test:integration": "npx tsx test/integration.ts",
+    "test:agents": "npx tsx test/agents.ts",
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "npx tsx examples/chat/chat.ts"

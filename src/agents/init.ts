@@ -1,5 +1,5 @@
-import { ensure, createSignal, call } from 'effection';
-import type { Operation, Signal } from 'effection';
+import { ensure, createChannel, call } from 'effection';
+import type { Operation, Channel } from 'effection';
 import { BranchStore } from '../BranchStore';
 import { Session } from '../Session';
 import type { SessionContext } from '../types';
@@ -11,21 +11,21 @@ import type { AgentEvent } from './types';
  *
  * @category Agents
  */
-export interface AgentHandle<E extends AgentEvent = AgentEvent> {
+export interface AgentHandle<E = AgentEvent> {
   /** The session context (model, tokenizer, KV cache) */
   ctx: SessionContext;
   /** Branch store for batched commit/prefill across branches */
   store: BranchStore;
   /** Session managing conversation trunk and branch lifecycle */
   session: Session;
-  /** Signal for subscribing to agent and harness events */
-  events: Signal<E, void>;
+  /** Channel for subscribing to agent events */
+  events: Channel<E, void>;
 }
 
 /**
  * Bootstrap the agent infrastructure and register structured cleanup
  *
- * Creates {@link BranchStore}, {@link Session}, and an event signal, then
+ * Creates {@link BranchStore}, {@link Session}, and an event channel, then
  * sets all three Effection contexts ({@link Ctx}, {@link Store},
  * {@link Events}) in the caller's scope. Cleanup runs on scope exit
  * (Ctrl-C, error, normal completion) via `ensure()`.
@@ -39,7 +39,7 @@ export interface AgentHandle<E extends AgentEvent = AgentEvent> {
  * are harness-specific decisions) and passes it in.
  *
  * @param ctx - Session context created via `createContext()`
- * @returns Agent handle with session, store, and event signal
+ * @returns Agent handle with session, store, and event channel
  *
  * @example Canonical bootstrap
  * ```typescript
@@ -58,16 +58,16 @@ export interface AgentHandle<E extends AgentEvent = AgentEvent> {
  *
  * @category Agents
  */
-export function* initAgents<E extends AgentEvent = AgentEvent>(
+export function* initAgents<E = AgentEvent>(
   ctx: SessionContext,
 ): Operation<AgentHandle<E>> {
   const store = new BranchStore(ctx);
   const session = new Session({ ctx, store });
-  const events: Signal<E, void> = createSignal<E, void>();
+  const events: Channel<E, void> = createChannel<E, void>();
 
   yield* Ctx.set(ctx);
   yield* Store.set(store);
-  yield* Events.set(events as unknown as Signal<AgentEvent, void>);
+  yield* Events.set(events as unknown as Channel<AgentEvent, void>);
 
   yield* ensure(function*() {
     yield* call(() => session.dispose());

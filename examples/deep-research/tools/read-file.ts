@@ -1,6 +1,6 @@
-import { Tool } from '../../../dist/agents/index.js';
-import type { JsonSchema } from '../../../dist/agents/index.js';
-import type { Resource } from '../resources/types.js';
+import { Tool } from '../../../dist/agents';
+import type { JsonSchema } from '../../../dist/agents';
+import type { Resource } from '../resources/types';
 
 export class ReadFileTool extends Tool<{ filename: string; startLine?: number; endLine?: number }> {
   readonly name = 'read_file';

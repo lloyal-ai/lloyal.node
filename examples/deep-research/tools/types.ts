@@ -1,4 +1,4 @@
-import type { Chunk } from '../resources/types.js';
+import type { Chunk } from '../resources/types';
 
 export interface ScoredChunk {
   file: string;

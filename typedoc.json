@@ -1,7 +1,7 @@
 {
   "$schema": "https://typedoc.org/schema.json",
   "plugin": ["typedoc-rhineai-theme"],
-  "entryPoints": ["dist/index.d.ts"],
+  "entryPoints": ["src/index.ts"],
   "out": "docs/api",
   "name": "lloyal.node API Reference",
   "includeVersion": true,
@@ -26,6 +26,7 @@
     "Sampling",
     "Chat",
     "Branching",
+    "Agents",
     "*"
   ],
   "sort": ["kind", "instance-first", "required-first", "alphabetical"],

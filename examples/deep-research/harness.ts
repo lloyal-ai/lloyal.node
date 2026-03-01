@@ -1,14 +1,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { call } from 'effection';
-import type { Operation, Signal } from 'effection';
-import { Branch, Session } from '../../dist/index.js';
-import type { SessionContext } from '../../dist/index.js';
+import type { Operation, Channel } from 'effection';
+import { Branch, Session } from '../../dist';
+import type { SessionContext } from '../../dist';
 import {
   Ctx,
   generate, runAgents, diverge, withSharedRoot,
-} from '../../dist/agents/index.js';
-import type { Tool, AgentPoolResult, DivergeResult, AgentEvent } from '../../dist/agents/index.js';
+} from '../../dist/agents';
+import type { Tool, AgentPoolResult, DivergeResult } from '../../dist/agents';
+import type { WorkflowEvent, OpTiming } from './tui';
 
 /** Load a task prompt file. Convention: system prompt above `---`, user content below. */
 function loadTask(name: string): { system: string; user: string } {
@@ -23,37 +24,9 @@ const RESEARCH = loadTask('research');
 const VERIFY = loadTask('verify');
 const EVAL = loadTask('eval');
 
-// ── Harness events ───────────────────────────────────────────────
-// Phase-level events sent by the harness. Display subscribes to these
-// alongside AgentEvent (agent-level events from useAgentPool).
-
-export interface PhaseStats {
-  label: string;
-  tokens: number;
-  detail: string;
-  timeMs: number;
-}
-
-export type PhaseEvent =
-  | { type: 'query'; query: string; warm: boolean }
-  | { type: 'plan'; questions: string[]; tokenCount: number; timeMs: number }
-  | { type: 'research:start'; agentCount: number }
-  | { type: 'research:done'; pool: AgentPoolResult; sharedPrefixLength: number; timeMs: number }
-  | { type: 'verify:start'; count: number }
-  | { type: 'verify:done'; result: DivergeResult; timeMs: number }
-  | { type: 'eval:done'; converged: boolean | null; tokenCount: number; timeMs: number }
-  | { type: 'answer'; text: string }
-  | { type: 'response:start' }
-  | { type: 'response:text'; text: string }
-  | { type: 'response:done'; tokenCount: number; timeMs: number }
-  | { type: 'stats'; phases: PhaseStats[]; kvLine?: string; ctxPct: number; ctxPos: number; ctxTotal: number }
-  | { type: 'complete'; data: Record<string, unknown> };
-
-export type HarnessEvent = AgentEvent | PhaseEvent;
-
 // ── Options ──────────────────────────────────────────────────────
 
-export interface HarnessOptions {
+export interface WorkflowOpts {
   session: Session;
   toolMap: Map<string, Tool>;
   toolsJson: string;
@@ -62,17 +35,26 @@ export interface HarnessOptions {
   maxTurns: number;
   nCtx: number;
   trace: boolean;
-  events: Signal<HarnessEvent, void>;
+  events: Channel<WorkflowEvent, void>;
 }
 
-// ── Plan ─────────────────────────────────────────────────────────
+// ── Agent task builder ───────────────────────────────────────────
 
-function* planPhase(
-  query: string,
-  agentCount: number,
-  parent?: Branch,
-): Operation<{ questions: string[]; tokenCount: number }> {
+function agentTasks(questions: string[], toolsJson: string, parent: Branch, seed?: number) {
+  return questions.map((q, i) => ({
+    systemPrompt: RESEARCH.system,
+    content: q,
+    tools: toolsJson,
+    parent,
+    seed: seed != null ? seed + i : undefined,
+  }));
+}
+
+// ── Operations ───────────────────────────────────────────────────
+
+function* plan(query: string, opts: WorkflowOpts): Operation<{ questions: string[]; tokenCount: number; timeMs: number }> {
   const ctx: SessionContext = yield* Ctx.expect();
+  const t = performance.now();
 
   const schema = {
     type: 'object',
@@ -81,7 +63,7 @@ function* planPhase(
         type: 'array',
         items: { type: 'string' },
         minItems: 2,
-        maxItems: agentCount,
+        maxItems: opts.agentCount,
       },
     },
     required: ['questions'],
@@ -89,7 +71,7 @@ function* planPhase(
   const grammar: string = yield* call(() => ctx.jsonSchemaToGrammar(JSON.stringify(schema)));
 
   const userContent = PLAN.user
-    .replace('{{count}}', String(agentCount))
+    .replace('{{count}}', String(opts.agentCount))
     .replace('{{query}}', query);
 
   const messages = [
@@ -101,8 +83,8 @@ function* planPhase(
   let output: string;
   let tokenCount: number;
 
+  const parent = opts.session.trunk ?? undefined;
   if (parent) {
-    // Warm: fork from trunk — planner inherits conversation KV
     const lead: Branch = yield* call(() => parent.fork());
     try {
       lead.setGrammar(grammar);
@@ -117,10 +99,9 @@ function* planPhase(
         return { output: o, tokenCount: tc };
       }));
     } finally {
-      if (!lead.disposed) yield* call(() => lead.prune());
+      yield* call(() => lead.prune());
     }
   } else {
-    // Cold: fresh branch via generate()
     const result = yield* generate({ prompt, grammar, params: { temperature: 0.3 } });
     output = result.output;
     tokenCount = result.tokenCount;
@@ -128,27 +109,71 @@ function* planPhase(
 
   let questions: string[];
   try {
-    questions = JSON.parse(output).questions.slice(0, agentCount);
+    questions = JSON.parse(output).questions.slice(0, opts.agentCount);
     if (!questions.length) throw new Error('empty');
   } catch {
-    questions = Array.from({ length: agentCount }, (_, i) => `${query} (aspect ${i + 1})`);
+    questions = Array.from({ length: opts.agentCount }, (_, i) => `${query} (aspect ${i + 1})`);
   }
 
-  return { questions, tokenCount };
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'plan', questions, tokenCount, timeMs });
+  return { questions, tokenCount, timeMs };
 }
 
-// ── Verify ───────────────────────────────────────────────────────
+function* research(
+  questions: string[],
+  opts: WorkflowOpts,
+): Operation<{ pool: AgentPoolResult; sharedPrefixLength: number; timeMs: number }> {
+  yield* opts.events.send({ type: 'research:start', agentCount: questions.length });
+  const t = performance.now();
 
-function* verifyPhase(opts: {
-  findings: string;
-  query: string;
-  count: number;
-}): Operation<DivergeResult> {
+  const { result: pool, prefixLen: sharedPrefixLength } = yield* withSharedRoot(
+    { systemPrompt: RESEARCH.system, tools: opts.toolsJson },
+    function*(root, prefixLen) {
+      const result = yield* runAgents({
+        tasks: agentTasks(questions, opts.toolsJson, root),
+        tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
+      });
+      return { result, prefixLen };
+    },
+  );
+
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'research:done', pool, timeMs });
+  return { pool, sharedPrefixLength, timeMs };
+}
+
+function* warmResearch(
+  questions: string[],
+  opts: WorkflowOpts,
+): Operation<{ pool: AgentPoolResult; timeMs: number }> {
+  yield* opts.events.send({ type: 'research:start', agentCount: questions.length });
+  const t = performance.now();
+
+  const pool = yield* runAgents({
+    tasks: agentTasks(questions, opts.toolsJson, opts.session.trunk!, Date.now()),
+    tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
+  });
+
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'research:done', pool, timeMs });
+  return { pool, timeMs };
+}
+
+function* verify(
+  pool: AgentPoolResult,
+  questions: string[],
+  query: string,
+  opts: WorkflowOpts,
+): Operation<{ result: DivergeResult; timeMs: number }> {
   const ctx: SessionContext = yield* Ctx.expect();
+  const findingsText = pool.agents
+    .map((a, i) => `Q: ${questions[i]}\nA: ${(a.findings || '').trim()}`)
+    .join('\n\n');
 
   const userContent = VERIFY.user
-    .replace('{{findings}}', opts.findings)
-    .replace('{{query}}', opts.query);
+    .replace('{{findings}}', findingsText)
+    .replace('{{query}}', query);
 
   const messages = [
     { role: 'system', content: VERIFY.system },
@@ -156,21 +181,25 @@ function* verifyPhase(opts: {
   ];
   const { prompt }: { prompt: string } = yield* call(() => ctx.formatChat(JSON.stringify(messages)));
 
-  return yield* diverge({
+  yield* opts.events.send({ type: 'verify:start', count: opts.verifyCount });
+  const t = performance.now();
+  const result = yield* diverge({
     prompt,
-    attempts: opts.count,
+    attempts: opts.verifyCount,
     params: { temperature: 0.7 },
   });
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'verify:done', result, timeMs });
+  return { result, timeMs };
 }
 
-// ── Eval ─────────────────────────────────────────────────────────
-
-function* evalPhase(
-  attempts: { output: string }[],
-): Operation<{ converged: boolean | null; tokenCount: number }> {
+function* evaluate(
+  verifyResult: DivergeResult,
+  opts: WorkflowOpts,
+): Operation<{ converged: boolean | null; tokenCount: number; timeMs: number }> {
   const ctx: SessionContext = yield* Ctx.expect();
 
-  const responsesText = attempts
+  const responsesText = verifyResult.attempts
     .map((a, i) => `Response ${i + 1}: ${a.output.trim()}`)
     .join('\n\n');
 
@@ -189,6 +218,7 @@ function* evalPhase(
   const grammar: string = yield* call(() => ctx.jsonSchemaToGrammar(JSON.stringify(evalSchema)));
   const { prompt }: { prompt: string } = yield* call(() => ctx.formatChat(JSON.stringify(messages)));
 
+  const t = performance.now();
   const result = yield* generate({
     prompt,
     grammar,
@@ -198,172 +228,138 @@ function* evalPhase(
       catch { return null; }
     },
   });
-
-  return { converged: result.parsed as boolean | null, tokenCount: result.tokenCount };
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'eval:done', converged: result.parsed as boolean | null, tokenCount: result.tokenCount, timeMs });
+  return { converged: result.parsed as boolean | null, tokenCount: result.tokenCount, timeMs };
 }
 
-// ── handleQuery — the orchestrator ───────────────────────────────
-// Composes phases, sends HarnessEvent for display, touches no log().
+function* answer(verifyResult: DivergeResult, opts: WorkflowOpts): Operation<void> {
+  yield* opts.events.send({ type: 'answer', text: verifyResult.bestOutput });
+}
 
-export function* handleQuery(query: string, opts: HarnessOptions): Operation<void> {
-  const { session, toolMap, toolsJson, agentCount, verifyCount, maxTurns, nCtx, trace, events } = opts;
-  const warm = !!session.trunk;
+function* promote(verifyResult: DivergeResult, opts: WorkflowOpts): Operation<void> {
+  yield* call(() => opts.session.promote(verifyResult.best));
+}
+
+function* respond(
+  pool: AgentPoolResult,
+  query: string,
+  opts: WorkflowOpts,
+): Operation<{ tokenCount: number; timeMs: number }> {
+  const agentFindings = pool.agents
+    .map((a: { findings: string | null }, i: number) =>
+      a.findings ? `[Agent ${i}] ${a.findings.trim()}` : null)
+    .filter(Boolean)
+    .join('\n\n');
+
+  yield* call(() => opts.session.prefillUser(agentFindings
+    ? `Research findings:\n${agentFindings}\n\nUser question: ${query}\n\nAnswer based on the research findings above.`
+    : query));
+
+  yield* opts.events.send({ type: 'response:start' });
+  const t = performance.now();
+  let tokenCount = 0;
+  const trunk = opts.session.trunk!;
+  for (;;) {
+    const { token, text, isStop } = trunk.produceSync();
+    if (isStop) break;
+    yield* call(() => trunk.commit(token));
+    tokenCount++;
+    yield* opts.events.send({ type: 'response:text', text });
+  }
+  const timeMs = performance.now() - t;
+  yield* opts.events.send({ type: 'response:done' });
+  return { tokenCount, timeMs };
+}
+
+function* summarize(
+  timings: OpTiming[],
+  opts: WorkflowOpts,
+  extra?: { kvLine?: string },
+): Operation<void> {
+  yield* opts.events.send({
+    type: 'stats', timings,
+    kvLine: extra?.kvLine,
+    ctxPct: Math.round(100 * (opts.session.trunk?.position ?? 0) / opts.nCtx),
+    ctxPos: opts.session.trunk?.position ?? 0,
+    ctxTotal: opts.nCtx,
+  });
+}
+
+// ── Workflow compositions ────────────────────────────────────────
+
+function* coldQuery(query: string, opts: WorkflowOpts): Operation<void> {
   const t0 = performance.now();
 
-  events.send({ type: 'query', query, warm });
+  const p = yield* plan(query, opts);
+  const r = yield* research(p.questions, opts);
+  const v = yield* verify(r.pool, p.questions, query, opts);
+  const e = yield* evaluate(v.result, opts);
+  yield* answer(v.result, opts);
+  yield* promote(v.result, opts);
 
-  // ── Plan
-  let t = performance.now();
-  const { questions, tokenCount: planTokens } = yield* planPhase(
-    query, agentCount, warm ? session.trunk! : undefined,
-  );
-  const planMs = performance.now() - t;
-  events.send({ type: 'plan', questions, tokenCount: planTokens, timeMs: planMs });
-
-  // ── Research
-  events.send({ type: 'research:start', agentCount: questions.length });
-  t = performance.now();
-
-  let pool: AgentPoolResult;
-  let sharedPrefixLength: number;
-
-  const agentTasks = (parent: Branch, seed?: number) => questions.map((q, i) => ({
-    systemPrompt: RESEARCH.system,
-    content: q,
-    tools: toolsJson,
-    parent,
-    seed: seed != null ? seed + i : undefined,
-  }));
-
-  if (!warm) {
-    // Cold: withSharedRoot handles root create → prefill → cleanup
-    const { result, prefixLen } = yield* withSharedRoot(
-      { systemPrompt: RESEARCH.system, tools: toolsJson },
-      function*(root, prefixLen) {
-        const result = yield* runAgents({ tasks: agentTasks(root), tools: toolMap, maxTurns, trace });
-        return { result, prefixLen };
-      },
-    );
-    pool = result;
-    sharedPrefixLength = prefixLen;
-  } else {
-    // Warm: fork from conversation trunk
-    pool = yield* runAgents({
-      tasks: agentTasks(session.trunk!, Date.now()),
-      tools: toolMap,
-      maxTurns, trace,
-    });
-    sharedPrefixLength = 0;
-  }
-
-  const researchMs = performance.now() - t;
-  events.send({ type: 'research:done', pool, sharedPrefixLength, timeMs: researchMs });
-
-  // ── Post-research diverges based on cold/warm
-  const phases: PhaseStats[] = [
-    { label: 'Plan', tokens: planTokens, detail: '', timeMs: planMs },
+  const timings: OpTiming[] = [
+    { label: 'Plan', tokens: p.tokenCount, detail: '', timeMs: p.timeMs },
     {
-      label: 'Research', tokens: pool.totalTokens,
-      detail: `(${pool.agents.map(a => a.tokenCount).join(' + ')})  ${pool.totalToolCalls} tools`,
-      timeMs: researchMs,
+      label: 'Research', tokens: r.pool.totalTokens,
+      detail: `(${r.pool.agents.map(a => a.tokenCount).join(' + ')})  ${r.pool.totalToolCalls} tools`,
+      timeMs: r.timeMs,
     },
+    {
+      label: 'Verify', tokens: v.result.totalTokens,
+      detail: `(${v.result.attempts.map(a => a.tokenCount).join(' + ')})`,
+      timeMs: v.timeMs,
+    },
+    { label: 'Eval', tokens: e.tokenCount, detail: `converged: ${e.converged ? 'yes' : 'no'}`, timeMs: e.timeMs },
   ];
 
-  if (!warm) {
-    // ── Verify
-    const findingsText = pool.agents
-      .map((a, i) => `Q: ${questions[i]}\nA: ${(a.findings || '').trim()}`)
-      .join('\n\n');
+  const kvSaved = r.sharedPrefixLength * (p.questions.length - 1)
+    + v.result.prefixLength * (v.result.attempts.length - 1);
+  const kvLine = `KV shared    ${r.sharedPrefixLength} \u00d7 ${p.questions.length - 1} + ${v.result.prefixLength} \u00d7 ${v.result.attempts.length - 1} = ${kvSaved.toLocaleString()} tok saved`;
 
-    events.send({ type: 'verify:start', count: verifyCount });
-    t = performance.now();
-    const verifyResult = yield* verifyPhase({ findings: findingsText, query, count: verifyCount });
-    const verifyMs = performance.now() - t;
-    events.send({ type: 'verify:done', result: verifyResult, timeMs: verifyMs });
+  yield* summarize(timings, opts, { kvLine });
 
-    // ── Eval
-    t = performance.now();
-    const { converged, tokenCount: evalTokens } = yield* evalPhase(verifyResult.attempts);
-    const evalMs = performance.now() - t;
-    events.send({ type: 'eval:done', converged, tokenCount: evalTokens, timeMs: evalMs });
+  yield* opts.events.send({
+    type: 'complete',
+    data: {
+      planTokens: p.tokenCount,
+      agentTokens: r.pool.totalTokens, researchSteps: r.pool.steps,
+      agentPpl: r.pool.agents.map(a => a.ppl),
+      verifyTokens: v.result.totalTokens, verifySteps: v.result.steps,
+      evalTokens: e.tokenCount, converged: e.converged,
+      totalToolCalls: r.pool.totalToolCalls,
+      prefixTokens: v.result.prefixLength,
+      sharedPrefixTokens: r.sharedPrefixLength,
+      agentCount: p.questions.length, attemptCount: v.result.attempts.length,
+      wallTimeMs: Math.round(performance.now() - t0),
+      planMs: Math.round(p.timeMs), researchMs: Math.round(r.timeMs),
+      verifyMs: Math.round(v.timeMs), evalMs: Math.round(e.timeMs),
+      ...r.pool.counters,
+    },
+  });
+}
 
-    // ── Answer
-    events.send({ type: 'answer', text: verifyResult.bestOutput });
+function* warmQuery(query: string, opts: WorkflowOpts): Operation<void> {
+  const p = yield* plan(query, opts);
+  const r = yield* warmResearch(p.questions, opts);
+  const resp = yield* respond(r.pool, query, opts);
 
-    phases.push(
-      {
-        label: 'Verify', tokens: verifyResult.totalTokens,
-        detail: `(${verifyResult.attempts.map(a => a.tokenCount).join(' + ')})`,
-        timeMs: verifyMs,
-      },
-      { label: 'Eval', tokens: evalTokens, detail: `converged: ${converged ? 'yes' : 'no'}`, timeMs: evalMs },
-    );
+  const timings: OpTiming[] = [
+    { label: 'Plan', tokens: p.tokenCount, detail: '', timeMs: p.timeMs },
+    {
+      label: 'Research', tokens: r.pool.totalTokens,
+      detail: `(${r.pool.agents.map(a => a.tokenCount).join(' + ')})  ${r.pool.totalToolCalls} tools`,
+      timeMs: r.timeMs,
+    },
+    { label: 'Response', tokens: resp.tokenCount, detail: '', timeMs: resp.timeMs },
+  ];
 
-    yield* call(() => session.promote(verifyResult.best));
+  yield* summarize(timings, opts);
+}
 
-    const kvSaved = sharedPrefixLength * (questions.length - 1)
-      + verifyResult.prefixLength * (verifyResult.attempts.length - 1);
+// ── Entry point ──────────────────────────────────────────────────
 
-    events.send({
-      type: 'stats', phases,
-      kvLine: `KV shared    ${sharedPrefixLength} \u00d7 ${questions.length - 1} + ${verifyResult.prefixLength} \u00d7 ${verifyResult.attempts.length - 1} = ${kvSaved.toLocaleString()} tok saved`,
-      ctxPct: Math.round(100 * (session.trunk?.position ?? 0) / nCtx),
-      ctxPos: session.trunk?.position ?? 0,
-      ctxTotal: nCtx,
-    });
-
-    events.send({
-      type: 'complete',
-      data: {
-        planTokens,
-        agentTokens: pool.totalTokens, researchSteps: pool.steps,
-        agentPpl: pool.agents.map(a => a.ppl),
-        verifyTokens: verifyResult.totalTokens, verifySteps: verifyResult.steps,
-        evalTokens, converged,
-        totalToolCalls: pool.totalToolCalls,
-        prefixTokens: verifyResult.prefixLength,
-        sharedPrefixTokens: sharedPrefixLength,
-        agentCount: questions.length, attemptCount: verifyResult.attempts.length,
-        wallTimeMs: Math.round(performance.now() - t0),
-        planMs: Math.round(planMs), researchMs: Math.round(researchMs),
-        verifyMs: Math.round(verifyMs), evalMs: Math.round(evalMs),
-        ...pool.counters,
-      },
-    });
-
-  } else {
-    // ── Grounded response from trunk
-    const agentFindings = pool.agents
-      .map((a: { findings: string | null }, i: number) =>
-        a.findings ? `[Agent ${i}] ${a.findings.trim()}` : null)
-      .filter(Boolean)
-      .join('\n\n');
-
-    yield* call(() => session.prefillUser(agentFindings
-      ? `Research findings:\n${agentFindings}\n\nUser question: ${query}\n\nAnswer based on the research findings above.`
-      : query));
-
-    events.send({ type: 'response:start' });
-    t = performance.now();
-    let responseTokens = 0;
-    const trunk = session.trunk!;
-    for (;;) {
-      const { token, text, isStop } = trunk.produceSync();
-      if (isStop) break;
-      yield* call(() => trunk.commit(token));
-      responseTokens++;
-      events.send({ type: 'response:text', text } as HarnessEvent);
-    }
-    const responseMs = performance.now() - t;
-    events.send({ type: 'response:done', tokenCount: responseTokens, timeMs: responseMs });
-
-    phases.push({ label: 'Response', tokens: responseTokens, detail: '', timeMs: responseMs });
-
-    events.send({
-      type: 'stats', phases,
-      ctxPct: Math.round(100 * (session.trunk?.position ?? 0) / nCtx),
-      ctxPos: session.trunk?.position ?? 0,
-      ctxTotal: nCtx,
-    });
-  }
+export function* handleQuery(query: string, opts: WorkflowOpts): Operation<void> {
+  yield* opts.events.send({ type: 'query', query, warm: !!opts.session.trunk });
+  yield* (opts.session.trunk ? warmQuery : coldQuery)(query, opts);
 }

@@ -1,6 +1,6 @@
-import { Tool } from '../../../dist/agents/index.js';
-import type { JsonSchema } from '../../../dist/agents/index.js';
-import type { Resource } from '../resources/types.js';
+import { Tool } from '../../../dist/agents';
+import type { JsonSchema } from '../../../dist/agents';
+import type { Resource } from '../resources/types';
 
 export class GrepTool extends Tool<{ pattern: string; ignoreCase?: boolean }> {
   readonly name = 'grep';

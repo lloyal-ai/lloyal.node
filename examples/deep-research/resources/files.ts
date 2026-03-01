@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadBinary } from '../../../dist/index.js';
-import type { Resource, Chunk } from './types.js';
+import { loadBinary } from '../../../dist';
+import type { Resource, Chunk } from './types';
 
 interface Section { heading: string; level: number; startLine: number; endLine: number }
 const { parseMarkdown } = loadBinary() as unknown as { parseMarkdown(text: string): Section[] };
