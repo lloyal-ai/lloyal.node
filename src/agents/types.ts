@@ -139,6 +139,12 @@ export interface AgentPoolOptions {
   params?: SamplingParams;
   /** Maximum tool-call turns per agent before forced termination */
   maxTurns?: number;
+  /** Context window size — enables context-pressure detection when set.
+   *  Agents are gracefully stopped when remaining capacity drops below threshold. */
+  nCtx?: number;
+  /** Message injected as a tool error when an agent must stop and report.
+   *  Triggered by context pressure or maxTurns. If omitted, agents are hard-cut. */
+  gracePrompt?: string;
   /** Enable per-token entropy/surprisal on `agent:produce` events */
   trace?: boolean;
 }

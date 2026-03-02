@@ -97,24 +97,22 @@ export enum PoolingType {
  * Chat format detected by the template engine
  *
  * Identifies how the model formats tool calls, reasoning blocks, and content.
- * Returned by {@link SessionContext.formatChat | formatChat()} in
- * {@link FormattedChatResult.format} and consumed by
+ * Opaque chat format identifier returned by
+ * {@link SessionContext.formatChat | formatChat()} and consumed by
  * {@link SessionContext.parseChatOutput | parseChatOutput()}.
  *
- * You generally don't need to inspect these values directly --
- * just pass them through from the formatChat result to parseChatOutput.
- *
- * Only commonly-used values are listed. The full set matches llama.cpp's
- * `common_chat_format` enum (30+ formats).
+ * Maps 1:1 to llama.cpp's `common_chat_format` enum (30+ values).
+ * Treat as an opaque number — pass through, don't switch on it.
  *
  * @category Chat
  */
-export enum ChatFormat {
-  /** Plain content, no special formatting */
-  CONTENT_ONLY = 0,
-  /** Generic tool call format */
-  GENERIC = 1,
-}
+export type ChatFormat = number;
+
+/** Model template has no tool/structured-output support. */
+export const CHAT_FORMAT_CONTENT_ONLY: ChatFormat = 0;
+
+/** llama.cpp's generic JSON fallback — imposes format the model wasn't trained on. */
+export const CHAT_FORMAT_GENERIC: ChatFormat = 1;
 
 /**
  * Reasoning/thinking block format

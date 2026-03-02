@@ -287,7 +287,8 @@ export type {
 } from './agents/index';
 
 // ── Enums + types from types.ts ─────────────────────────────────
-export { PoolingType, ChatFormat, ReasoningFormat, GrammarTriggerType } from './types';
+export { PoolingType, CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, ReasoningFormat, GrammarTriggerType } from './types';
+export type { ChatFormat } from './types';
 export type {
   GpuVariant,
   KvCacheType,

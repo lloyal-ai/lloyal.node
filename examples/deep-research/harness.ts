@@ -23,6 +23,7 @@ const PLAN = loadTask('plan');
 const RESEARCH = loadTask('research');
 const VERIFY = loadTask('verify');
 const EVAL = loadTask('eval');
+const GRACE = loadTask('graceful-termination');
 
 // ── Options ──────────────────────────────────────────────────────
 
@@ -133,6 +134,7 @@ function* research(
       const result = yield* runAgents({
         tasks: agentTasks(questions, opts.toolsJson, root),
         tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
+        nCtx: opts.nCtx, gracePrompt: GRACE.system,
       });
       return { result, prefixLen };
     },
@@ -153,6 +155,7 @@ function* warmResearch(
   const pool = yield* runAgents({
     tasks: agentTasks(questions, opts.toolsJson, opts.session.trunk!, Date.now()),
     tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
+    nCtx: opts.nCtx, gracePrompt: GRACE.system,
   });
 
   const timeMs = performance.now() - t;

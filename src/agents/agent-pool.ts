@@ -1,7 +1,7 @@
 import { resource, call, action, useScope, createSignal, spawn, each } from 'effection';
 import type { Operation, Scope, Channel } from 'effection';
 import type { Branch } from '../Branch';
-import { GrammarTriggerType, type GrammarTrigger, type ParsedToolCall, type SessionContext } from '../types';
+import { CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, GrammarTriggerType, type GrammarTrigger, type ParsedToolCall, type SessionContext } from '../types';
 import type { BranchStore } from '../BranchStore';
 import { Ctx, Store, Events } from './context';
 import { buildToolResultDelta } from './deltas';
@@ -39,6 +39,7 @@ interface AgentInternal {
   tokenCount: number;
   toolCallCount: number;
   turns: number;
+  graceUsed: boolean;
   findings: string | null;
   traceBuffer: TraceToken[];
 }
@@ -92,6 +93,9 @@ async function setupAgent(
   const tools = task.tools ? ensureReportTool(task.tools) : undefined;
   const fmtOpts = tools ? { tools } : {};
   const fmt = await ctx.formatChat(JSON.stringify(messages), fmtOpts);
+  if (tools && (fmt.format === CHAT_FORMAT_CONTENT_ONLY || fmt.format === CHAT_FORMAT_GENERIC)) {
+    throw new Error('Model does not support tool calling. Please use a model with native tool support (e.g. Qwen3, Llama 3.x, Mistral).');
+  }
   const sep = ctx.getTurnSeparator();
   const suffixTokens = [...sep, ...await ctx.tokenize(fmt.prompt, false)];
   if (task.seed != null) branch.reseedSampler(task.seed);
@@ -114,6 +118,7 @@ async function setupAgent(
       tokenCount: 0,
       toolCallCount: 0,
       turns: 0,
+      graceUsed: false,
       findings: null,
       traceBuffer: [],
     },
@@ -183,7 +188,7 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
         yield* each.next();
       }
     });
-    const { tasks, tools, maxTurns = 100, trace = false } = opts;
+    const { tasks, tools, maxTurns = 100, nCtx = 0, gracePrompt, trace = false } = opts;
 
     // ── Setup: fork branches, collect suffix tokens ──────────
     const agents: AgentInternal[] = [];
@@ -295,12 +300,35 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       });
     }
 
+    // Context pressure thresholds (in tokens)
+    const GRACE_RESERVE = 1024;    // room for grace prompt + report generation
+    const CRITICAL_RESERVE = 128;  // absolute minimum — hard stop to prevent crash
+
     // ── Three-phase tick loop ────────────────────────────────
     for (;;) {
       // -- Phase 1: PRODUCE -- sample from active agents
+
+      // Compute aggregate KV remaining once per tick.
+      // All branches (including done, not yet pruned) share one nCtx-sized KV cache.
+      // Shared prefix slots are counted once; divergent tails add per-branch.
+      let kvRemaining = Infinity;
+      if (nCtx > 0) {
+        const positions = agents.map(a => a.branch.position);
+        const sharedPrefix = Math.min(...positions);
+        const totalKV = positions.reduce((s, p) => s + p, 0) - (positions.length - 1) * sharedPrefix;
+        kvRemaining = nCtx - totalKV;
+      }
+
       const entries: [Branch, number][] = [];
       for (const a of agents) {
         if (a.state !== 'generating') continue;
+
+        // Critical context pressure — hard stop before produceSync to prevent llama_decode crash
+        if (kvRemaining < CRITICAL_RESERVE) {
+          a.state = 'done';
+          yield* events.send({ type: 'agent:done', agentId: a.id });
+          continue;
+        }
 
         const { token, text, isStop } = a.branch.produceSync();
         if (isStop) {
@@ -311,13 +339,45 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
           });
 
           const tc = parsed.toolCalls[0];
-          if (!tc || a.turns >= maxTurns) {
+          if (!tc) {
             a.state = 'done';
             if (!a.findings && a.toolCallCount > 0 && parsed.content) {
               a.findings = parsed.content;
               yield* events.send({ type: 'agent:report', agentId: a.id, findings: a.findings });
             }
             yield* events.send({ type: 'agent:done', agentId: a.id });
+            continue;
+          }
+
+          // Grace turn: context pressure or maxTurns reached, agent wants to call a tool
+          // that isn't report. Inject gracePrompt so the agent can synthesize findings.
+          // If grace already used (or no gracePrompt configured), hard-cut.
+          const contextPressure = kvRemaining < GRACE_RESERVE;
+          const shouldGrace = (a.turns >= maxTurns || contextPressure) && tc.name !== 'report';
+
+          if (shouldGrace) {
+            if (a.graceUsed || !gracePrompt) {
+              a.state = 'done';
+              yield* events.send({ type: 'agent:done', agentId: a.id });
+              continue;
+            }
+            a.graceUsed = true;
+            const callId = tc.id || `call_${a.toolCallCount}`;
+            a.turns++;
+            a.state = 'awaiting_tool';
+            pendingToolCount++;
+            scope.run(function*() {
+              try {
+                const prefillTokens: number[] = yield* call(() =>
+                  buildToolResultDelta(ctx, JSON.stringify({ error: gracePrompt }), callId)
+                );
+                settledBuffer.push({ agentId: a.id, prefillTokens, toolName: tc.name });
+              } finally {
+                pendingToolCount--;
+                if (wakeIdle) { wakeIdle(); wakeIdle = null; }
+              }
+            });
+            a.rawOutput = '';
             continue;
           }
 

@@ -24,7 +24,7 @@ import {
 import { createContext } from "../../dist";
 import type { SessionContext } from "../../dist";
 import { initAgents } from "../../dist/agents";
-import { c, log, setJsonlMode, fmtSize, createView } from "./tui";
+import { c, log, setJsonlMode, setVerboseMode, fmtSize, createView } from "./tui";
 import type { WorkflowEvent } from "./tui";
 import { loadResources, chunkResources } from "./resources/files";
 import { createReranker } from "./reranker";
@@ -74,6 +74,7 @@ if (!corpusDir) {
 }
 
 if (jsonlMode) setJsonlMode(true);
+if (verbose) setVerboseMode(true);
 if (!verbose && !jsonlMode) {
   try {
     fs.closeSync(2);
@@ -85,7 +86,7 @@ if (!verbose && !jsonlMode) {
 
 const AGENT_COUNT = 3;
 const VERIFY_COUNT = 3;
-const MAX_TOOL_TURNS = 6;
+const MAX_TOOL_TURNS = 20;
 
 // ── Main ─────────────────────────────────────────────────────────
 

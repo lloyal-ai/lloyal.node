@@ -32,8 +32,10 @@ export type WorkflowEvent = AgentEvent | StepEvent;
 // ── Mode + color ─────────────────────────────────────────────────
 
 let _jsonlMode = false;
+let _verboseMode = false;
 
 export function setJsonlMode(on: boolean): void { _jsonlMode = on; }
+export function setVerboseMode(on: boolean): void { _verboseMode = on; }
 
 const isTTY = process.stdout.isTTY;
 
@@ -156,10 +158,21 @@ function agentHandler(state: ViewState): ViewHandler {
       case 'agent:produce': {
         state.agentText.set(ev.agentId, (state.agentText.get(ev.agentId) ?? '') + ev.text);
         state.agentStatus.set(ev.agentId, { state: 'gen', tokenCount: ev.tokenCount, detail: '' });
-        renderStatus(state);
+        if (_verboseMode) {
+          const lbl = label(state, ev.agentId);
+          // First token for this agent — print header
+          if (ev.tokenCount === 1) {
+            statusClear();
+            process.stdout.write(`\n    ${c.dim}───${c.reset} ${c.yellow}${lbl}${c.reset} ${c.dim}tokens${c.reset} ${c.dim}───${c.reset}\n    `);
+          }
+          process.stdout.write(ev.text);
+        } else {
+          renderStatus(state);
+        }
         break;
       }
       case 'agent:tool_call': {
+        if (_verboseMode) process.stdout.write('\n');
         state.agentText.delete(ev.agentId);
         state.agentStatus.set(ev.agentId, { state: ev.tool, tokenCount: 0, detail: '' });
         emit('tool_call', { agentId: ev.agentId, toolName: ev.tool, arguments: ev.args });
@@ -231,7 +244,9 @@ function agentHandler(state: ViewState): ViewHandler {
         log(`    ${c.dim}\u2502${c.reset}`);
         break;
       }
-      case 'agent:done': break;
+      case 'agent:done':
+        if (_verboseMode) process.stdout.write('\n');
+        break;
     }
   };
 }
