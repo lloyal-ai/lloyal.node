@@ -385,7 +385,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Publish main package
+      # Build TypeScript before publishing main package
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
       - name: Sync package versions
         run: node scripts/sync-versions.js
 

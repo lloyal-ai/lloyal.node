@@ -132,6 +132,12 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
       - name: Pack package
         run: npm pack
 
