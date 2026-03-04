@@ -3,7 +3,7 @@ export { Tool } from './Tool';
 export { buildUserDelta, buildToolResultDelta } from './deltas';
 export { generate } from './generate';
 export { diverge } from './diverge';
-export { useAgentPool } from './agent-pool';
+export { useAgentPool, ContextPressure } from './agent-pool';
 export { runAgents } from './run-agents';
 export { createToolkit } from './toolkit';
 export { initAgents } from './init';
@@ -18,6 +18,7 @@ export type {
   JsonSchema,
   ToolSchema,
   ToolContext,
+  PressureThresholds,
   AgentTaskSpec,
   AgentPoolOptions,
   AgentResult,

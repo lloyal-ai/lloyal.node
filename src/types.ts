@@ -777,6 +777,20 @@ export interface SessionContext {
   tokenize(text: string, addSpecial?: boolean): Promise<number[]>;
 
   /**
+   * Tokenize text into model's vocabulary (sync — inline on main thread)
+   *
+   * Same as {@link tokenize} but synchronous. Use from Effection generators
+   * to avoid `yield* call()` overhead for CPU-only work.
+   *
+   * @param text Text to tokenize
+   * @param addSpecial Whether to add special tokens (BOS/EOS). Defaults to
+   *   model metadata setting (typically true). Pass false for mid-sequence
+   *   tokenization.
+   * @returns Array of token IDs
+   */
+  tokenizeSync(text: string, addSpecial?: boolean): number[];
+
+  /**
    * Detokenize array of tokens back to text
    *
    * Inverse of tokenize(). Use for reconstructing complete text
@@ -1082,6 +1096,21 @@ export interface SessionContext {
   ): Promise<FormattedChatResult>;
 
   /**
+   * Format messages using model's chat template (sync — inline on main thread)
+   *
+   * Same as {@link formatChat} but synchronous. Use from Effection generators
+   * to avoid `yield* call()` overhead for CPU-only work.
+   *
+   * @param messagesJson JSON string containing array of messages
+   * @param options Formatting options (tools, reasoning, grammar, etc.)
+   * @returns Formatted prompt with format-awareness metadata
+   */
+  formatChatSync(
+    messagesJson: string,
+    options?: FormatChatOptions | string
+  ): FormattedChatResult;
+
+  /**
    * Parse model output into structured content
    *
    * Extracts plain text, reasoning/thinking blocks, and tool calls from
@@ -1200,6 +1229,17 @@ export interface SessionContext {
    * ```
    */
   jsonSchemaToGrammar(schemaJson: string): Promise<string>;
+
+  /**
+   * Convert JSON schema to GBNF grammar (sync — inline on main thread)
+   *
+   * Same as {@link jsonSchemaToGrammar} but synchronous. Use from Effection
+   * generators to avoid `yield* call()` overhead for CPU-only work.
+   *
+   * @param schemaJson JSON schema string
+   * @returns GBNF grammar string
+   */
+  jsonSchemaToGrammarSync(schemaJson: string): string;
 
   /**
    * Validate chat template syntax
@@ -1421,6 +1461,10 @@ export interface SessionContext {
 
   /** @internal */
   _storeAvailable(): number;
+
+  /** KV cache pressure snapshot from native BranchStore.
+   *  cells_used is a monotonic counter reset on drain/retainOnly. */
+  _storeKvPressure(): { nCtx: number; cellsUsed: number; remaining: number };
 
   // ===== SCORING API =====
 

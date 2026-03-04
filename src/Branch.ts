@@ -80,7 +80,20 @@ export class Branch {
   }
 
   /**
-   * Fork this branch to a new sequence
+   * Fork this branch to a new sequence (async)
+   *
+   * Async contract: local branches resolve immediately; cloud branches
+   * may perform an HTTP round-trip. Use {@link forkSync} when you know
+   * the branch is local and want zero-overhead forking.
+   *
+   * @returns New forked Branch
+   */
+  async fork(): Promise<Branch> {
+    return this.forkSync();
+  }
+
+  /**
+   * Fork this branch to a new sequence (sync)
    *
    * The child shares the parent's KV prefix in memory (metadata-only under unified KV, no KV buffer copy).
    * Logits, sampler state, and perplexity tracker are cloned so the child
@@ -91,7 +104,7 @@ export class Branch {
    *
    * @returns New forked Branch
    */
-  async fork(): Promise<Branch> {
+  forkSync(): Branch {
     this._ensureNotDisposed();
     const newHandle = this._ctx._branchFork(this._handle);
     return new Branch(this._ctx, newHandle);
@@ -163,17 +176,30 @@ export class Branch {
   }
 
   /**
-   * Discard this branch — remove its divergent KV entries and free the handle
+   * Discard this branch (async)
    *
-   * Only removes KV entries divergent from the shared prefix; sibling branches
-   * are unaffected. The disposed flag is set synchronously — any call to
-   * produce(), commit(), etc. after prune() will throw immediately, even
-   * before the returned promise resolves.
+   * Async contract: local branches resolve immediately; cloud branches
+   * may perform an HTTP round-trip. Use {@link pruneSync} when you know
+   * the branch is local.
    *
    * RESTRICT mode: throws if children exist. Use {@link pruneSubtree} to
    * cascade-delete an entire subtree.
    */
   async prune(): Promise<void> {
+    this.pruneSync();
+  }
+
+  /**
+   * Discard this branch — remove its divergent KV entries and free the handle (sync)
+   *
+   * Only removes KV entries divergent from the shared prefix; sibling branches
+   * are unaffected. The disposed flag is set synchronously — any call to
+   * produce(), commit(), etc. after prune() will throw immediately.
+   *
+   * RESTRICT mode: throws if children exist. Use {@link pruneSubtreeSync} to
+   * cascade-delete an entire subtree.
+   */
+  pruneSync(): void {
     if (this._disposed) return;
     const kids = this.children;
     if (kids.length > 0) {
@@ -187,13 +213,24 @@ export class Branch {
   }
 
   /**
-   * Discard this branch and all its descendants — CASCADE delete
+   * Discard this branch and all its descendants (async)
+   *
+   * Async contract: local branches resolve immediately; cloud branches
+   * may perform an HTTP round-trip. Use {@link pruneSubtreeSync} when you know
+   * the branch is local.
+   */
+  async pruneSubtree(): Promise<void> {
+    this.pruneSubtreeSync();
+  }
+
+  /**
+   * Discard this branch and all its descendants — CASCADE delete (sync)
    *
    * Iterative post-order traversal: prunes children first, then this branch.
    * Use when tearing down an entire subtree (e.g. abandoned search path).
-   * Sets disposed synchronously, like {@link prune}.
+   * Sets disposed synchronously.
    */
-  async pruneSubtree(): Promise<void> {
+  pruneSubtreeSync(): void {
     if (this._disposed) return;
     this._ctx._branchPruneSubtree(this._handle);
     this._disposed = true;

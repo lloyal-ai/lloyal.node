@@ -32,7 +32,6 @@ export interface Toolkit {
  *   new ReadFileTool(resources),
  *   new GrepTool(resources),
  * ]);
- * // report tool schema is auto-injected by useAgentPool()
  * ```
  *
  * @category Agents

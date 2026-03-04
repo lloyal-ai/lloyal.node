@@ -66,8 +66,8 @@ export function* withSharedRoot<T>(
   const fmtOpts = opts.tools
     ? { tools: opts.tools, addGenerationPrompt: false }
     : { addGenerationPrompt: false };
-  const fmt = yield* call(() => ctx.formatChat(JSON.stringify(messages), fmtOpts));
-  const sharedTokens: number[] = yield* call(() => ctx.tokenize(fmt.prompt));
+  const fmt = ctx.formatChatSync(JSON.stringify(messages), fmtOpts);
+  const sharedTokens = ctx.tokenizeSync(fmt.prompt);
 
   const root = Branch.create(ctx, 0, opts.params ?? { temperature: 0.5 });
   yield* call(() => root.prefill(sharedTokens));
@@ -75,8 +75,6 @@ export function* withSharedRoot<T>(
   try {
     return yield* body(root, sharedTokens.length);
   } finally {
-    if (!root.disposed) {
-      yield* call(() => root.prune());
-    }
+    if (!root.disposed) root.pruneSubtreeSync();
   }
 }

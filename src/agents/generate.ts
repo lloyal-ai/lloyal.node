@@ -37,7 +37,7 @@ export function* generate<T = unknown>(opts: GenerateOptions): Operation<Generat
   const branch = Branch.create(ctx, 0, samplerParams, undefined, opts.grammar);
 
   try {
-    const tokens: number[] = yield* call(() => ctx.tokenize(opts.prompt));
+    const tokens = ctx.tokenizeSync(opts.prompt);
     yield* call(() => branch.prefill(tokens));
 
     // Consume async iterator inside call() — generators can't use for-await
@@ -54,6 +54,6 @@ export function* generate<T = unknown>(opts: GenerateOptions): Operation<Generat
     const parsed = opts.parse ? opts.parse(output) as T : undefined;
     return { output, tokenCount, parsed };
   } finally {
-    if (!branch.disposed) yield* call(() => branch.prune());
+    if (!branch.disposed) branch.pruneSync();
   }
 }

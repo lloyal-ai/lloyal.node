@@ -5,6 +5,9 @@ import type { Reranker } from './types';
 import { SearchTool } from './search';
 import { ReadFileTool } from './read-file';
 import { GrepTool } from './grep';
+import { ReportTool } from './report';
+
+export const reportTool = new ReportTool();
 
 export function createTools(opts: {
   resources: Resource[];
@@ -15,5 +18,6 @@ export function createTools(opts: {
     new SearchTool(opts.chunks, opts.reranker),
     new ReadFileTool(opts.resources),
     new GrepTool(opts.resources),
+    reportTool,
   ]);
 }

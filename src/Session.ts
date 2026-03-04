@@ -82,7 +82,7 @@ export class Session {
    * @param opts - Optional tools JSON string
    */
   async prefillUser(content: string, opts: { tools?: string } = {}): Promise<void> {
-    const tokens = await buildUserDelta(this._ctx, content, opts);
+    const tokens = buildUserDelta(this._ctx, content, opts);
     await this._trunk!.prefill(tokens);
   }
 
@@ -93,7 +93,7 @@ export class Session {
    * @param callId - Tool call ID
    */
   async prefillToolResult(resultStr: string, callId: string): Promise<void> {
-    const tokens = await buildToolResultDelta(this._ctx, resultStr, callId);
+    const tokens = buildToolResultDelta(this._ctx, resultStr, callId);
     await this._trunk!.prefill(tokens);
   }
 }

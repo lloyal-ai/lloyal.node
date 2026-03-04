@@ -1,17 +1,16 @@
-import { resource, call, action, useScope, createSignal, spawn, each } from 'effection';
+import { resource, call, action, ensure, useScope, createSignal, spawn, each } from 'effection';
 import type { Operation, Scope, Channel } from 'effection';
 import type { Branch } from '../Branch';
 import { CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, GrammarTriggerType, type GrammarTrigger, type ParsedToolCall, type SessionContext } from '../types';
 import type { BranchStore } from '../BranchStore';
 import { Ctx, Store, Events } from './context';
 import { buildToolResultDelta } from './deltas';
-import type { Tool } from './Tool';
 import type {
   TraceToken,
+  PressureThresholds,
   AgentTaskSpec,
   AgentPoolOptions,
   AgentPoolResult,
-  AgentResult,
   AgentEvent,
 } from './types';
 
@@ -24,6 +23,7 @@ type AgentInternalState = 'generating' | 'awaiting_tool' | 'done';
 
 interface AgentInternal {
   id: number;           // = branch.handle
+  parentId: number;     // = parent.handle
   branch: Branch;
   state: AgentInternalState;
   fmt: {
@@ -39,7 +39,6 @@ interface AgentInternal {
   tokenCount: number;
   toolCallCount: number;
   turns: number;
-  graceUsed: boolean;
   findings: string | null;
   traceBuffer: TraceToken[];
 }
@@ -50,59 +49,112 @@ interface SettledTool {
   toolName: string;
 }
 
-// Report tool schema — auto-injected into agent tools by setupAgent().
-// useAgentPool() intercepts report calls (never dispatched to execute()).
-const REPORT_SCHEMA = {
-  type: 'function' as const,
-  function: {
-    name: 'report',
-    description: 'Submit your final research findings. Call this when you have gathered enough information to answer the question.',
-    parameters: {
-      type: 'object',
-      properties: { findings: { type: 'string', description: 'Your research findings and answer' } },
-      required: ['findings'],
-    },
-  },
-};
+/**
+ * Immutable KV budget snapshot for one tick of the agent loop
+ *
+ * Created from `SessionContext._storeKvPressure()` which returns
+ * `{ nCtx, cellsUsed, remaining }` where `remaining = nCtx - cellsUsed`.
+ * `cellsUsed` is a monotonic counter in `BranchStore` — it increments on
+ * every `decode_each` / `decode_scatter` but does **not** decrement on
+ * individual branch prune (only resets on bulk ops like `retainOnly` and
+ * `drain`). This means `remaining` is a conservative lower bound that
+ * becomes increasingly pessimistic as branches are pruned mid-run.
+ *
+ * Two thresholds partition `remaining` into three zones:
+ *
+ * ```
+ * ┌──────────────────────────────────────────────────────┐
+ * │                    nCtx                              │
+ * │  ┌──────────┬───────────────────┬──────────────────┐ │
+ * │  │cellsUsed │    headroom > 0   │    softLimit     │ │
+ * │  │ (in use) │   (new work OK)   │   (reserved)     │ │
+ * │  └──────────┴───────────────────┴──────────────────┘ │
+ * │              ◄── remaining ──►  │                    │
+ * │                                 │                    │
+ * │  headroom = remaining - softLimit                    │
+ * │  critical = remaining < hardLimit                    │
+ * └──────────────────────────────────────────────────────┘
+ * ```
+ *
+ * - **headroom > 0** — room for new work (tool results, generation)
+ * - **headroom ≤ 0** — over budget. SETTLE rejects tool results, PRODUCE
+ *   hard-cuts non-terminal tool calls. Terminal tools still pass.
+ * - **critical** — remaining below hardLimit. Agents killed before
+ *   `produceSync()` to prevent llama_decode crashes.
+ *
+ * @category Agents
+ */
+export class ContextPressure {
+  /** Default softLimit: 1024 tokens reserved for downstream work */
+  static readonly DEFAULT_SOFT_LIMIT = 1024;
+  /** Default hardLimit: 128 tokens crash-prevention floor */
+  static readonly DEFAULT_HARD_LIMIT = 128;
 
-/** Inject report tool schema if tools are present and report isn't already defined. */
-function ensureReportTool(toolsJson: string): string {
-  const schemas = JSON.parse(toolsJson) as { type: string; function: { name: string } }[];
-  if (schemas.some(s => s.function?.name === 'report')) return toolsJson;
-  schemas.push(REPORT_SCHEMA);
-  return JSON.stringify(schemas);
+  /**
+   * KV slots remaining (`nCtx - cellsUsed`).
+   * Infinity when nCtx ≤ 0 (no context limit).
+   * Conservative: may undercount actual free space when branches have been
+   * pruned, since `cellsUsed` is monotonic.
+   */
+  readonly remaining: number;
+  /** Remaining KV floor — tokens reserved for downstream work */
+  readonly softLimit: number;
+  /** Crash-prevention floor — agents killed when remaining drops below */
+  readonly hardLimit: number;
+
+  constructor(ctx: SessionContext, opts?: PressureThresholds) {
+    const p = ctx._storeKvPressure();
+    this.remaining = p.nCtx <= 0 ? Infinity : p.remaining;
+    this.softLimit = opts?.softLimit ?? ContextPressure.DEFAULT_SOFT_LIMIT;
+    this.hardLimit = opts?.hardLimit ?? ContextPressure.DEFAULT_HARD_LIMIT;
+  }
+
+  /**
+   * Tokens available for new work: `remaining - softLimit`.
+   * Positive means room to accept tool results or continue generating.
+   * Negative means over budget — SETTLE rejects, PRODUCE hard-cuts.
+   */
+  get headroom(): number { return this.remaining - this.softLimit; }
+
+  /** `remaining < hardLimit` — agent must not call `produceSync()`. */
+  get critical(): boolean { return this.remaining < this.hardLimit; }
+
+  /** Can `tokenCount` tokens fit while staying above softLimit? */
+  canFit(tokenCount: number): boolean { return tokenCount <= this.headroom; }
 }
 
 /**
  * Fork an agent from a parent branch with its own system prompt and task.
  *
- * Formats the agent's messages via `formatChat()`, tokenizes the suffix,
- * and optionally reseeds the sampler for stochastic diversity. When the
- * task has tools, the `report` tool schema is auto-injected if absent.
+ * Generator — uses sync native calls so Effection sees everything.
+ * On scope exit (error, cancellation), `ensure()` prunes the branch
+ * automatically — the orphaned-branch leak is structurally impossible.
  */
-async function setupAgent(
+function* setupAgent(
   parent: Branch,
   task: AgentTaskSpec,
   ctx: SessionContext,
-): Promise<{ agent: AgentInternal; suffixTokens: number[] }> {
-  const branch = await parent.fork();
+): Operation<{ agent: AgentInternal; suffixTokens: number[] }> {
   const messages = [
     { role: 'system', content: task.systemPrompt },
     { role: 'user', content: task.content },
   ];
-  const tools = task.tools ? ensureReportTool(task.tools) : undefined;
-  const fmtOpts = tools ? { tools } : {};
-  const fmt = await ctx.formatChat(JSON.stringify(messages), fmtOpts);
-  if (tools && (fmt.format === CHAT_FORMAT_CONTENT_ONLY || fmt.format === CHAT_FORMAT_GENERIC)) {
+  const fmtOpts = task.tools ? { tools: task.tools } : {};
+  const fmt = ctx.formatChatSync(JSON.stringify(messages), fmtOpts);
+  if (task.tools && (fmt.format === CHAT_FORMAT_CONTENT_ONLY || fmt.format === CHAT_FORMAT_GENERIC)) {
+    // Error before fork — no branch to clean up
     throw new Error('Model does not support tool calling. Please use a model with native tool support (e.g. Qwen3, Llama 3.x, Mistral).');
   }
+  const branch = parent.forkSync();
+  yield* ensure(() => { if (!branch.disposed) branch.pruneSync(); });
   const sep = ctx.getTurnSeparator();
-  const suffixTokens = [...sep, ...await ctx.tokenize(fmt.prompt, false)];
+  const suffixTokens = [...sep, ...ctx.tokenizeSync(fmt.prompt, false)];
   if (task.seed != null) branch.reseedSampler(task.seed);
 
   return {
     agent: {
       id: branch.handle,
+      parentId: parent.handle,
       branch,
       state: 'generating',
       fmt: {
@@ -118,7 +170,6 @@ async function setupAgent(
       tokenCount: 0,
       toolCallCount: 0,
       turns: 0,
-      graceUsed: false,
       findings: null,
       traceBuffer: [],
     },
@@ -143,8 +194,8 @@ async function setupAgent(
  *
  * **Resource semantics:** `provide()` suspends after all agents complete,
  * keeping branches alive so the caller can fork from them (e.g. for
- * verification). Branches are pruned in the finally block when the
- * scope exits.
+ * verification). Branches are pruned when the scope exits — each branch's
+ * `ensure()` from `setupAgent` handles cleanup automatically.
  *
  * For automatic branch cleanup on return, use {@link runAgents} instead.
  *
@@ -188,31 +239,60 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
         yield* each.next();
       }
     });
-    const { tasks, tools, maxTurns = 100, nCtx = 0, gracePrompt, trace = false } = opts;
+    const { tasks, tools, maxTurns = 100, terminalTool, trace = false, pressure: pressureOpts } = opts;
+
+    // Whether the pool's tool registry contains tools besides the terminal tool.
+    // When false, agents are allowed to call the terminal tool as their first
+    // action (e.g. reporter sub-agents that only have `report()`). When true,
+    // the first tool call must be a non-terminal tool to prevent agents from
+    // immediately reporting without doing any work.
+    //
+    // IMPORTANT: this checks the pool's `tools` registry, not individual task
+    // schemas (`task.tools`). A reporter pool must pass only the terminal tool
+    // in its registry — passing the full tool map makes this flag true and
+    // traps reporters in an infinite rejection loop.
+    const hasNonTerminalTools = terminalTool ? [...tools.keys()].some(k => k !== terminalTool) : tools.size > 0;
 
     // ── Setup: fork branches, collect suffix tokens ──────────
+    // setupAgent is now a generator — each branch registers its own ensure()
+    // for cleanup. No manual try/finally needed here.
     const agents: AgentInternal[] = [];
     const prefillSetup: [Branch, number[]][] = [];
 
-    // try/finally wraps everything from agent creation through provide().
-    // Agent branches are plain Branch objects (not Effection resources) —
-    // their cleanup is manual. Placing it here guarantees any branch that
-    // makes it into agents[] is pruned on ANY exit path: normal completion,
-    // tick loop error, or scope cancellation.
-    try {
-
     for (const task of tasks) {
-      // Per-task parent for tree topology, or first task's parent as shared root
       const parent = task.parent;
       if (!parent) throw new Error('useAgentPool: each task must have a parent branch');
 
-      const { agent, suffixTokens } = yield* call(() => setupAgent(parent, task, ctx));
+      const { agent, suffixTokens } = yield* setupAgent(parent, task, ctx);
       agents.push(agent);
       prefillSetup.push([agent.branch, suffixTokens]);
     }
 
-    // Batch prefill all agent suffixes
-    yield* call(() => store.prefill(prefillSetup));
+    // Batch prefill all agent suffixes — pressure-gated.
+    // Each suffix is the full formatted chat (system prompt + tools JSON +
+    // user message + generation prompt), tokenized via formatChatSync().
+    // Suffix cost is model-dependent: ~250-400 tokens per agent depending
+    // on chat template verbosity and tool schema size.
+    const initPressure = new ContextPressure(ctx, pressureOpts);
+    const totalSuffix = prefillSetup.reduce((s, [, t]) => s + t.length, 0);
+    if (!initPressure.canFit(totalSuffix)) {
+      // Not enough room — drop agents from the end until it fits
+      while (prefillSetup.length > 0) {
+        const needed = prefillSetup.reduce((s, [, t]) => s + t.length, 0);
+        if (initPressure.canFit(needed)) break;
+        prefillSetup.pop();
+        const dropped = agents.pop()!;
+        dropped.state = 'done';
+      }
+    }
+    if (prefillSetup.length > 0) {
+      yield* call(() => store.prefill(prefillSetup));
+    }
+
+    // Emit spawn events — TUI uses parentAgentId to detect sub-agents
+    for (const a of agents) {
+      yield* events.send({ type: 'agent:spawn', agentId: a.id, parentAgentId: a.parentId });
+    }
 
     // ── Lazy grammar setup ───────────────────────────────────
     const applyLazyGrammar = (a: AgentInternal): void => {
@@ -288,7 +368,7 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
           const resultStr = JSON.stringify(result);
           yield* events.send({ type: 'agent:tool_result', agentId: agent.id, tool: tc.name, result: resultStr });
 
-          const prefillTokens: number[] = yield* call(() => buildToolResultDelta(ctx, resultStr, callId));
+          const prefillTokens = buildToolResultDelta(ctx, resultStr, callId);
           settledBuffer.push({ agentId: agent.id, prefillTokens, toolName: tc.name });
         } catch (err) {
           agent.state = 'done';
@@ -300,31 +380,21 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       });
     }
 
-    // Context pressure thresholds (in tokens)
-    const GRACE_RESERVE = 1024;    // room for grace prompt + report generation
-    const CRITICAL_RESERVE = 128;  // absolute minimum — hard stop to prevent crash
-
     // ── Three-phase tick loop ────────────────────────────────
     for (;;) {
       // -- Phase 1: PRODUCE -- sample from active agents
+      const pressure = new ContextPressure(ctx, pressureOpts);
 
-      // Compute aggregate KV remaining once per tick.
-      // All branches (including done, not yet pruned) share one nCtx-sized KV cache.
-      // Shared prefix slots are counted once; divergent tails add per-branch.
-      let kvRemaining = Infinity;
-      if (nCtx > 0) {
-        const positions = agents.map(a => a.branch.position);
-        const sharedPrefix = Math.min(...positions);
-        const totalKV = positions.reduce((s, p) => s + p, 0) - (positions.length - 1) * sharedPrefix;
-        kvRemaining = nCtx - totalKV;
+      if (trace && (pressure.critical || pressure.headroom < 0)) {
+        const p = ctx._storeKvPressure();
+        try { process.stderr.write(`[PRODUCE] ${pressure.critical ? 'CRITICAL' : 'SOFT_LIMIT'} remaining=${p.remaining} headroom=${pressure.headroom} cellsUsed=${p.cellsUsed} nCtx=${p.nCtx}\n`); } catch {}
       }
 
       const entries: [Branch, number][] = [];
       for (const a of agents) {
         if (a.state !== 'generating') continue;
 
-        // Critical context pressure — hard stop before produceSync to prevent llama_decode crash
-        if (kvRemaining < CRITICAL_RESERVE) {
+        if (pressure.critical) {
           a.state = 'done';
           yield* events.send({ type: 'agent:done', agentId: a.id });
           continue;
@@ -349,51 +419,31 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
             continue;
           }
 
-          // Grace turn: context pressure or maxTurns reached, agent wants to call a tool
-          // that isn't report. Inject gracePrompt so the agent can synthesize findings.
-          // If grace already used (or no gracePrompt configured), hard-cut.
-          const contextPressure = kvRemaining < GRACE_RESERVE;
-          const shouldGrace = (a.turns >= maxTurns || contextPressure) && tc.name !== 'report';
+          // Over budget: deny non-terminal tool calls when the agent has
+          // exceeded maxTurns or KV headroom is negative. Terminal tools
+          // (e.g. `report()`) are always allowed through — an agent that has
+          // done research and wants to report should never be blocked by
+          // pressure, since the report call itself consumes minimal KV.
+          const overBudget = (a.turns >= maxTurns || pressure.headroom < 0)
+            && (!terminalTool || tc.name !== terminalTool);
 
-          if (shouldGrace) {
-            if (a.graceUsed || !gracePrompt) {
-              a.state = 'done';
-              yield* events.send({ type: 'agent:done', agentId: a.id });
-              continue;
-            }
-            a.graceUsed = true;
-            const callId = tc.id || `call_${a.toolCallCount}`;
-            a.turns++;
-            a.state = 'awaiting_tool';
-            pendingToolCount++;
-            scope.run(function*() {
-              try {
-                const prefillTokens: number[] = yield* call(() =>
-                  buildToolResultDelta(ctx, JSON.stringify({ error: gracePrompt }), callId)
-                );
-                settledBuffer.push({ agentId: a.id, prefillTokens, toolName: tc.name });
-              } finally {
-                pendingToolCount--;
-                if (wakeIdle) { wakeIdle(); wakeIdle = null; }
-              }
-            });
-            a.rawOutput = '';
+          if (overBudget) {
+            a.state = 'done';
+            yield* events.send({ type: 'agent:done', agentId: a.id });
             continue;
           }
 
-          // Report tool special case — reject if no prior research
-          if (tc.name === 'report') {
-            if (a.toolCallCount === 0) {
+          // Terminal tool — intercept, extract findings, mark done.
+          if (terminalTool && tc.name === terminalTool) {
+            if (a.toolCallCount === 0 && hasNonTerminalTools) {
               const callId = tc.id || `call_${a.toolCallCount}`;
-              const errorMsg = 'You must search or read the corpus before reporting. Use search, grep, or read_file first.';
+              const errorMsg = 'You must perform research before reporting. Call at least one tool first.';
               a.turns++;
               a.state = 'awaiting_tool';
               pendingToolCount++;
               scope.run(function*() {
                 try {
-                  const prefillTokens: number[] = yield* call(() =>
-                    buildToolResultDelta(ctx, JSON.stringify({ error: errorMsg }), callId)
-                  );
+                  const prefillTokens = buildToolResultDelta(ctx, JSON.stringify({ error: errorMsg }), callId);
                   settledBuffer.push({ agentId: a.id, prefillTokens, toolName: tc.name });
                 } finally {
                   pendingToolCount--;
@@ -407,7 +457,7 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
             a.state = 'done';
             a.toolCallCount++;
             totalToolCalls++;
-            yield* events.send({ type: 'agent:tool_call', agentId: a.id, tool: 'report', args: tc.arguments });
+            yield* events.send({ type: 'agent:tool_call', agentId: a.id, tool: tc.name, args: tc.arguments });
             yield* events.send({ type: 'agent:report', agentId: a.id, findings: a.findings! });
             yield* events.send({ type: 'agent:done', agentId: a.id });
             continue;
@@ -444,17 +494,42 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
       // -- Phase 3: SETTLE -- drain settled tool buffer, batch prefill
       const settled = settledBuffer.splice(0);
       if (settled.length > 0) {
+        // Fresh snapshot — Phase 2 commits may have advanced positions
+        const settlePressure = new ContextPressure(ctx, pressureOpts);
+        let headroom = settlePressure.headroom;
+
+        if (trace) {
+          const p = ctx._storeKvPressure();
+          const items = settled.map(s => `${s.toolName}:${s.prefillTokens.length}`).join(', ');
+          try { process.stderr.write(`[SETTLE] remaining=${p.remaining} headroom=${headroom} cellsUsed=${p.cellsUsed} nCtx=${p.nCtx} items=[${items}]\n`); } catch {}
+        }
+
         const prefillPairs: [Branch, number[]][] = [];
         const settledAgents: AgentInternal[] = [];
 
         for (const item of settled) {
           const a = agentById.get(item.agentId);
           if (!a || a.state === 'done') continue;
+
+          if (item.prefillTokens.length > headroom) {
+            if (trace) {
+              try { process.stderr.write(`[SETTLE] REJECT ${item.toolName}:${item.prefillTokens.length} > headroom=${headroom}\n`); } catch {}
+            }
+            a.state = 'done';
+            yield* events.send({ type: 'agent:done', agentId: a.id });
+            continue;
+          }
+
           prefillPairs.push([a.branch, item.prefillTokens]);
           settledAgents.push(a);
+          headroom -= item.prefillTokens.length;
         }
 
         if (prefillPairs.length > 0) {
+          if (trace) {
+            const totalPrefill = prefillPairs.reduce((s, [, t]) => s + t.length, 0);
+            try { process.stderr.write(`[SETTLE] PREFILL ${prefillPairs.length} branches, ${totalPrefill} tokens, headroom_after=${headroom}\n`); } catch {}
+          }
           yield* call(() => store.prefill(prefillPairs));
           counters.warmPrefillCalls++;
           counters.warmPrefillBranches += prefillPairs.length;
@@ -486,17 +561,20 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
     }
 
     // ── Provide result — suspends, branches stay alive ───────
+    // Branch cleanup is handled by each branch's ensure() from setupAgent —
+    // when this resource's scope exits, all ensure() callbacks fire.
     const result: AgentPoolResult = {
       agents: agents.map(a => ({
-        agentId: a.id,
-        branch: a.branch,
-        findings: a.findings,
-        toolCallCount: a.toolCallCount,
-        tokenCount: a.tokenCount,
-        ppl: a.branch.perplexity,
-        samplingPpl: a.branch.samplingPerplexity,
-        trace: trace ? a.traceBuffer : undefined,
-      })),
+          agentId: a.id,
+          parentAgentId: a.parentId,
+          branch: a.branch,
+          findings: a.findings,
+          toolCallCount: a.toolCallCount,
+          tokenCount: a.tokenCount,
+          ppl: a.branch.perplexity,
+          samplingPpl: a.branch.samplingPerplexity,
+          trace: trace ? a.traceBuffer : undefined,
+        })),
       totalTokens: agents.reduce((s, a) => s + a.tokenCount, 0),
       totalToolCalls,
       steps,
@@ -504,14 +582,5 @@ export function useAgentPool(opts: AgentPoolOptions): Operation<AgentPoolResult>
     };
 
     yield* provide(result);
-
-    } finally {
-      // Structured cleanup: prune all agent branches when scope exits.
-      // Covers setup errors, tick loop errors, and normal scope teardown
-      // (provide() suspends via yield* suspend(), halting jumps to finally).
-      for (const a of agents) {
-        yield* call(() => a.branch.prune());
-      }
-    }
   });
 }

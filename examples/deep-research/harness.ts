@@ -1,15 +1,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { call } from 'effection';
+import { call, scoped } from 'effection';
 import type { Operation, Channel } from 'effection';
 import { Branch, Session } from '../../dist';
 import type { SessionContext } from '../../dist';
 import {
   Ctx,
-  generate, runAgents, diverge, withSharedRoot,
+  generate, useAgentPool, runAgents, diverge, withSharedRoot,
 } from '../../dist/agents';
 import type { Tool, AgentPoolResult, DivergeResult } from '../../dist/agents';
 import type { WorkflowEvent, OpTiming } from './tui';
+import { computeAgreement } from './agreement';
+import { reportTool } from './tools';
 
 /** Load a task prompt file. Convention: system prompt above `---`, user content below. */
 function loadTask(name: string): { system: string; user: string } {
@@ -23,7 +25,7 @@ const PLAN = loadTask('plan');
 const RESEARCH = loadTask('research');
 const VERIFY = loadTask('verify');
 const EVAL = loadTask('eval');
-const GRACE = loadTask('graceful-termination');
+const REPORT = loadTask('report');
 
 // ── Options ──────────────────────────────────────────────────────
 
@@ -34,7 +36,6 @@ export interface WorkflowOpts {
   agentCount: number;
   verifyCount: number;
   maxTurns: number;
-  nCtx: number;
   trace: boolean;
   events: Channel<WorkflowEvent, void>;
 }
@@ -49,6 +50,38 @@ function agentTasks(questions: string[], toolsJson: string, parent: Branch, seed
     parent,
     seed: seed != null ? seed + i : undefined,
   }));
+}
+
+const reportOnlyTools = JSON.stringify([reportTool.schema]);
+
+function* reportPass(
+  pool: AgentPoolResult,
+  opts: WorkflowOpts,
+): Operation<void> {
+  const hardCut = pool.agents.filter(a => !a.findings && !a.branch.disposed);
+  if (hardCut.length === 0) return;
+
+  // Free KV from successful agents before spawning reporters
+  for (const a of pool.agents) {
+    if (a.findings && !a.branch.disposed) a.branch.pruneSync();
+  }
+
+  const reporters = yield* runAgents({
+    tasks: hardCut.map(a => ({
+      systemPrompt: REPORT.system,
+      content: REPORT.user,
+      tools: reportOnlyTools,
+      parent: a.branch,
+    })),
+    tools: new Map([['report', reportTool]]),
+    terminalTool: 'report',
+    trace: opts.trace,
+    pressure: { softLimit: 200, hardLimit: 64 },
+  });
+
+  hardCut.forEach((a, i) => {
+    if (reporters.agents[i]?.findings) a.findings = reporters.agents[i].findings;
+  });
 }
 
 // ── Operations ───────────────────────────────────────────────────
@@ -131,12 +164,15 @@ function* research(
   const { result: pool, prefixLen: sharedPrefixLength } = yield* withSharedRoot(
     { systemPrompt: RESEARCH.system, tools: opts.toolsJson },
     function*(root, prefixLen) {
-      const result = yield* runAgents({
+      const pool = yield* useAgentPool({
         tasks: agentTasks(questions, opts.toolsJson, root),
         tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
-        nCtx: opts.nCtx, gracePrompt: GRACE.system,
+        terminalTool: 'report',
+        pressure: { softLimit: 2048 },
       });
-      return { result, prefixLen };
+
+      yield* reportPass(pool, opts);
+      return { result: pool, prefixLen };
     },
   );
 
@@ -152,10 +188,16 @@ function* warmResearch(
   yield* opts.events.send({ type: 'research:start', agentCount: questions.length });
   const t = performance.now();
 
-  const pool = yield* runAgents({
-    tasks: agentTasks(questions, opts.toolsJson, opts.session.trunk!, Date.now()),
-    tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
-    nCtx: opts.nCtx, gracePrompt: GRACE.system,
+  const pool = yield* scoped(function*() {
+    const pool = yield* useAgentPool({
+      tasks: agentTasks(questions, opts.toolsJson, opts.session.trunk!, Date.now()),
+      tools: opts.toolMap, maxTurns: opts.maxTurns, trace: opts.trace,
+      terminalTool: 'report',
+      pressure: { softLimit: 1024 },
+    });
+
+    yield* reportPass(pool, opts);
+    return pool;
   });
 
   const timeMs = performance.now() - t;
@@ -192,6 +234,8 @@ function* verify(
     params: { temperature: 0.7 },
   });
   const timeMs = performance.now() - t;
+  const agreement = computeAgreement(result.attempts.map(a => a.output));
+  yield* opts.events.send({ type: 'verify:agreement', result: agreement });
   yield* opts.events.send({ type: 'verify:done', result, timeMs });
   return { result, timeMs };
 }
@@ -280,12 +324,15 @@ function* summarize(
   opts: WorkflowOpts,
   extra?: { kvLine?: string },
 ): Operation<void> {
+  const ctx: SessionContext = yield* Ctx.expect();
+  const p = ctx._storeKvPressure();
+  const ctxTotal = p.nCtx || 1;
   yield* opts.events.send({
     type: 'stats', timings,
     kvLine: extra?.kvLine,
-    ctxPct: Math.round(100 * (opts.session.trunk?.position ?? 0) / opts.nCtx),
-    ctxPos: opts.session.trunk?.position ?? 0,
-    ctxTotal: opts.nCtx,
+    ctxPct: Math.round(100 * p.cellsUsed / ctxTotal),
+    ctxPos: p.cellsUsed,
+    ctxTotal,
   });
 }
 

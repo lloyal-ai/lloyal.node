@@ -1,1 +1,0 @@
-STOP. You MUST call the report tool RIGHT NOW with a brief summary (under 200 words) of what you found. Do NOT call any other tool. Do NOT list every detail — summarize the key findings only.

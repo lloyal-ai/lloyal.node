@@ -75,7 +75,7 @@ if (!corpusDir) {
 
 if (jsonlMode) setJsonlMode(true);
 if (verbose) setVerboseMode(true);
-if (!verbose && !jsonlMode) {
+if (!verbose && !jsonlMode && !trace) {
   try {
     fs.closeSync(2);
     fs.openSync(process.platform === "win32" ? "\\\\.\\NUL" : "/dev/null", "w");
@@ -113,7 +113,7 @@ main(function* () {
     createContext({
       modelPath,
       nCtx,
-      nSeqMax: Math.max(AGENT_COUNT, VERIFY_COUNT) + 1,
+      nSeqMax: Math.max(AGENT_COUNT, VERIFY_COUNT) * 2 + 1,
       typeK: "q4_0",
       typeV: "q4_0",
     }),
@@ -163,7 +163,6 @@ main(function* () {
     agentCount: AGENT_COUNT,
     verifyCount: VERIFY_COUNT,
     maxTurns: MAX_TOOL_TURNS,
-    nCtx,
     trace,
   };
 

@@ -126,6 +126,48 @@ export interface SamplingParams {
 }
 
 /**
+ * KV pressure thresholds controlling agent shutdown under context exhaustion
+ *
+ * Two thresholds govern what happens as remaining KV shrinks:
+ *
+ * **softLimit** (default 1024) — remaining KV floor for new work.
+ * Enforced at three points:
+ * - **SETTLE**: tool results that would cross this floor are rejected and
+ *   the agent is marked done. This is the primary enforcement point — tool
+ *   results (search results, etc.) are the largest KV consumers.
+ * - **PRODUCE (stop-token boundary)**: agents that want a non-terminal tool
+ *   call are hard-cut. Terminal tools (e.g. `report()`) still pass.
+ * - **INIT prefill**: agents that don't fit above this floor are dropped.
+ *
+ * Set to account for downstream pool needs (reporters, verification).
+ *
+ * **hardLimit** (default 128) — crash-prevention floor.
+ * When remaining drops below this, agents are killed immediately before
+ * `produceSync()`. Prevents `llama_decode` "no memory slot" failures.
+ * Pure safety net — should never be the primary budget control.
+ *
+ * @category Agents
+ */
+export interface PressureThresholds {
+  /**
+   * Remaining KV floor for new work (tokens). When remaining drops below
+   * this, SETTLE rejects tool results, PRODUCE hard-cuts non-terminal tool
+   * calls, and INIT drops agents that don't fit.
+   *
+   * Set to account for downstream pool needs (reporters, verification).
+   * Default: 1024
+   */
+  softLimit?: number;
+  /**
+   * Crash-prevention floor (tokens). When remaining drops below this,
+   * agents are killed immediately before `produceSync()`. Prevents
+   * `llama_decode` "no memory slot for batch" failures.
+   * Default: 128
+   */
+  hardLimit?: number;
+}
+
+/**
  * Configuration for {@link useAgentPool} and {@link runAgents}
  *
  * @category Agents
@@ -133,20 +175,35 @@ export interface SamplingParams {
 export interface AgentPoolOptions {
   /** Agent task specifications — one per concurrent agent */
   tasks: AgentTaskSpec[];
-  /** Tool registry mapping tool names to {@link Tool} instances */
+  /**
+   * Tool registry mapping tool names to {@link Tool} instances.
+   *
+   * This is the **execution registry** — it determines which tools can be
+   * dispatched at runtime. It is distinct from the per-task `task.tools`
+   * JSON schema that tells the model which tools are available.
+   *
+   * The registry also controls {@link AgentPoolOptions.terminalTool | terminalTool}
+   * gating: if the registry contains only the terminal tool, agents are
+   * allowed to call it as their first action (e.g. reporter sub-agents).
+   * If the registry contains other tools, the first call must be
+   * non-terminal to prevent agents from reporting without doing work.
+   */
   tools: Map<string, import('./Tool').Tool>;
   /** Sampling parameters applied to all agents */
   params?: SamplingParams;
   /** Maximum tool-call turns per agent before forced termination */
   maxTurns?: number;
-  /** Context window size — enables context-pressure detection when set.
-   *  Agents are gracefully stopped when remaining capacity drops below threshold. */
-  nCtx?: number;
-  /** Message injected as a tool error when an agent must stop and report.
-   *  Triggered by context pressure or maxTurns. If omitted, agents are hard-cut. */
-  gracePrompt?: string;
+  /** Tool name that signals agent completion. When the model calls this tool,
+   *  findings are extracted from arguments and the agent is marked done.
+   *  The tool is intercepted — never dispatched to execute(). If omitted,
+   *  agents complete only via stop token or hard-cut. */
+  terminalTool?: string;
   /** Enable per-token entropy/surprisal on `agent:produce` events */
   trace?: boolean;
+  /** KV pressure thresholds — tune per pool. Reporter pools typically use
+   *  lower thresholds than research pools since they complete in a single
+   *  terminal tool call. See {@link PressureThresholds} for tuning guidance. */
+  pressure?: PressureThresholds;
 }
 
 /**
@@ -157,9 +214,11 @@ export interface AgentPoolOptions {
 export interface AgentResult {
   /** Stable agent identifier (branch handle at creation time) */
   agentId: number;
+  /** Parent branch handle — shared root for top-level agents, parent agentId for sub-agents */
+  parentAgentId: number;
   /** The agent's branch — still alive when returned from {@link useAgentPool} */
   branch: Branch;
-  /** Agent's research findings (from `report` tool or final output), or null */
+  /** Agent's research findings (from terminal tool or final output), or null */
   findings: string | null;
   /** Number of tool calls the agent made */
   toolCallCount: number;
@@ -310,6 +369,7 @@ export interface DivergeResult {
  * @category Agents
  */
 export type AgentEvent =
+  | { type: 'agent:spawn'; agentId: number; parentAgentId: number }
   | { type: 'agent:produce'; agentId: number; text: string; tokenCount: number; entropy?: number; surprisal?: number }
   | { type: 'agent:tool_call'; agentId: number; tool: string; args: string }
   | { type: 'agent:tool_result'; agentId: number; tool: string; result: string }

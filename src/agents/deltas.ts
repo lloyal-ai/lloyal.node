@@ -3,7 +3,7 @@ import type { SessionContext } from '../types';
 /**
  * Build a token delta for a user turn
  *
- * Composes `getTurnSeparator()` + `formatChat()` + `tokenize()` into a
+ * Composes `getTurnSeparator()` + `formatChatSync()` + `tokenizeSync()` into a
  * single token array suitable for `branch.prefill()`. Usable with any
  * branch — not tied to {@link Session}'s trunk.
  *
@@ -17,25 +17,25 @@ import type { SessionContext } from '../types';
  *
  * @category Agents
  */
-export async function buildUserDelta(
+export function buildUserDelta(
   ctx: SessionContext,
   content: string,
   opts: { tools?: string } = {}
-): Promise<number[]> {
+): number[] {
   const sep = ctx.getTurnSeparator();
   const fmtOpts = opts.tools ? { tools: opts.tools } : {};
-  const { prompt } = await ctx.formatChat(
+  const { prompt } = ctx.formatChatSync(
     JSON.stringify([{ role: 'system', content: '' }, { role: 'user', content }]),
     fmtOpts
   );
-  const delta = await ctx.tokenize(prompt, false);
+  const delta = ctx.tokenizeSync(prompt, false);
   return [...sep, ...delta];
 }
 
 /**
  * Build a token delta for a tool result turn
  *
- * Composes `getTurnSeparator()` + `formatChat()` + `tokenize()` into a
+ * Composes `getTurnSeparator()` + `formatChatSync()` + `tokenizeSync()` into a
  * single token array suitable for `branch.prefill()`. Used by
  * {@link useAgentPool} to inject tool results back into agent context.
  *
@@ -46,18 +46,18 @@ export async function buildUserDelta(
  *
  * @category Agents
  */
-export async function buildToolResultDelta(
+export function buildToolResultDelta(
   ctx: SessionContext,
   resultStr: string,
   callId: string
-): Promise<number[]> {
+): number[] {
   const sep = ctx.getTurnSeparator();
-  const { prompt } = await ctx.formatChat(
+  const { prompt } = ctx.formatChatSync(
     JSON.stringify([
       { role: 'system', content: '' },
       { role: 'tool', content: resultStr, tool_call_id: callId },
     ])
   );
-  const delta = await ctx.tokenize(prompt, false);
+  const delta = ctx.tokenizeSync(prompt, false);
   return [...sep, ...delta];
 }

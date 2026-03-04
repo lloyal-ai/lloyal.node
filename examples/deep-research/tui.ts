@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { each } from 'effection';
 import type { Channel, Operation } from 'effection';
 import type { AgentEvent, AgentPoolResult, DivergeResult } from '../../dist/agents';
+import type { AgreementResult } from './agreement';
 
 // ── Event types ──────────────────────────────────────────────────
 
@@ -19,6 +20,7 @@ export type StepEvent =
   | { type: 'research:done'; pool: AgentPoolResult; timeMs: number }
   | { type: 'verify:start'; count: number }
   | { type: 'verify:done'; result: DivergeResult; timeMs: number }
+  | { type: 'verify:agreement'; result: AgreementResult }
   | { type: 'eval:done'; converged: boolean | null; tokenCount: number; timeMs: number }
   | { type: 'answer'; text: string }
   | { type: 'response:start' }
@@ -83,10 +85,19 @@ interface ViewState {
   nextLabel: number;
   agentText: Map<number, string>;
   agentStatus: Map<number, { state: string; tokenCount: number; detail: string }>;
+  agentParent: Map<number, number>;  // childId → parentId (sub-agent tracking)
   traceQuery: string;
 }
 
 type ViewHandler = (ev: WorkflowEvent) => void;
+
+function isSubAgent(state: ViewState, agentId: number): boolean {
+  return state.agentParent.has(agentId);
+}
+
+function parentLabel(state: ViewState, agentId: number): string {
+  return label(state, state.agentParent.get(agentId)!);
+}
 
 function label(state: ViewState, agentId: number): string {
   let l = state.agentLabel.get(agentId);
@@ -99,10 +110,12 @@ function resetLabels(state: ViewState): void {
   state.agentLabel.clear();
   state.agentStatus.clear();
   state.agentText.clear();
+  state.agentParent.clear();
 }
 
 function renderStatus(state: ViewState): void {
-  const active = [...state.agentStatus.entries()].filter(([, s]) => s.state !== 'done');
+  const active = [...state.agentStatus.entries()]
+    .filter(([id, s]) => s.state !== 'done' && !isSubAgent(state, id));
   if (active.length === 0) return;
 
   const generating = active.filter(([, s]) => s.state === 'gen');
@@ -155,12 +168,20 @@ function planHandler(): ViewHandler {
 function agentHandler(state: ViewState): ViewHandler {
   return (ev) => {
     switch (ev.type) {
+      case 'agent:spawn': {
+        // If parent is a known labeled agent, this is a sub-agent
+        if (state.agentLabel.has(ev.parentAgentId)) {
+          state.agentParent.set(ev.agentId, ev.parentAgentId);
+        }
+        break;
+      }
       case 'agent:produce': {
+        const sub = isSubAgent(state, ev.agentId);
         state.agentText.set(ev.agentId, (state.agentText.get(ev.agentId) ?? '') + ev.text);
         state.agentStatus.set(ev.agentId, { state: 'gen', tokenCount: ev.tokenCount, detail: '' });
+        if (sub) break;  // sub-agents: skip verbose/status output
         if (_verboseMode) {
           const lbl = label(state, ev.agentId);
-          // First token for this agent — print header
           if (ev.tokenCount === 1) {
             statusClear();
             process.stdout.write(`\n    ${c.dim}───${c.reset} ${c.yellow}${lbl}${c.reset} ${c.dim}tokens${c.reset} ${c.dim}───${c.reset}\n    `);
@@ -172,7 +193,8 @@ function agentHandler(state: ViewState): ViewHandler {
         break;
       }
       case 'agent:tool_call': {
-        if (_verboseMode) process.stdout.write('\n');
+        const sub = isSubAgent(state, ev.agentId);
+        if (_verboseMode && !sub) process.stdout.write('\n');
         state.agentText.delete(ev.agentId);
         state.agentStatus.set(ev.agentId, { state: ev.tool, tokenCount: 0, detail: '' });
         emit('tool_call', { agentId: ev.agentId, toolName: ev.tool, arguments: ev.args });
@@ -184,7 +206,12 @@ function agentHandler(state: ViewState): ViewHandler {
           ? `/${toolArgs.pattern || ''}/`
           : ev.tool === 'report' ? ''
           : `${toolArgs.filename}` + (toolArgs.startLine ? ` L${toolArgs.startLine}-${toolArgs.endLine}` : '');
-        log(`    ${c.dim}\u251c${c.reset} ${c.yellow}${label(state, ev.agentId)}${c.reset} ${c.cyan}${ev.tool}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+        if (sub) {
+          const plbl = `${c.yellow}${parentLabel(state, ev.agentId)}${c.reset}`;
+          log(`    ${c.dim}\u2502${c.reset}  ${c.dim}\u2514${c.reset} ${plbl} ${c.cyan}${ev.tool}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+        } else {
+          log(`    ${c.dim}\u251c${c.reset} ${c.yellow}${label(state, ev.agentId)}${c.reset} ${c.cyan}${ev.tool}${c.reset}${argSummary ? `(${argSummary})` : ''}`);
+        }
         break;
       }
       case 'agent:tool_result': {
@@ -209,7 +236,12 @@ function agentHandler(state: ViewState): ViewHandler {
             preview = ` \u00b7 ${r.totalMatches} matches in ${r.matchingLines} lines`;
           } catch { /* non-fatal */ }
         }
-        log(`    ${c.dim}\u251c${c.reset} ${c.yellow}${label(state, ev.agentId)}${c.reset} ${c.dim}\u2190 ${ev.tool} ${ev.result.length}b${preview}${c.reset}`);
+        if (isSubAgent(state, ev.agentId)) {
+          const plbl = `${c.yellow}${parentLabel(state, ev.agentId)}${c.reset}`;
+          log(`    ${c.dim}\u2502${c.reset}  ${c.dim}\u2514${c.reset} ${plbl} ${c.dim}\u2190 ${ev.tool} ${ev.result.length}b${preview}${c.reset}`);
+        } else {
+          log(`    ${c.dim}\u251c${c.reset} ${c.yellow}${label(state, ev.agentId)}${c.reset} ${c.dim}\u2190 ${ev.tool} ${ev.result.length}b${preview}${c.reset}`);
+        }
         break;
       }
       case 'agent:tool_progress': {
@@ -219,13 +251,16 @@ function agentHandler(state: ViewState): ViewHandler {
       }
       case 'agent:report': {
         state.agentStatus.set(ev.agentId, { state: 'done', tokenCount: 0, detail: '' });
+        const sub = isSubAgent(state, ev.agentId);
         const cols = process.stdout.columns || 80;
-        const lbl = `${c.yellow}${label(state, ev.agentId)}${c.reset}`;
-        const prefix = `    ${c.dim}\u2502${c.reset}   `;
-        const wrap = cols - 8;
+        const displayLabel = sub ? parentLabel(state, ev.agentId) : label(state, ev.agentId);
+        const lbl = `${c.yellow}${displayLabel}${c.reset}`;
+        const indent = sub ? `    ${c.dim}\u2502${c.reset}  ` : '    ';
+        const prefix = `${indent}${c.dim}\u2502${c.reset}   `;
+        const wrap = cols - (sub ? 11 : 8);
 
-        log(`    ${c.dim}\u2502${c.reset}`);
-        log(`    ${c.dim}\u251c\u2500\u2500${c.reset} ${lbl} ${c.bold}findings${c.reset}`);
+        log(`${indent}${c.dim}\u2502${c.reset}`);
+        log(`${indent}${c.dim}\u251c\u2500\u2500${c.reset} ${lbl} ${c.bold}findings${c.reset}`);
 
         for (const para of ev.findings.split('\n')) {
           if (!para.trim()) { log(prefix); continue; }
@@ -241,11 +276,11 @@ function agentHandler(state: ViewState): ViewHandler {
           }
           if (line) log(`${prefix}${c.dim}${line}${c.reset}`);
         }
-        log(`    ${c.dim}\u2502${c.reset}`);
+        log(`${indent}${c.dim}\u2502${c.reset}`);
         break;
       }
       case 'agent:done':
-        if (_verboseMode) process.stdout.write('\n');
+        if (_verboseMode && !isSubAgent(state, ev.agentId)) process.stdout.write('\n');
         break;
     }
   };
@@ -298,19 +333,51 @@ function researchSummaryHandler(state: ViewState): ViewHandler {
 }
 
 function verifyHandler(): ViewHandler {
+  let pendingAgreement: AgreementResult | null = null;
+
   return (ev) => {
     switch (ev.type) {
       case 'verify:start': {
         log(`\n  ${c.green}\u25cf${c.reset} ${c.bold}Verify${c.reset} ${c.dim}${ev.count} attempts${c.reset}`);
+        pendingAgreement = null;
+        break;
+      }
+      case 'verify:agreement': {
+        pendingAgreement = ev.result;
+        emit('verify_agreement', {
+          overall: ev.result.overall,
+          sections: ev.result.sections.map(s => ({ label: s.label, score: s.score })),
+        });
         break;
       }
       case 'verify:done': {
         ev.result.attempts.forEach((a, i) => {
-          const tree = i === ev.result.attempts.length - 1 ? '\u2514' : '\u251c';
+          const tree = i === ev.result.attempts.length - 1
+            ? (pendingAgreement ? '\u251c' : '\u2514')
+            : '\u251c';
           emit('attempt_done', { index: i, output: a.output.trim().slice(0, 500), tokenCount: a.tokenCount, ppl: a.ppl });
           log(`    ${c.dim}${tree} ${a.tokenCount} tok \u00b7 ppl ${a.ppl.toFixed(2)}${c.reset}`);
         });
+        if (pendingAgreement && pendingAgreement.sections.length > 0) {
+          const pct = Math.round(pendingAgreement.overall * 100);
+          log(`    ${c.dim}\u251c${c.reset} Agreement: ${c.bold}${pct}%${c.reset}`);
+          const sorted = [...pendingAgreement.sections].sort((a, b) => b.score - a.score);
+          const show = sorted.slice(0, 5);
+          const maxLabelLen = Math.max(...show.map(s => s.label.length));
+          show.forEach((s, i) => {
+            const tree = i === show.length - 1 && sorted.length <= 5 ? '\u2514' : '\u251c';
+            const filled = Math.round(s.score * 10);
+            const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(10 - filled);
+            const sPct = pad(Math.round(s.score * 100), 3);
+            const label = `"${s.label}"`.padEnd(maxLabelLen + 2);
+            log(`    ${c.dim}${tree}${c.reset} ${c.dim}${label}${c.reset} ${sPct}%  ${bar}`);
+          });
+          if (sorted.length > 5) {
+            log(`    ${c.dim}\u2514 \u2026 ${sorted.length - 5} more${c.reset}`);
+          }
+        }
         log(`    ${c.dim}${ev.result.totalTokens} tok \u00b7 ${(ev.timeMs / 1000).toFixed(1)}s${c.reset}`);
+        pendingAgreement = null;
         break;
       }
     }
@@ -405,6 +472,7 @@ export function createView(opts: ViewOpts) {
     nextLabel: 0,
     agentText: new Map(),
     agentStatus: new Map(),
+    agentParent: new Map(),
     traceQuery: '',
   };
 
