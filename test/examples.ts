@@ -79,16 +79,16 @@ function runExample(scriptPath: string, timeout: number = 600000, extraArgs: str
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    let buf = '';
     child.stdout!.on('data', (data: Buffer) => {
-      const lines: string[] = data.toString().split('\n');
-      for (const line of lines) {
+      buf += data.toString();
+      const parts = buf.split('\n');
+      buf = parts.pop()!; // carry partial line forward
+      for (const line of parts) {
         if (line.startsWith('{')) {
           try {
-            const event: ExampleEvent = JSON.parse(line);
-            events.push(event);
-          } catch {
-            // Ignore malformed JSON
-          }
+            events.push(JSON.parse(line));
+          } catch { /* malformed */ }
         }
       }
     });
