@@ -12,6 +12,7 @@
     "download-models": "bash scripts/download-test-models.sh",
     "build:native": "node scripts/build.js",
     "build:ts": "tsc",
+    "build:test": "tsc -p tsconfig.test.json",
     "build": "npm run build:ts && npm run build:native",
     "build:debug": "cmake-js compile --debug",
     "rebuild": "cmake-js rebuild",

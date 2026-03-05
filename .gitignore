@@ -41,5 +41,8 @@ tmp/
 dist/
 packages/darwin-arm64
 
+# Compiled test artifacts (built by tsconfig.test.json for GPU CI)
+test/*.js
+
 # CI infra scripts (injected from lloyal-infra during CI)
 ci/

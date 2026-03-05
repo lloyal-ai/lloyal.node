@@ -12,7 +12,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { run, call, spawn, ensure, each } from 'effection';
-import { loadBinary } from '../dist/index.js';
+import { loadBinary, Branch } from '../dist/index.js';
 import type { SessionContext, NativeBinding } from '../dist/index.js';
 import {
   initAgents, runAgents, withSharedRoot, Tool,
@@ -86,7 +86,7 @@ async function createTestContext(): Promise<SessionContext> {
   });
 }
 
-function makeTasks(parent: unknown, count: number) {
+function makeTasks(parent: Branch, count: number) {
   return Array.from({ length: count }, (_, i) => ({
     systemPrompt: 'You are a test agent.',
     content: `Test task ${i}`,
