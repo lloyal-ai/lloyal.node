@@ -218,7 +218,7 @@ See [`examples/grammar/`](./examples/grammar/) for the full branch fork pattern.
 
 Full API documentation: **[lloyal-ai.github.io/lloyal.node](https://lloyal-ai.github.io/lloyal.node/)**
 
-Generated from [`lib/index.d.ts`](./lib/index.d.ts) with TypeDoc.
+Generated from [`src/index.ts`](./src/index.ts) with TypeDoc.
 
 ---
 

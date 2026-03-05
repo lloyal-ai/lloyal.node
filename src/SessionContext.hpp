@@ -79,11 +79,18 @@ private:
   // ===== CORE PRIMITIVES =====
 
   /**
-   * Tokenize text to token IDs
+   * Tokenize text to token IDs (async — dispatches to libuv thread pool)
    * Args: text (string)
    * Returns: Promise<number[]>
    */
   Napi::Value tokenize(const Napi::CallbackInfo& info);
+
+  /**
+   * Tokenize text to token IDs (sync — inline on main thread)
+   * Args: text (string[, addSpecial: boolean])
+   * Returns: number[]
+   */
+  Napi::Value tokenizeSync(const Napi::CallbackInfo& info);
 
   /**
    * Detokenize tokens to text
@@ -119,11 +126,19 @@ private:
   Napi::Value getTurnSeparator(const Napi::CallbackInfo& info);
 
   /**
-   * Format messages using model's chat template
+   * Format messages using model's chat template (async — dispatches to libuv thread pool)
    * Args: messagesJson (string), templateOverride (optional string)
    * Returns: Promise<{ prompt: string, stopTokens: string[] }>
    */
   Napi::Value formatChat(const Napi::CallbackInfo& info);
+
+  /**
+   * Format messages using model's chat template (sync — inline on main thread)
+   * Args: messagesJson (string), options? (object)
+   * Returns: { prompt: string, stopTokens: string[], ... }
+   */
+  Napi::Value formatChatSync(const Napi::CallbackInfo& info);
+
   Napi::Value parseChatOutput(const Napi::CallbackInfo& info);
 
   /**
@@ -194,9 +209,9 @@ private:
   Napi::Value kvCacheReadFile(const Napi::CallbackInfo& info);
 
   // ===== HELPERS =====
-  // Utility functions (not yet implemented)
 
   Napi::Value jsonSchemaToGrammar(const Napi::CallbackInfo& info);
+  Napi::Value jsonSchemaToGrammarSync(const Napi::CallbackInfo& info);
   Napi::Value validateChatTemplate(const Napi::CallbackInfo& info);
 
   // ===== EMBEDDING EXTRACTION =====
@@ -249,6 +264,7 @@ private:
   Napi::Value _branchClearSteer(const Napi::CallbackInfo& info);
   Napi::Value _branchSetSamplerParams(const Napi::CallbackInfo& info);
   Napi::Value _branchSetGrammar(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetGrammarLazy(const Napi::CallbackInfo& info);
   Napi::Value _branchModelEntropy(const Napi::CallbackInfo& info);
   Napi::Value _branchModelSurprisal(const Napi::CallbackInfo& info);
   Napi::Value _branchGetSamplingPerplexity(const Napi::CallbackInfo& info);
@@ -261,6 +277,11 @@ private:
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
+  Napi::Value _storeKvPressure(const Napi::CallbackInfo& info);
+
+  // ===== SCORING API =====
+
+  Napi::Value _scoreGroup(const Napi::CallbackInfo& info);
 
 private:
   // ===== INTERNAL STATE =====

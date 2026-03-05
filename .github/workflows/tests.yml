@@ -132,6 +132,12 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
       - name: Pack package
         run: npm pack
 
@@ -141,9 +147,9 @@ jobs:
           echo "📦 Package contents:"
           cat package-contents.txt
 
-          # Verify lib/ JavaScript is included
-          if ! grep -q "package/lib/index.js" package-contents.txt; then
-            echo "❌ ERROR: lib/index.js not in package!"
+          # Verify dist/ JavaScript is included
+          if ! grep -q "package/dist/index.js" package-contents.txt; then
+            echo "❌ ERROR: dist/index.js not in package!"
             exit 1
           fi
 

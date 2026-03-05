@@ -34,8 +34,9 @@ tests/
 examples/
 docs/
 
-# C++ source files (users get prebuilt binaries, not source)
+# C++ and TS source files (users get prebuilt binaries + compiled JS, not source)
 src/
+tsconfig.json
 
 # Test models (too large for npm)
 models/

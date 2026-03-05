@@ -1,5 +1,6 @@
 #include <napi.h>
 #include "SessionContext.hpp"
+#include "Util.hpp"
 #include <llama/llama.h>
 
 /**
@@ -23,6 +24,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 
   // Export factory function
   exports.Set("createContext", Napi::Function::New(env, CreateContext));
+
+  // Export utility functions (parseMarkdown, etc.)
+  Util::Init(env, exports);
 
   return exports;
 }
