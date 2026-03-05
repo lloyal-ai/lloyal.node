@@ -30,18 +30,15 @@
  */
 
 import type {
-  ContextOptions,
   GpuVariant,
   LoadOptions,
   NativeBinding,
-  SessionContext,
 } from './types';
 
-import { Branch } from './Branch';
-import { BranchStore } from './BranchStore';
-import { Session } from './Session';
-import { buildUserDelta, buildToolResultDelta } from './agents/deltas';
-import { Rerank } from './Rerank';
+import type {
+  ContextOptions,
+  SessionContext,
+} from '@lloyal-labs/sdk';
 
 /**
  * Platform package naming: @lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]
@@ -251,48 +248,12 @@ export const createContext = async (
   return binary.createContext(options);
 };
 
-// ── Layer 1: Substrate (unchanged) ──────────────────────────────
-export { Branch, BranchStore, Session, buildUserDelta, buildToolResultDelta, Rerank };
+// ── Re-export from @lloyal-labs/sdk ──────────────────────────────
+export { Branch, BranchStore, Session, Rerank, buildUserDelta, buildToolResultDelta } from '@lloyal-labs/sdk';
 
-// ── Layer 2: Agents (structured concurrency) ────────────────────
-export {
-  Ctx, Store, Events,
-  Tool,
-  useAgentPool,
-  runAgents,
-  generate,
-  diverge,
-  createToolkit,
-  initAgents,
-  withSharedRoot,
-} from './agents/index';
-
+export { PoolingType, CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, ReasoningFormat, GrammarTriggerType } from '@lloyal-labs/sdk';
+export type { ChatFormat } from '@lloyal-labs/sdk';
 export type {
-  Toolkit,
-  AgentHandle,
-  SharedRootOptions,
-  JsonSchema,
-  ToolSchema,
-  ToolContext,
-  AgentTaskSpec,
-  AgentPoolOptions,
-  AgentResult,
-  AgentPoolResult,
-  GenerateOptions,
-  GenerateResult,
-  DivergeOptions,
-  DivergeAttempt,
-  DivergeResult,
-  AgentEvent,
-} from './agents/index';
-
-// ── Enums + types from types.ts ─────────────────────────────────
-export { PoolingType, CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, ReasoningFormat, GrammarTriggerType } from './types';
-export type { ChatFormat } from './types';
-export type {
-  GpuVariant,
-  KvCacheType,
-  LoadOptions,
   ContextOptions,
   FormatChatOptions,
   GrammarTrigger,
@@ -311,5 +272,40 @@ export type {
   RerankOptions,
   RerankResult,
   RerankProgress,
-  NativeBinding,
-} from './types';
+  KvCacheType,
+} from '@lloyal-labs/sdk';
+
+// ── Re-export from @lloyal-labs/lloyal-agents ────────────────────
+export {
+  Ctx, Store, Events,
+  Tool,
+  useAgentPool,
+  runAgents,
+  generate,
+  diverge,
+  createToolkit,
+  initAgents,
+  withSharedRoot,
+} from '@lloyal-labs/lloyal-agents';
+
+export type {
+  Toolkit,
+  AgentHandle,
+  SharedRootOptions,
+  JsonSchema,
+  ToolSchema,
+  ToolContext,
+  AgentTaskSpec,
+  AgentPoolOptions,
+  AgentResult,
+  AgentPoolResult,
+  GenerateOptions,
+  GenerateResult,
+  DivergeOptions,
+  DivergeAttempt,
+  DivergeResult,
+  AgentEvent,
+} from '@lloyal-labs/lloyal-agents';
+
+// ── Native-only types (stay in lloyal.node) ──────────────────────
+export type { GpuVariant, LoadOptions, NativeBinding } from './types';
