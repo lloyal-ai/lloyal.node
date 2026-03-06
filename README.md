@@ -78,24 +78,26 @@ import { createContext } from "@lloyal-labs/lloyal.node";
 const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 4 });
 
 // Chat templates — model-agnostic formatting + tool calling
-const { prompt, grammar } = await ctx.formatChat(messages, {
+const { prompt, grammar, format } = await ctx.formatChat(messages, {
   addGenerationPrompt: true,
   tools: [{ type: "function", function: { name: "search", parameters: schema } }],
 });
-const { content, toolCalls } = await ctx.parseChatOutput(output);
+const { content, toolCalls } = await ctx.parseChatOutput(output, format);
 
 // Branch primitives — what the SDK's Branch class wraps
 const handle = ctx._branchCreate(0, samplerParams);
 await ctx._branchPrefill(handle, tokens);
-const { token, text, isStop } = ctx._branchSample(handle);
+const token = ctx._branchSample(handle);
+const text = ctx.tokenToText(token);
+const isStop = ctx.isStopToken(token);
 ctx._branchAccept(handle, token);
 const logits = ctx._branchGetLogits(handle);     // Float32Array(vocabSize)
 const entropy = ctx._branchModelEntropy(handle);
 const child = ctx._branchFork(handle);
 
 // Store primitives — what the SDK's BranchStore wraps
-await ctx._storeCommit([[handle1, tok1], [handle2, tok2]]);  // N branches, 1 GPU call
-await ctx._storePrefill([[handle, tokens]]);
+await ctx._storeCommit([handle1, handle2], [tok1, tok2]);  // N branches, 1 GPU call
+await ctx._storePrefill([handle], [tokens]);
 await ctx._storeRetainOnly(winner);
 const available = ctx._storeAvailable();
 
