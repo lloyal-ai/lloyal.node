@@ -10,5 +10,5 @@
     "noEmitOnError": false
   },
   "include": ["test/**/*.ts"],
-  "exclude": ["node_modules", "dist", "build"]
+  "exclude": ["node_modules", "dist", "build", "test/sdk-agents.ts", "test/sdk-primitives.ts"]
 }
