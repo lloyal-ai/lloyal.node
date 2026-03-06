@@ -46,8 +46,8 @@
   },
   "homepage": "https://github.com/lloyal-ai/lloyal.node#readme",
   "dependencies": {
-    "@lloyal-labs/sdk": "^1.0.0",
     "@lloyal-labs/lloyal-agents": "^1.0.0",
+    "@lloyal-labs/sdk": "^1.0.0",
     "@lloyal-labs/tsampler": "^0.2.0",
     "node-addon-api": "^8.5.0"
   },
