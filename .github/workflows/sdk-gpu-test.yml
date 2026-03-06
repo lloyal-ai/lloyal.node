@@ -1,0 +1,198 @@
+name: SDK GPU Tests (CUDA)
+
+on:
+  repository_dispatch:
+    types: [sdk-gpu-test]
+
+# Cancel in-flight runs for the same SDK PR
+concurrency:
+  group: sdk-gpu-test-${{ github.event.client_payload.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  build-cuda-package:
+    name: Build linux-x64-cuda
+    runs-on: ubuntu-22.04
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' }}
+
+    steps:
+      - name: Set pending status on SDK PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SDK_REPO_PAT }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: 'lloyal-ai',
+              repo: 'sdk',
+              sha: '${{ github.event.client_payload.sdk_sha }}',
+              state: 'pending',
+              context: 'gpu-tests/cuda',
+              description: 'GPU integration tests running...',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Validate llama.cpp version
+        run: node scripts/sync-llama-cpp.js --check
+        shell: bash
+
+      - name: Provision CUDA toolkit
+        uses: ./.github/actions/provision-cuda
+        with:
+          version: '12.2.2'
+          arch: x64
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cuda-build-${{ runner.os }}
+
+      - name: Install npm dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native module
+        run: npm run build
+        env:
+          LLOYAL_GPU: cuda
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+
+      - name: Create platform package
+        run: node scripts/create-platform-package.js linux-x64-cuda ubuntu-22.04 x64
+
+      - name: Upload platform package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-linux-x64-cuda
+          path: packages/linux-x64-cuda/
+          retention-days: 1
+          compression-level: 0
+
+  gpu-integration:
+    name: GPU Tests (L4)
+    needs: build-cuda-package
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'lloyal-ai/lloyal.node' }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout infrastructure scripts
+        uses: actions/checkout@v4
+        with:
+          repository: lloyal-ai/lloyal-infra
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: ci
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install lloyal-node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Clone and build SDK from PR branch
+        run: |
+          git clone --depth=1 -b "$SDK_REF" \
+            "https://x-access-token:${SDK_PAT}@github.com/${SDK_REPO}.git" /tmp/sdk
+          cd /tmp/sdk
+          npm install
+          npm run build
+        env:
+          SDK_REF: ${{ github.event.client_payload.sdk_ref }}
+          SDK_REPO: ${{ github.event.client_payload.sdk_repo }}
+          SDK_PAT: ${{ secrets.SDK_REPO_PAT }}
+
+      - name: Link SDK packages into lloyal-node
+        run: |
+          npm link /tmp/sdk/packages/sdk /tmp/sdk/packages/agents
+          echo "Linked SDK packages:"
+          ls -la node_modules/@lloyal-labs/sdk/dist/ || true
+          ls -la node_modules/@lloyal-labs/lloyal-agents/dist/ || true
+
+      - name: Compile TypeScript (src + tests)
+        run: |
+          npm run build:ts
+          npm run build:test
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-linux-x64-cuda
+          path: packages/package-linux-x64-cuda
+
+      - name: Build and push GPU test image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:sdk-${{ github.event.client_payload.sdk_sha }}-cuda"
+          docker build -f ci/Dockerfile.gpu-tests -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy and run GPU tests
+        run: bash ci/deploy-gpu-tests.sh
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+          JOB_NAME: lloyal-gpu-test-sdk
+
+      - name: Set success status on SDK PR
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SDK_REPO_PAT }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: 'lloyal-ai',
+              repo: 'sdk',
+              sha: '${{ github.event.client_payload.sdk_sha }}',
+              state: 'success',
+              context: 'gpu-tests/cuda',
+              description: 'GPU integration tests passed',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+
+      - name: Set failure status on SDK PR
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SDK_REPO_PAT }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: 'lloyal-ai',
+              repo: 'sdk',
+              sha: '${{ github.event.client_payload.sdk_sha }}',
+              state: 'failure',
+              context: 'gpu-tests/cuda',
+              description: 'GPU integration tests failed',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
