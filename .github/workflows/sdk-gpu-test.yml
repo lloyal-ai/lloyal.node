@@ -181,7 +181,7 @@ jobs:
           LLAMA_TEST_MODEL="models/$MODEL" \
           LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
           LLOYAL_NO_FALLBACK=1 \
-          node test/sdk-primitives.js
+          npx tsx test/sdk-primitives.ts
 
           echo ""
           echo "=== SDK Primitives Tests Passed ==="
@@ -195,7 +195,7 @@ jobs:
           LLAMA_TEST_MODEL="models/$MODEL" \
           LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
           LLOYAL_NO_FALLBACK=1 \
-          node test/sdk-agents.js
+          npx tsx test/sdk-agents.ts
 
           echo ""
           echo "=== SDK Agent Tests Passed ==="
