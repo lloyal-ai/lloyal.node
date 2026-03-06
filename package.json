@@ -21,7 +21,6 @@
     "docs": "npx typedoc",
     "test": "npm run test:integration",
     "test:integration": "npx tsx test/integration.ts",
-    "test:agents": "npx tsx test/agents.ts",
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "npx tsx examples/chat/chat.ts"
@@ -47,8 +46,9 @@
   },
   "homepage": "https://github.com/lloyal-ai/lloyal.node#readme",
   "dependencies": {
+    "@lloyal-labs/lloyal-agents": "^1.0.0",
+    "@lloyal-labs/sdk": "^1.0.0",
     "@lloyal-labs/tsampler": "^0.2.0",
-    "effection": "^4.0.2",
     "node-addon-api": "^8.5.0"
   },
   "devDependencies": {

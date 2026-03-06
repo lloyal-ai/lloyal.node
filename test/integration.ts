@@ -17,7 +17,7 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { loadBinary, Branch, BranchStore, Rerank } from '../dist/index.js';
+import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
 const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
@@ -1908,7 +1908,14 @@ async function testRerank(): Promise<void> {
   console.log('\n--- Rerank ---');
   console.log(`  Model: ${path.basename(RERANK_MODEL_PATH)}`);
 
-  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH });
+  const rerankCtx = await createContext({
+    modelPath: RERANK_MODEL_PATH,
+    nCtx: 4096,
+    nSeqMax: 8,
+    typeK: 'q4_0',
+    typeV: 'q4_0',
+  });
+  const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
   try {
     // Tokenize documents
@@ -1987,7 +1994,14 @@ async function testRerankLargeCorpus(): Promise<void> {
   console.log(`  Model: ${path.basename(RERANK_MODEL_PATH)}`);
 
   // n_seq_max=8 so 20 documents requires 3 groups (8+8+4)
-  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH, nSeqMax: 8 });
+  const rerankCtx = await createContext({
+    modelPath: RERANK_MODEL_PATH,
+    nCtx: 4096,
+    nSeqMax: 8,
+    typeK: 'q4_0',
+    typeV: 'q4_0',
+  });
+  const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
   try {
     const query = 'What is the capital of France?';
@@ -2065,7 +2079,14 @@ async function testRerankConcurrent(): Promise<void> {
 
   console.log('\n--- Rerank Concurrent ---');
 
-  const rerank = await Rerank.create({ modelPath: RERANK_MODEL_PATH, nSeqMax: 4 });
+  const rerankCtx = await createContext({
+    modelPath: RERANK_MODEL_PATH,
+    nCtx: 4096,
+    nSeqMax: 4,
+    typeK: 'q4_0',
+    typeV: 'q4_0',
+  });
+  const rerank = await Rerank.create(rerankCtx, { nSeqMax: 4, nCtx: 4096 });
 
   try {
     const docs = [

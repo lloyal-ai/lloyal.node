@@ -6,121 +6,11 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-b8087-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b8087)
 
-**Covalent Inference for Node.js**
+**Native backend for the lloyal inference platform.**
 
-Composable inference primitives for forkable decode state, shared-prefix KV branching, and continuous tree batching. Branches share a KV prefix while keeping independent machinery — sampler chain, grammar, logits snapshot, perplexity tracker — for controlled divergence at decode time. `BranchStore` packs tokens from N branches (each at a different position, different seq_id, each needing independent logits captured) into a single `llama_batch` and dispatches once. `kv::tenancy` manages seq_id leases automatically — acquired on `create()`/`fork()`, evicted on `prune()`, rebuilt on `retainOnly()`.
+Prebuilt llama.cpp binaries for 13 platform/GPU combinations, exposing a `SessionContext` that powers the [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk) inference primitives (Branch, BranchStore, Session, Rerank) and [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents) multi-agent framework. Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
 
-Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
-
-## The Branch API
-
-```javascript
-import { createContext, Branch, BranchStore } from "@lloyal-labs/lloyal.node";
-
-const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 6 });
-const store = new BranchStore(ctx);
-
-// Shared prompt: "Explain quantum entanglement"
-const prompt = await ctx.tokenize("Explain quantum entanglement");
-
-const root = Branch.create(ctx, 0, { temperature: 0.8 });
-await root.prefill(prompt);
-
-// Fork 4 branches — each gets a different reasoning prefix
-const analogy  = await root.fork();
-const formal   = await root.fork();
-const socratic = await root.fork();
-const visual   = await root.fork();
-
-// Scatter-prefill: inject divergent prefixes in one batched dispatch
-// 4 branches × variable lengths → auto bin-packed into minimal GPU calls
-await store.prefill([
-  [analogy,  await ctx.tokenize("Think of it like two coins...")],    // 12 tokens
-  [formal,   await ctx.tokenize("In quantum mechanics, the...")],     // 8 tokens
-  [socratic, await ctx.tokenize("What happens when you measure...")], // 10 tokens
-  [visual,   await ctx.tokenize("Imagine two particles...")],         // 7 tokens
-]);
-
-// Generate — all 4 in lockstep, 1 GPU call per step
-const branches = [analogy, formal, socratic, visual];
-for (;;) {
-  const live = branches.filter(b => !b.disposed);
-  if (!live.length) break;
-  const produced = live.map(b => ({ b, ...b.produce() }));
-
-  // Prune branches that hit stop tokens
-  for (const p of produced.filter(p => p.isStop)) await p.b.prune();
-
-  // Commit survivors — accept + decode in one GPU dispatch
-  const items = produced
-    .filter(p => !p.isStop)
-    .map(p => { p.b.accept(p.token); return [p.b, p.token]; });
-  await store.commit(items);
-}
-
-// Winner takes all — one seq_keep pass, losers vaporized
-const winner = branches
-  .filter(b => !b.disposed)
-  .reduce((a, b) => (a.perplexity < b.perplexity ? a : b));
-await store.retainOnly(winner);
-// store.available === nSeqMax - 1 — all leases recovered
-```
-
-Or for single-branch generation, Branch is an async iterable — generate until EOG:
-
-```javascript
-for await (const { token, text } of branch) {
-  process.stdout.write(text);
-}
-```
-
-## Continuous Tree Batching
-
-Tree search with N branches means N calls to `llama_decode()` — each paying GPU dispatch overhead, memory barriers, and PCIe round-trips. `BranchStore` eliminates this: tokens from N branches — each at a different position, different seq_id, each needing independent logits captured — are packed into a single `llama_batch` and dispatched once. N branches, 1 GPU call.
-
-Two packing strategies for different access patterns:
-
-```javascript
-// commit: 1 token per branch — one GPU dispatch for N branches
-await store.commit([[branch1, tok1], [branch2, tok2], [branch3, tok3]]);
-
-// prefill: variable tokens per branch — asymmetric injection
-await store.prefill([
-  [branchA, systemTokens],  // 200 tokens
-  [branchB, queryTokens],   //  12 tokens
-  [branchC, docTokens],     // 800 tokens
-]);
-// Greedy bin-packed into ceil(total / nBatch) dispatches
-```
-
-## KV Tenancy
-
-Two resources, two scales. Slots (65K) are how many branches can *exist* — cheap CPU state. Leases (`nSeqMax`) are how many can *decode* — scarce KV cache residency. Tenancy manages the scarce resource automatically: leases are acquired on `create()`/`fork()`, evicted on `prune()`, rebuilt on `retainOnly()`. No manual seq_id tracking, ever.
-
-```javascript
-store.available;                   // leases remaining — use for width/depth budget
-await store.retainOnly(winner);    // nuclear: 1 seq_keep, rebuild vacancy
-```
-
-The turn lifecycle: search is surgical (N × `prune()`), promotion is nuclear (1 × `retainOnly()`). Per turn, fork → expand → evaluate → prune losers → repeat. Between turns, promote winner → tree is gone → next turn starts fresh.
-
-## Topology
-
-Parent/child edges are always-on. Simple chat → best-of-N → deep search is one continuum.
-
-```javascript
-branch.parent;       // handle or null if root
-branch.children;     // child handles
-branch.isLeaf;       // no children?
-branch.isActive;     // holds a KV lease?
-```
-
-| Method | FK analogy | Behavior |
-|--------|-----------|----------|
-| `prune()` | RESTRICT | Throws if children exist |
-| `pruneSubtree()` | CASCADE | Iterative post-order traversal |
-
----
+All SDK and agent exports are re-exported from this package for convenience — `import { Branch, runAgents } from "@lloyal-labs/lloyal.node"` works out of the box.
 
 ## Install
 
@@ -139,97 +29,167 @@ Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, no
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-CI integration testing (real inference):
-
-| Architecture | Test Model     | Template |
-| ------------ | -------------- | -------- |
-| Llama        | Llama 3.2 1B   | llama3   |
-| Phi          | Phi 3.5 Mini   | phi3     |
-| Qwen         | Qwen 3 1.7B    | chatml   |
-| Gemma        | Gemma 3 1B     | gemma    |
-| SmolLM       | SmolLM2 1.7B   | chatml   |
-| Ministral    | Ministral 3B   | mistral  |
-
-See [distribution.md](docs/distribution.md) for details.
-
----
-
-## Examples
-
-| Example                                   | Pattern                                                                    |
-| ----------------------------------------- | -------------------------------------------------------------------------- |
-| [`best-of-n/`](./examples/best-of-n/)     | Branch API: fork, produce/commit, perplexity selection                     |
-| [`speculative/`](./examples/speculative/) | Branch API: draft/verify, fork/prune, bonus token sampling                 |
-| [`streaming/`](./examples/streaming/)     | Infinite context via BlinkKV reseeding with sidecar summarization          |
-| [`entropy/`](./examples/entropy/)         | `modelEntropy()` mid-generation as control signal                          |
-| [`grammar/`](./examples/grammar/)         | Pull loop with generators, JSON schema constraints, KV + grammar branching |
-| [`chat/`](./examples/chat/)               | Interactive streaming chat                                                 |
-| [`embed/`](./examples/embed/)             | Text embeddings extraction                                                 |
-
-```bash
-node examples/best-of-n/best-of-n.mjs
-node examples/speculative/speculative.mjs
-```
-
-Each example has a README explaining the pattern.
-
----
-
-## Other Patterns
-
-### Entropy as Control Signal
-
-Model uncertainty mid-generation enables dynamic behavior:
+## Quick Start
 
 ```javascript
-const entropy = ctx.modelEntropy("bits");
+import { createContext } from "@lloyal-labs/lloyal.node";
+import { Branch, BranchStore } from "@lloyal-labs/sdk";
 
-if (entropy > 4.0) {
-  // High uncertainty — model is guessing
-  // Trigger retrieval, reduce temperature, or branch
+const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 4 });
+const store = new BranchStore(ctx);
+
+const root = Branch.create(ctx, 0, { temperature: 0.8 });
+await root.prefill(await ctx.tokenize("Explain quantum entanglement"));
+
+// Fork and generate — all branches in lockstep, 1 GPU call per step
+const branches = await Promise.all([root.fork(), root.fork(), root.fork()]);
+for (;;) {
+  const live = branches.filter((b) => !b.disposed);
+  if (!live.length) break;
+  const produced = live.map((b) => ({ b, ...b.produce() }));
+  for (const p of produced.filter((p) => p.isStop)) await p.b.prune();
+  const items = produced
+    .filter((p) => !p.isStop)
+    .map((p) => {
+      p.b.accept(p.token);
+      return [p.b, p.token];
+    });
+  await store.commit(items);
 }
 ```
 
-See [`examples/entropy/`](./examples/entropy/) for entropy-triggered sampling strategies.
-
-### Low-Level KV Operations
-
-For fine-grained control without Branch:
-
-| Approach             | Method                            | Use Case                                     |
-| -------------------- | --------------------------------- | -------------------------------------------- |
-| **Sequence copy**    | `kvSeqCopy(src, dst)`             | Share prefix across sequences                |
-| **Snapshot/restore** | `kvCacheSave()` / `kvCacheLoad()` | Sequential exploration, return to checkpoint |
-
-### Grammar-Constrained Generation
+Or for single-branch generation, Branch is an async iterable:
 
 ```javascript
-const grammar = await ctx.jsonSchemaToGrammar(schema);
-const branch = Branch.create(ctx, 0, params, undefined, grammar);
-await branch.prefill(promptTokens);
-// Grammar state cloned automatically on fork()
+for await (const { token, text } of branch) {
+  process.stdout.write(text);
+}
 ```
 
-See [`examples/grammar/`](./examples/grammar/) for the full branch fork pattern.
+See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk) for the full Branch API, continuous tree batching, KV tenancy, and topology documentation.
 
----
+### Without the SDK
 
-## API Reference
+`createContext` returns a `SessionContext` — the native interface to llama.cpp. You can use it directly without the SDK's Branch/BranchStore layer:
 
-Full API documentation: **[lloyal-ai.github.io/lloyal.node](https://lloyal-ai.github.io/lloyal.node/)**
+```javascript
+import { createContext } from "@lloyal-labs/lloyal.node";
 
-Generated from [`src/index.ts`](./src/index.ts) with TypeDoc.
+const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 4 });
 
----
+// Chat templates — model-agnostic formatting + tool calling
+const { prompt, grammar, format } = await ctx.formatChat(messages, {
+  addGenerationPrompt: true,
+  tools: [{ type: "function", function: { name: "search", parameters: schema } }],
+});
+const { content, toolCalls } = await ctx.parseChatOutput(output, format);
+
+// Branch primitives — what the SDK's Branch class wraps
+const handle = ctx._branchCreate(0, samplerParams);
+await ctx._branchPrefill(handle, tokens);
+const token = ctx._branchSample(handle);
+const text = ctx.tokenToText(token);
+const isStop = ctx.isStopToken(token);
+ctx._branchAccept(handle, token);
+const logits = ctx._branchGetLogits(handle);     // Float32Array(vocabSize)
+const entropy = ctx._branchModelEntropy(handle);
+const child = ctx._branchFork(handle);
+
+// Store primitives — what the SDK's BranchStore wraps
+await ctx._storeCommit([handle1, handle2], [tok1, tok2]);  // N branches, 1 GPU call
+await ctx._storePrefill([handle], [tokens]);
+await ctx._storeRetainOnly(winner);
+const available = ctx._storeAvailable();
+
+// KV cache — snapshot, copy, persist
+await ctx.kvSeqCopy(0, 1);                      // share prefix across sequences
+await ctx.kvCacheSave();                         // snapshot for rollback
+await ctx.kvCacheLoad();                         // restore checkpoint
+await ctx.kvCacheWriteFile("cache.bin");         // persist to disk
+
+// Embeddings
+const embeddings = await ctx.encode("query text");
+const dim = ctx.getEmbeddingDimension();
+
+// Grammar + tokenizer
+const grammar = await ctx.jsonSchemaToGrammar(schema);
+const tokens = await ctx.tokenize("Hello world");
+const sep = await ctx.getTurnSeparator();
+```
+
+## What This Package Provides
+
+**Native-only** (not in SDK):
+
+- `createContext(options)` — load a GGUF model, return a `SessionContext`
+- `loadBinary(options?)` — explicit GPU variant selection with automatic fallback
+- Prebuilt binaries for 13 platform/GPU combinations
+
+**Re-exported from [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk):**
+
+- `Branch`, `BranchStore`, `Session`, `Rerank`
+- Per-token metrics: `modelEntropy()`, `modelSurprisal()`, `samplingPerplexity`
+- Chat formatting: `formatChat()`, `parseChatOutput()`
+- Grammar: `jsonSchemaToGrammar()`, `setGrammar()`
+
+**Re-exported from [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents):**
+
+- `runAgents`, `useAgentPool`, `generate`, `diverge`, `createToolkit`
+- Structured concurrency DAG via Effection generators
+- In-loop orchestration: agents as branches of a single running process
+
+## GPU Variant Selection
+
+```javascript
+import { loadBinary, createContext } from "@lloyal-labs/lloyal.node";
+
+// Automatic — uses Metal on macOS, CPU elsewhere
+const ctx = await createContext({ modelPath: "./model.gguf" });
+
+// Explicit CUDA
+const binding = loadBinary({ gpuVariant: "cuda" });
+const ctx = await binding.createContext({ modelPath: "./model.gguf" });
+// Falls back to CPU with a warning if CUDA runtime not available
+```
+
+## Examples
+
+| Example                           | Pattern                                           |
+| --------------------------------- | ------------------------------------------------- |
+| [`entropy/`](./examples/entropy/) | `modelEntropy()` mid-generation as control signal |
+| [`chat/`](./examples/chat/)       | Interactive streaming chat                        |
+| [`embed/`](./examples/embed/)     | Text embeddings extraction                        |
+
+```bash
+npx tsx examples/best-of-n/best-of-n.ts
+npx tsx examples/chat/chat.ts ./model.gguf
+```
+
+## CI Testing
+
+Integration tests run real inference across architectures:
+
+| Architecture | Test Model   | Template |
+| ------------ | ------------ | -------- |
+| Llama        | Llama 3.2 1B | llama3   |
+| Phi          | Phi 3.5 Mini | phi3     |
+| Qwen         | Qwen 3 1.7B  | chatml   |
+| Gemma        | Gemma 3 1B   | gemma    |
+| SmolLM       | SmolLM2 1.7B | chatml   |
+| Ministral    | Ministral 3B | mistral  |
+
+See [distribution.md](docs/distribution.md) for details.
 
 ## Ecosystem
 
-| Package                                                 | Runtime      | Description                       |
-| ------------------------------------------------------- | ------------ | --------------------------------- |
-| [liblloyal](https://github.com/lloyal-ai/liblloyal)     | C++          | Header-only inference kernel      |
-| **lloyal.node**                                         | Node.js      | This package                      |
-| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native | Mobile bindings via Nitro Modules |
-| [tsampler](https://github.com/lloyal-ai/tsampler)       | TypeScript   | Reference sampler implementation  |
+| Package                                                                                    | Description                                                                  |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk)                                     | Backend-agnostic inference primitives (Branch, BranchStore, Session, Rerank) |
+| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents) | Multi-agent framework — in-loop orchestration via structured concurrency     |
+| [liblloyal](https://github.com/lloyal-ai/liblloyal)                                        | Header-only C++20 inference kernel for llama.cpp                             |
+| **lloyal.node**                                                                            | This package — native backend + prebuilt binaries                            |
+| [nitro-llama](https://github.com/lloyal-ai/nitro-llama)                                    | React Native backend via Nitro Modules                                       |
+| [tsampler](https://github.com/lloyal-ai/tsampler)                                          | Reference sampler implementation                                             |
 
 ## Contributing
 
