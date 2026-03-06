@@ -23,8 +23,8 @@
     },
     {
       "name": "Qwen3",
-      "file": "Qwen3-4B-Thinking-2507-Q4_K_M.gguf",
-      "url": "https://huggingface.co/unsloth/Qwen3-4B-Thinking-2507-GGUF/resolve/main/Qwen3-4B-Thinking-2507-Q4_K_M.gguf",
+      "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "url": "https://huggingface.co/bartowski/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       "template": "chatml"
     },
     {

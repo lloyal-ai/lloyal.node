@@ -140,6 +140,11 @@ jobs:
           ls -la node_modules/@lloyal-labs/sdk/dist/ || true
           ls -la node_modules/@lloyal-labs/lloyal-agents/dist/ || true
 
+      - name: Copy SDK tests into lloyal-node
+        run: |
+          cp /tmp/sdk/test/agents.ts test/sdk-agents.ts
+          cp /tmp/sdk/test/sdk.ts test/sdk-primitives.ts
+
       - name: Compile TypeScript (src + tests)
         run: |
           npm run build:ts
@@ -151,10 +156,60 @@ jobs:
           name: package-linux-x64-cuda
           path: packages/package-linux-x64-cuda
 
+      - name: Write SDK test wrapper
+        run: |
+          cat > ci/run-sdk-gpu-tests.sh <<'EOF'
+          #!/bin/bash
+          set -e
+
+          # Run standard lloyal-node GPU tests
+          bash run-gpu-tests.sh
+
+          # Use Qwen3 from matrix.json (tool-calling model for agent tests)
+          MODEL=$(jq -r '.models[] | select(.name == "Qwen3") | .file' test/matrix.json)
+          if [ ! -f "models/$MODEL" ]; then
+            echo "Error: $MODEL not found (should have been downloaded by run-gpu-tests.sh)"
+            exit 1
+          fi
+
+          echo ""
+          echo "══════════════════════════════════════"
+          echo "SDK PRIMITIVES TESTS"
+          echo "══════════════════════════════════════"
+
+          echo "Running SDK primitives tests with $MODEL..."
+          LLAMA_TEST_MODEL="models/$MODEL" \
+          LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
+          LLOYAL_NO_FALLBACK=1 \
+          node test/sdk-primitives.js
+
+          echo ""
+          echo "=== SDK Primitives Tests Passed ==="
+
+          echo ""
+          echo "══════════════════════════════════════"
+          echo "SDK AGENT TESTS"
+          echo "══════════════════════════════════════"
+
+          echo "Running SDK agent tests with $MODEL..."
+          LLAMA_TEST_MODEL="models/$MODEL" \
+          LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
+          LLOYAL_NO_FALLBACK=1 \
+          node test/sdk-agents.js
+
+          echo ""
+          echo "=== SDK Agent Tests Passed ==="
+          EOF
+          chmod +x ci/run-sdk-gpu-tests.sh
+
       - name: Build and push GPU test image
         run: |
+          # Patch Dockerfile to copy the SDK wrapper and use it as entrypoint
+          sed 's|COPY ci/run-gpu-tests.sh ./|COPY ci/run-gpu-tests.sh ci/run-sdk-gpu-tests.sh ./|; s|ENTRYPOINT.*|ENTRYPOINT ["bash", "run-sdk-gpu-tests.sh"]|' \
+            ci/Dockerfile.gpu-tests > ci/Dockerfile.sdk-gpu-tests
+
           IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:sdk-${{ github.event.client_payload.sdk_sha }}-cuda"
-          docker build -f ci/Dockerfile.gpu-tests -t "$IMAGE" .
+          docker build -f ci/Dockerfile.sdk-gpu-tests -t "$IMAGE" .
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
