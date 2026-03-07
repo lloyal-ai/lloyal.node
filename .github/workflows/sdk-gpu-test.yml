@@ -142,8 +142,11 @@ jobs:
 
       - name: Copy SDK tests into lloyal-node
         run: |
-          cp /tmp/sdk/test/agents.ts test/sdk-agents.ts
-          cp /tmp/sdk/test/sdk.ts test/sdk-primitives.ts
+          # Rewrite @lloyal-labs/lloyal.node imports to relative path (self-package)
+          sed "s|from '@lloyal-labs/lloyal.node'|from '../dist/index.js'|g" \
+            /tmp/sdk/test/agents.ts > test/sdk-agents.ts
+          sed "s|from '@lloyal-labs/lloyal.node'|from '../dist/index.js'|g" \
+            /tmp/sdk/test/sdk.ts > test/sdk-primitives.ts
 
       - name: Compile TypeScript (src + tests)
         run: |
