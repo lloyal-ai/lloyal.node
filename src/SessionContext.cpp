@@ -820,6 +820,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchPruneSubtree", &SessionContext::_branchPruneSubtree),
     InstanceMethod("_branchParent", &SessionContext::_branchParent),
+    InstanceMethod("_branchForkHead", &SessionContext::_branchForkHead),
     InstanceMethod("_branchChildren", &SessionContext::_branchChildren),
     InstanceMethod("_branchIsLeaf", &SessionContext::_branchIsLeaf),
     InstanceMethod("_branchIsActive", &SessionContext::_branchIsActive),
@@ -2406,6 +2407,20 @@ Napi::Value SessionContext::_branchParent(const Napi::CallbackInfo& info) {
   auto parent = _branchStore.parent(handle);
 
   return Napi::Number::New(env, parent);
+}
+
+Napi::Value SessionContext::_branchForkHead(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1) {
+    throw Napi::Error::New(env, "_branchForkHead requires (handle)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  auto fh = lloyal::branch::get_fork_head(handle, _branchStore);
+
+  return Napi::Number::New(env, fh);
 }
 
 Napi::Value SessionContext::_branchChildren(const Napi::CallbackInfo& info) {
