@@ -414,7 +414,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
       const { content } = ctx.parseChatOutput(rawText, format, {
         reasoningFormat,
         isPartial: false,
-        thinkingForcedOpen: false
+        generationPrompt: ''
       });
       return (content || '').toLowerCase().includes(term.toLowerCase());
     }
@@ -929,7 +929,7 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(typeof result.format === 'number', 'formatChat returns format as number');
   assert(typeof result.grammar === 'string', 'formatChat returns grammar as string');
   assert(typeof result.grammarLazy === 'boolean', 'formatChat returns grammarLazy');
-  assert(typeof result.thinkingForcedOpen === 'boolean', 'formatChat returns thinkingForcedOpen');
+  assert(typeof result.generationPrompt === 'string', 'formatChat returns generationPrompt');
   assert(typeof result.reasoningFormat === 'number', 'formatChat returns reasoningFormat');
   assert(Array.isArray(result.grammarTriggers), 'formatChat returns grammarTriggers array');
   assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
@@ -969,7 +969,7 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   const parsedWithOpts = ctx.parseChatOutput('Some output', toolResult.format, {
     reasoningFormat: toolResult.reasoningFormat,
     isPartial: false,
-    thinkingForcedOpen: false
+    generationPrompt: ''
   });
   assert(typeof parsedWithOpts.content === 'string', 'parseChatOutput with options');
   ok('parseChatOutput with options');
