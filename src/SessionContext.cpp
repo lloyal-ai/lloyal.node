@@ -1178,7 +1178,7 @@ static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::Fo
   result.Set("format", Napi::Number::New(env, static_cast<double>(r.format)));
   result.Set("grammar", Napi::String::New(env, r.grammar));
   result.Set("grammarLazy", Napi::Boolean::New(env, r.grammar_lazy));
-  result.Set("thinkingForcedOpen", Napi::Boolean::New(env, r.thinking_forced_open));
+  result.Set("generationPrompt", Napi::String::New(env, r.generation_prompt));
   result.Set("reasoningFormat", Napi::Number::New(env, static_cast<double>(r.reasoning_format)));
   result.Set("parser", Napi::String::New(env, r.parser));
 
@@ -1434,7 +1434,7 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
   // Optional params
   auto reasoning_format = COMMON_REASONING_FORMAT_NONE;
   bool is_partial = false;
-  bool thinking_forced_open = false;
+  std::string generation_prompt;
   std::string parser_data;
 
   if (info.Length() >= 3 && info[2].IsObject()) {
@@ -1447,8 +1447,8 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
     if (opts.Has("isPartial") && opts.Get("isPartial").IsBoolean()) {
       is_partial = opts.Get("isPartial").As<Napi::Boolean>().Value();
     }
-    if (opts.Has("thinkingForcedOpen") && opts.Get("thinkingForcedOpen").IsBoolean()) {
-      thinking_forced_open = opts.Get("thinkingForcedOpen").As<Napi::Boolean>().Value();
+    if (opts.Has("generationPrompt") && opts.Get("generationPrompt").IsString()) {
+      generation_prompt = opts.Get("generationPrompt").As<Napi::String>().Utf8Value();
     }
     if (opts.Has("parser") && opts.Get("parser").IsString()) {
       parser_data = opts.Get("parser").As<Napi::String>().Utf8Value();
@@ -1457,7 +1457,7 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
 
   // Synchronous — parsing is fast, no I/O
   auto result = lloyal::chat_out::parse(output, format, reasoning_format,
-                                         is_partial, thinking_forced_open, parser_data);
+                                         is_partial, generation_prompt, parser_data);
 
   // Build return object
   Napi::Object obj = Napi::Object::New(env);
