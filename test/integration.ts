@@ -976,6 +976,94 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// FORMAT EDGE CASES
+// Validates that formatChat handles partial message lists correctly —
+// system-only, tool-only, and empty-system stripping — without falling
+// to the bare "role: content" fallback. Critical for templates like
+// Qwen 3.5 that require a user message.
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testFormatEdgeCases(ctx: SessionContext): Promise<void> {
+  console.log('\n── Format Edge Cases ──');
+
+  // 1. System-only message should produce template-formatted output, not bare "system: ..."
+  const sysOnly = ctx.formatChatSync(
+    JSON.stringify([{ role: 'system', content: 'You are a helpful assistant.' }]),
+    { addGenerationPrompt: false, enableThinking: false }
+  );
+  assert(
+    !sysOnly.prompt.startsWith('system:'),
+    'system-only format: not bare fallback'
+  );
+  assert(
+    sysOnly.prompt.includes('helpful assistant'),
+    'system-only format: contains system content'
+  );
+  ok('system-only message produces template output');
+
+  // 2. Empty-system stripping: [{system:""}, {user:"Hi"}] should strip the empty system prefix
+  const withEmptySys = ctx.formatChatSync(
+    JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'user', content: 'Hi there' },
+    ]),
+    { enableThinking: false }
+  );
+  assert(
+    !withEmptySys.prompt.startsWith('system:'),
+    'empty-system stripping: not bare fallback'
+  );
+  assert(
+    withEmptySys.prompt.includes('Hi there'),
+    'empty-system stripping: contains user content'
+  );
+  // The stripped result should NOT start with a system block
+  // (the empty system was removed, leaving just the user turn)
+  assert(
+    !withEmptySys.prompt.includes('system\n\n'),
+    'empty-system stripping: empty system block removed'
+  );
+  ok('empty-system stripping works');
+
+  // 3. Tool result format: [{system:""}, {tool:result}] should produce template output
+  // The native layer retries with synthetic user for templates that require one.
+  const toolResult = ctx.formatChatSync(
+    JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'tool', content: '{"result": 42}', tool_call_id: 'call_1' },
+    ])
+  );
+  assert(
+    !toolResult.prompt.startsWith('system:') && !toolResult.prompt.startsWith('tool:'),
+    'tool result format: not bare fallback'
+  );
+  assert(
+    toolResult.prompt.includes('42'),
+    'tool result format: contains result content'
+  );
+  ok('tool result format produces template output');
+
+  // 4. System-only with tools should also produce template output
+  const tools = JSON.stringify([{
+    type: 'function',
+    function: { name: 'search', description: 'Search', parameters: { type: 'object', properties: {} } }
+  }]);
+  const sysWithTools = ctx.formatChatSync(
+    JSON.stringify([{ role: 'system', content: 'You are a research assistant.' }]),
+    { addGenerationPrompt: false, enableThinking: false, tools }
+  );
+  assert(
+    !sysWithTools.prompt.startsWith('system:'),
+    'system+tools format: not bare fallback'
+  );
+  assert(
+    sysWithTools.prompt.includes('research assistant'),
+    'system+tools format: contains system content'
+  );
+  ok('system-only with tools produces template output');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BRANCH STORE TESTS
 // Production patterns for the JS BranchStore API. Low-level primitive
 // correctness (batch index mapping, scatter chunking, scratch reuse) is
@@ -2153,6 +2241,7 @@ async function main(): Promise<void> {
     await testMetrics(mainCtx);
     await testTokenizer(mainCtx);
     await testChatInOut(mainCtx);
+    await testFormatEdgeCases(mainCtx);
 
     // Tests that create their own contexts
     await testMultiSequence();
