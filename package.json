@@ -50,12 +50,12 @@
     "node-addon-api": "^8.5.0"
   },
   "peerDependencies": {
-    "@lloyal-labs/sdk": ">=1.0.0",
-    "@lloyal-labs/lloyal-agents": ">=1.0.0"
+    "@lloyal-labs/lloyal-agents": ">=1.0.0",
+    "@lloyal-labs/sdk": ">=1.0.0"
   },
   "devDependencies": {
-    "@lloyal-labs/lloyal-agents": "^1.0.0",
-    "@lloyal-labs/sdk": "^1.0.0",
+    "@lloyal-labs/lloyal-agents": "^1.5.4",
+    "@lloyal-labs/sdk": "^1.5.4",
     "@types/node": "^25.3.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
