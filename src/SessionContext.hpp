@@ -253,6 +253,7 @@ private:
   Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPerplexity(const Napi::CallbackInfo& info);
   Napi::Value _branchGetLogits(const Napi::CallbackInfo& info);
+  Napi::Value _branchSetLogits(const Napi::CallbackInfo& info);
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
   Napi::Value _branchPruneSubtree(const Napi::CallbackInfo& info);
   Napi::Value _branchParent(const Napi::CallbackInfo& info);
@@ -276,6 +277,7 @@ private:
 
   Napi::Value _storeCommit(const Napi::CallbackInfo& info);
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
+  Napi::Value _storeMergeLogits(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
   Napi::Value _storeKvPressure(const Napi::CallbackInfo& info);

@@ -817,6 +817,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchGetPosition", &SessionContext::_branchGetPosition),
     InstanceMethod("_branchGetPerplexity", &SessionContext::_branchGetPerplexity),
     InstanceMethod("_branchGetLogits", &SessionContext::_branchGetLogits),
+    InstanceMethod("_branchSetLogits", &SessionContext::_branchSetLogits),
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchPruneSubtree", &SessionContext::_branchPruneSubtree),
     InstanceMethod("_branchParent", &SessionContext::_branchParent),
@@ -839,6 +840,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
     InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
+    InstanceMethod("_storeMergeLogits", &SessionContext::_storeMergeLogits),
     InstanceMethod("_storeRetainOnly", &SessionContext::_storeRetainOnly),
     InstanceMethod("_storeAvailable", &SessionContext::_storeAvailable),
     InstanceMethod("_storeKvPressure", &SessionContext::_storeKvPressure),
@@ -1983,6 +1985,33 @@ Napi::Value SessionContext::_branchGetLogits(const Napi::CallbackInfo& info) {
   return result;
 }
 
+Napi::Value SessionContext::_branchSetLogits(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsTypedArray()) {
+    throw Napi::Error::New(env, "_branchSetLogits requires (handle, Float32Array)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(
+      info[0].As<Napi::Number>().Uint32Value());
+
+  Napi::TypedArray ta = info[1].As<Napi::TypedArray>();
+  if (ta.TypedArrayType() != napi_float32_array) {
+    throw Napi::Error::New(env, "_branchSetLogits: expected Float32Array");
+  }
+  Napi::Float32Array arr = ta.As<Napi::Float32Array>();
+  std::span<const float> data(arr.Data(), arr.ElementLength());
+
+  try {
+    lloyal::branch::set_logits(handle, data, _branchStore);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, std::string("_branchSetLogits: ") + e.what());
+  }
+
+  return env.Undefined();
+}
+
 Napi::Value SessionContext::_branchPrune(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -2379,6 +2408,40 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
   auto* worker = new StorePrefillWorker(env, _branchStore, std::move(handles), std::move(tokenStorage));
   worker->Queue();
   return worker->GetPromise();
+}
+
+Napi::Value SessionContext::_storeMergeLogits(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsArray() || !info[2].IsNumber()) {
+    throw Napi::Error::New(env, "_storeMergeLogits requires (dstHandle, srcHandles[], alpha)");
+  }
+
+  auto dstHandle = static_cast<lloyal::branch::BranchHandle>(
+      info[0].As<Napi::Number>().Uint32Value());
+
+  Napi::Array jsSrcs = info[1].As<Napi::Array>();
+  uint32_t n = jsSrcs.Length();
+
+  std::vector<lloyal::branch::BranchHandle> srcHandles(n);
+  for (uint32_t i = 0; i < n; i++) {
+    srcHandles[i] = static_cast<lloyal::branch::BranchHandle>(
+        jsSrcs.Get(i).As<Napi::Number>().Uint32Value());
+  }
+
+  float alpha = static_cast<float>(info[2].As<Napi::Number>().DoubleValue());
+
+  try {
+    _branchStore.merge_logits(
+        dstHandle,
+        std::span<const lloyal::branch::BranchHandle>(srcHandles.data(), srcHandles.size()),
+        alpha);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, std::string("_storeMergeLogits: ") + e.what());
+  }
+
+  return env.Undefined();
 }
 
 Napi::Value SessionContext::_branchPruneSubtree(const Napi::CallbackInfo& info) {
