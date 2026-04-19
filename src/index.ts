@@ -29,16 +29,9 @@
  * ```
  */
 
-import type {
-  GpuVariant,
-  LoadOptions,
-  NativeBinding,
-} from './types';
+import type { GpuVariant, LoadOptions, NativeBinding } from "./types";
 
-import type {
-  ContextOptions,
-  SessionContext,
-} from '@lloyal-labs/sdk';
+import type { ContextOptions, SessionContext } from "@lloyal-labs/sdk";
 
 /**
  * Platform package naming: @lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]
@@ -46,28 +39,39 @@ import type {
 const getPlatformPackageName = (variant?: string): string => {
   const platform = process.platform;
   const arch = process.arch;
-  const noSuffix = !variant || variant === 'default' || variant === 'cpu' || variant === 'metal';
-  const suffix = noSuffix ? '' : `-${variant}`;
+  const noSuffix =
+    !variant ||
+    variant === "default" ||
+    variant === "cpu" ||
+    variant === "metal";
+  const suffix = noSuffix ? "" : `-${variant}`;
   return `@lloyal-labs/lloyal.node-${platform}-${arch}${suffix}`;
 };
 
 /**
  * Try to load a platform package, return null on failure.
  */
-const tryLoadPackage = (packageName: string, verbose = false): NativeBinding | null => {
+const tryLoadPackage = (
+  packageName: string,
+  verbose = false,
+): NativeBinding | null => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mod = require(packageName) as NativeBinding;
-    if (mod && typeof mod.createContext === 'function') {
+    if (mod && typeof mod.createContext === "function") {
       return mod;
     }
     if (verbose) {
-      console.warn(`[lloyal.node] ${packageName} loaded but missing createContext export`);
+      console.warn(
+        `[lloyal.node] ${packageName} loaded but missing createContext export`,
+      );
     }
     return null;
   } catch (e) {
     if (verbose) {
-      console.warn(`[lloyal.node] Failed to load ${packageName}: ${(e as Error).message}`);
+      console.warn(
+        `[lloyal.node] Failed to load ${packageName}: ${(e as Error).message}`,
+      );
     }
     return null;
   }
@@ -121,23 +125,23 @@ const tryLoadPackage = (packageName: string, verbose = false): NativeBinding | n
  */
 export const loadBinary = (variant?: GpuVariant): NativeBinding => {
   const resolvedVariant = variant ?? process.env.LLOYAL_GPU;
-  const noFallback = process.env.LLOYAL_NO_FALLBACK === '1';
-  const useLocal = process.env.LLOYAL_LOCAL === '1';
+  const noFallback = process.env.LLOYAL_NO_FALLBACK === "1";
+  const useLocal = process.env.LLOYAL_LOCAL === "1";
 
   // 0. Use local build if explicitly requested (no fallback)
   if (useLocal) {
     try {
-      return require('../build/Release/lloyal.node') as NativeBinding;
+      return require("../build/Release/lloyal.node") as NativeBinding;
     } catch {
       throw new Error(
-        '[lloyal.node] LLOYAL_LOCAL=1 but local build not found. ' +
-        'Run `npm run build` first.'
+        "[lloyal.node] LLOYAL_LOCAL=1 but local build not found. " +
+          "Run `npm run build` first.",
       );
     }
   }
 
   // 1. Try requested variant (if specified)
-  if (resolvedVariant && resolvedVariant !== 'default') {
+  if (resolvedVariant && resolvedVariant !== "default") {
     const pkgName = getPlatformPackageName(resolvedVariant);
     const binary = tryLoadPackage(pkgName, true);
     if (binary) return binary;
@@ -145,15 +149,17 @@ export const loadBinary = (variant?: GpuVariant): NativeBinding => {
     if (noFallback) {
       throw new Error(
         `[lloyal.node] GPU variant "${resolvedVariant}" failed to load. ` +
-        `Package: ${pkgName}. Check that runtime libraries are available.`
+          `Package: ${pkgName}. Check that runtime libraries are available.`,
       );
     }
-    console.warn(`[lloyal.node] GPU variant "${resolvedVariant}" unavailable, falling back to CPU`);
+    console.warn(
+      `[lloyal.node] GPU variant "${resolvedVariant}" unavailable, falling back to CPU`,
+    );
   }
 
   // 2. Try local build (always fresher than installed packages during development)
   try {
-    return require('../build/Release/lloyal.node') as NativeBinding;
+    return require("../build/Release/lloyal.node") as NativeBinding;
   } catch {
     // ignore — no local build
   }
@@ -165,7 +171,7 @@ export const loadBinary = (variant?: GpuVariant): NativeBinding => {
 
   throw new Error(
     `No lloyal.node binary found for ${process.platform}-${process.arch}. ` +
-    `Tried: ${resolvedVariant ? getPlatformPackageName(resolvedVariant) + ', ' : ''}${defaultPkg}`
+      `Tried: ${resolvedVariant ? getPlatformPackageName(resolvedVariant) + ", " : ""}${defaultPkg}`,
   );
 };
 
@@ -241,7 +247,7 @@ const getBinary = (): NativeBinding => {
  */
 export const createContext = async (
   options: ContextOptions,
-  loadOptions?: LoadOptions
+  loadOptions?: LoadOptions,
 ): Promise<SessionContext> => {
   const variant = loadOptions?.gpuVariant || process.env.LLOYAL_GPU;
   const binary = variant ? loadBinary(variant as GpuVariant) : getBinary();
@@ -249,10 +255,23 @@ export const createContext = async (
 };
 
 // ── Re-export from @lloyal-labs/sdk ──────────────────────────────
-export { Branch, BranchStore, Session, Rerank, buildUserDelta, buildToolResultDelta } from '@lloyal-labs/sdk';
+export {
+  Branch,
+  BranchStore,
+  Session,
+  Rerank,
+  buildUserDelta,
+  buildToolResultDelta,
+} from "@lloyal-labs/sdk";
 
-export { PoolingType, CHAT_FORMAT_CONTENT_ONLY, CHAT_FORMAT_GENERIC, ReasoningFormat, GrammarTriggerType } from '@lloyal-labs/sdk';
-export type { ChatFormat } from '@lloyal-labs/sdk';
+export {
+  PoolingType,
+  CHAT_FORMAT_CONTENT_ONLY,
+  CHAT_FORMAT_GENERIC,
+  ReasoningFormat,
+  GrammarTriggerType,
+} from "@lloyal-labs/sdk";
+export type { ChatFormat } from "@lloyal-labs/sdk";
 export type {
   ContextOptions,
   FormatChatOptions,
@@ -273,20 +292,27 @@ export type {
   RerankResult,
   RerankProgress,
   KvCacheType,
-} from '@lloyal-labs/sdk';
+} from "@lloyal-labs/sdk";
 
 // ── Re-export from @lloyal-labs/lloyal-agents ────────────────────
 export {
-  Ctx, Store, Events,
+  Ctx,
+  Store,
+  Events,
   Tool,
+  Agent,
+  agent,
+  agentPool,
+  useAgent,
   useAgentPool,
-  runAgents,
-  generate,
+  reduce,
   diverge,
   createToolkit,
   initAgents,
   withSharedRoot,
-} from '@lloyal-labs/lloyal-agents';
+  DefaultAgentPolicy,
+  renderTemplate,
+} from "@lloyal-labs/lloyal-agents";
 
 export type {
   Toolkit,
@@ -299,13 +325,14 @@ export type {
   AgentPoolOptions,
   AgentResult,
   AgentPoolResult,
-  GenerateOptions,
-  GenerateResult,
   DivergeOptions,
   DivergeAttempt,
   DivergeResult,
   AgentEvent,
-} from '@lloyal-labs/lloyal-agents';
+  UseAgentOpts,
+  CreateAgentPoolOpts,
+  PoolTaskSpec,
+} from "@lloyal-labs/lloyal-agents";
 
 // ── Native-only types (stay in lloyal.node) ──────────────────────
-export type { GpuVariant, LoadOptions, NativeBinding } from './types';
+export type { GpuVariant, LoadOptions, NativeBinding } from "./types";
