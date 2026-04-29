@@ -1,12 +1,12 @@
-name: SDK GPU Tests (CUDA)
+name: HDK GPU Tests (CUDA)
 
 on:
   repository_dispatch:
-    types: [sdk-gpu-test]
+    types: [hdk-gpu-test]
 
-# Cancel in-flight runs for the same SDK PR
+# Cancel in-flight runs for the same HDK PR
 concurrency:
-  group: sdk-gpu-test-${{ github.event.client_payload.pr_number }}
+  group: hdk-gpu-test-${{ github.event.client_payload.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -16,15 +16,15 @@ jobs:
     if: ${{ github.repository == 'lloyal-ai/lloyal.node' }}
 
     steps:
-      - name: Set pending status on SDK PR
+      - name: Set pending status on HDK PR
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SDK_REPO_PAT }}
           script: |
             await github.rest.repos.createCommitStatus({
               owner: 'lloyal-ai',
-              repo: 'sdk',
-              sha: '${{ github.event.client_payload.sdk_sha }}',
+              repo: 'hdk',
+              sha: '${{ github.event.client_payload.hdk_sha }}',
               state: 'pending',
               context: 'gpu-tests/cuda',
               description: 'GPU integration tests running...',
@@ -121,32 +121,32 @@ jobs:
       - name: Install lloyal-node dependencies
         run: npm install --ignore-scripts
 
-      - name: Clone and build SDK from PR branch
+      - name: Clone and build HDK from PR branch
         run: |
-          git clone --depth=1 -b "$SDK_REF" \
-            "https://x-access-token:${SDK_PAT}@github.com/${SDK_REPO}.git" /tmp/sdk
-          cd /tmp/sdk
+          git clone --depth=1 -b "$HDK_REF" \
+            "https://x-access-token:${HDK_PAT}@github.com/${HDK_REPO}.git" /tmp/hdk
+          cd /tmp/hdk
           npm install
           npm run build
         env:
-          SDK_REF: ${{ github.event.client_payload.sdk_ref }}
-          SDK_REPO: ${{ github.event.client_payload.sdk_repo }}
-          SDK_PAT: ${{ secrets.SDK_REPO_PAT }}
+          HDK_REF: ${{ github.event.client_payload.hdk_ref }}
+          HDK_REPO: ${{ github.event.client_payload.hdk_repo }}
+          HDK_PAT: ${{ secrets.SDK_REPO_PAT }}
 
-      - name: Link SDK packages into lloyal-node
+      - name: Link HDK packages into lloyal-node
         run: |
-          npm link /tmp/sdk/packages/sdk /tmp/sdk/packages/agents
-          echo "Linked SDK packages:"
+          npm link /tmp/hdk/packages/sdk /tmp/hdk/packages/agents
+          echo "Linked HDK packages:"
           ls -la node_modules/@lloyal-labs/sdk/dist/ || true
           ls -la node_modules/@lloyal-labs/lloyal-agents/dist/ || true
 
-      - name: Copy SDK tests into lloyal-node
+      - name: Copy HDK tests into lloyal-node
         run: |
           # Rewrite @lloyal-labs/lloyal.node imports to relative path (self-package)
           sed "s|from '@lloyal-labs/lloyal.node'|from '../dist/index.js'|g" \
-            /tmp/sdk/test/agents.ts > test/sdk-agents.ts
+            /tmp/hdk/test/agents.ts > test/hdk-agents.ts
           sed "s|from '@lloyal-labs/lloyal.node'|from '../dist/index.js'|g" \
-            /tmp/sdk/test/sdk.ts > test/sdk-primitives.ts
+            /tmp/hdk/test/sdk.ts > test/hdk-primitives.ts
 
       - name: Compile TypeScript (src + tests)
         run: |
@@ -159,9 +159,9 @@ jobs:
           name: package-linux-x64-cuda
           path: packages/package-linux-x64-cuda
 
-      - name: Write SDK test wrapper
+      - name: Write HDK test wrapper
         run: |
-          cat > ci/run-sdk-gpu-tests.sh <<'EOF'
+          cat > ci/run-hdk-gpu-tests.sh <<'EOF'
           #!/bin/bash
           set -e
 
@@ -177,42 +177,42 @@ jobs:
 
           echo ""
           echo "══════════════════════════════════════"
-          echo "SDK PRIMITIVES TESTS"
+          echo "HDK PRIMITIVES TESTS"
           echo "══════════════════════════════════════"
 
-          echo "Running SDK primitives tests with $MODEL..."
+          echo "Running HDK primitives tests with $MODEL..."
           LLAMA_TEST_MODEL="models/$MODEL" \
           LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
           LLOYAL_NO_FALLBACK=1 \
-          npx tsx test/sdk-primitives.ts
+          npx tsx test/hdk-primitives.ts
 
           echo ""
-          echo "=== SDK Primitives Tests Passed ==="
+          echo "=== HDK Primitives Tests Passed ==="
 
           echo ""
           echo "══════════════════════════════════════"
-          echo "SDK AGENT TESTS"
+          echo "HDK AGENT TESTS"
           echo "══════════════════════════════════════"
 
-          echo "Running SDK agent tests with $MODEL..."
+          echo "Running HDK agent tests with $MODEL..."
           LLAMA_TEST_MODEL="models/$MODEL" \
           LLOYAL_GPU="${LLOYAL_GPU:-cuda}" \
           LLOYAL_NO_FALLBACK=1 \
-          npx tsx test/sdk-agents.ts
+          npx tsx test/hdk-agents.ts
 
           echo ""
-          echo "=== SDK Agent Tests Passed ==="
+          echo "=== HDK Agent Tests Passed ==="
           EOF
-          chmod +x ci/run-sdk-gpu-tests.sh
+          chmod +x ci/run-hdk-gpu-tests.sh
 
       - name: Build and push GPU test image
         run: |
-          # Patch Dockerfile to copy the SDK wrapper and use it as entrypoint
-          sed 's|COPY ci/run-gpu-tests.sh ./|COPY ci/run-gpu-tests.sh ci/run-sdk-gpu-tests.sh ./|; s|ENTRYPOINT.*|ENTRYPOINT ["bash", "run-sdk-gpu-tests.sh"]|' \
-            ci/Dockerfile.gpu-tests > ci/Dockerfile.sdk-gpu-tests
+          # Patch Dockerfile to copy the HDK wrapper and use it as entrypoint
+          sed 's|COPY ci/run-gpu-tests.sh ./|COPY ci/run-gpu-tests.sh ci/run-hdk-gpu-tests.sh ./|; s|ENTRYPOINT.*|ENTRYPOINT ["bash", "run-hdk-gpu-tests.sh"]|' \
+            ci/Dockerfile.gpu-tests > ci/Dockerfile.hdk-gpu-tests
 
-          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:sdk-${{ github.event.client_payload.sdk_sha }}-cuda"
-          docker build -f ci/Dockerfile.sdk-gpu-tests -t "$IMAGE" .
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:hdk-${{ github.event.client_payload.hdk_sha }}-cuda"
+          docker build -f ci/Dockerfile.hdk-gpu-tests -t "$IMAGE" .
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
@@ -221,9 +221,9 @@ jobs:
         env:
           GCP_REGION: ${{ secrets.GCP_REGION }}
           GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
-          JOB_NAME: lloyal-gpu-test-sdk
+          JOB_NAME: lloyal-gpu-test-hdk
 
-      - name: Set success status on SDK PR
+      - name: Set success status on HDK PR
         if: success()
         uses: actions/github-script@v7
         with:
@@ -231,15 +231,15 @@ jobs:
           script: |
             await github.rest.repos.createCommitStatus({
               owner: 'lloyal-ai',
-              repo: 'sdk',
-              sha: '${{ github.event.client_payload.sdk_sha }}',
+              repo: 'hdk',
+              sha: '${{ github.event.client_payload.hdk_sha }}',
               state: 'success',
               context: 'gpu-tests/cuda',
               description: 'GPU integration tests passed',
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
             });
 
-      - name: Set failure status on SDK PR
+      - name: Set failure status on HDK PR
         if: failure()
         uses: actions/github-script@v7
         with:
@@ -247,8 +247,8 @@ jobs:
           script: |
             await github.rest.repos.createCommitStatus({
               owner: 'lloyal-ai',
-              repo: 'sdk',
-              sha: '${{ github.event.client_payload.sdk_sha }}',
+              repo: 'hdk',
+              sha: '${{ github.event.client_payload.hdk_sha }}',
               state: 'failure',
               context: 'gpu-tests/cuda',
               description: 'GPU integration tests failed',
