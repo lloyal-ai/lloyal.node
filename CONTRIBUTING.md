@@ -260,4 +260,4 @@ lloyal.node/
 
 ---
 
-**License:** Apache 2.0
+**License:** FSL-1.1-Apache-2.0 (Functional Source License; converts to Apache 2.0 per release after two years). Contributions are accepted under the same inbound terms. See [LICENSE](./LICENSE) and [LICENSE-FAQ.md](./LICENSE-FAQ.md).

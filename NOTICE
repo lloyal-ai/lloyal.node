@@ -1,0 +1,59 @@
+lloyal-node
+Copyright 2026 Lloyal Labs
+
+This product includes software developed by Lloyal Labs and licensed
+under the Functional Source License, Version 1.1, Apache 2.0 Future
+License (FSL-1.1-Apache-2.0). See LICENSE for terms.
+
+This product is the Node.js / N-API binding for liblloyal. It bundles
+or links against the following dependencies:
+
+---
+
+liblloyal
+Copyright 2026 Lloyal Labs
+Source-available under FSL-1.1-Apache-2.0 (same license as this package).
+See the bundled liblloyal/LICENSE and liblloyal/NOTICE for details.
+
+---
+
+llama.cpp (transitive, via liblloyal)
+Copyright (c) 2023-2026 The ggml authors
+Licensed under the MIT License:
+
+    MIT License
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+    INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+    CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+When this package is distributed as a prebuilt npm tarball containing
+native binaries, those binaries include llama.cpp code subject to the
+MIT attribution requirement above. This NOTICE file satisfies that
+requirement.
+
+The llama.cpp source tree's LICENSE file is preserved verbatim at
+llama.cpp/LICENSE in the source distribution.
+
+---
+
+For a plain-English explanation of what FSL-1.1-Apache-2.0 means in
+practice — including what commercial uses are permitted and what is
+specifically restricted — see LICENSE-FAQ.md in this repository or the
+canonical version at https://docs.lloyal.ai/licensing/faq.
