@@ -160,10 +160,17 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # liblloyal::liblloyal transitively brings:
 #   - llama (and ggml, and GPU deps like CUDA::cudart)
 #   - The llama/llama.h include structure we created
-# common is llama.cpp's common library (chat templates, batch utils, etc.)
+# llama-common is llama.cpp's common library (chat templates, batch utils, etc.).
+# Renamed from 'common' → 'llama-common' at b9100+; backward-compat preserved.
+if(TARGET llama-common)
+    set(LLAMA_COMMON_TARGET llama-common)
+else()
+    set(LLAMA_COMMON_TARGET common)
+endif()
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     liblloyal::liblloyal
-    common
+    ${LLAMA_COMMON_TARGET}
     md4c
     ${CMAKE_JS_LIB}
 )
@@ -252,6 +259,25 @@ if(BUILD_SHARED_LIBS)
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMENT "Copying libllama to output directory"
     )
+
+    # Copy llama-common dylib if it's built shared (b9100+ default; legacy was STATIC).
+    # lloyal.node now has a runtime dependency on @rpath/libllama-common.dylib after
+    # the upstream split into common-base (static) + common (shared).
+    get_target_property(_LLAMA_COMMON_TYPE ${LLAMA_COMMON_TARGET} TYPE)
+    if(_LLAMA_COMMON_TYPE STREQUAL "SHARED_LIBRARY")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:${LLAMA_COMMON_TARGET}>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_SONAME_FILE:${LLAMA_COMMON_TARGET}>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:${LLAMA_COMMON_TARGET}>
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMENT "Copying lib${LLAMA_COMMON_TARGET} to output directory"
+        )
+    endif()
 
     # Copy ggml shared libraries
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD

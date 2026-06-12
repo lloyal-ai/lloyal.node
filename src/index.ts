@@ -309,7 +309,7 @@ export {
   diverge,
   createToolkit,
   initAgents,
-  withSharedRoot,
+  withSpine,
   DefaultAgentPolicy,
   renderTemplate,
 } from "@lloyal-labs/lloyal-agents";
@@ -317,7 +317,7 @@ export {
 export type {
   Toolkit,
   AgentHandle,
-  SharedRootOptions,
+  SpineOptions,
   JsonSchema,
   ToolSchema,
   ToolContext,
@@ -331,7 +331,7 @@ export type {
   AgentEvent,
   UseAgentOpts,
   CreateAgentPoolOpts,
-  PoolTaskSpec,
+  SpawnSpec,
 } from "@lloyal-labs/lloyal-agents";
 
 // ── Native-only types (stay in lloyal.node) ──────────────────────

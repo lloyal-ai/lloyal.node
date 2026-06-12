@@ -2042,10 +2042,11 @@ async function testRerank(): Promise<void> {
     assert(results.length === docs.length,
       `rerank: returns all ${docs.length} results when no topK`);
 
-    // Scores are valid probabilities (0-1) and sorted descending
+    // Scores are finite logit-diffs (unbounded; positive = "yes", negative = "no")
+    // and sorted descending. See Rerank._rerankScore docstring for the formula.
     for (let i = 0; i < results.length; i++) {
-      assert(results[i].score >= 0 && results[i].score <= 1,
-        `rerank: score[${i}] = ${results[i].score} is in [0, 1]`);
+      assert(Number.isFinite(results[i].score),
+        `rerank: score[${i}] = ${results[i].score} is finite`);
       assert(Number.isInteger(results[i].index) && results[i].index >= 0 && results[i].index < docs.length,
         `rerank: index[${i}] = ${results[i].index} is valid`);
       if (i > 0) {

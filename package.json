@@ -1,6 +1,6 @@
 {
   "name": "@lloyal-labs/lloyal.node",
-  "version": "2.1.1",
+  "version": "3.0.0",
   "description": "Node.js client for liblloyal+llama.cpp",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,7 +39,7 @@
     "llm"
   ],
   "author": "lloyal.ai",
-  "license": "Apache-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/lloyal-ai/lloyal.node/issues"
@@ -50,12 +50,12 @@
     "node-addon-api": "^8.5.0"
   },
   "peerDependencies": {
-    "@lloyal-labs/lloyal-agents": ">=1.7.0",
-    "@lloyal-labs/sdk": ">=1.7.0"
+    "@lloyal-labs/lloyal-agents": ">=3.0.0",
+    "@lloyal-labs/sdk": ">=3.0.0"
   },
   "devDependencies": {
-    "@lloyal-labs/lloyal-agents": "^1.7.0",
-    "@lloyal-labs/sdk": "^1.7.0",
+    "@lloyal-labs/lloyal-agents": "^3.0.0",
+    "@lloyal-labs/sdk": "^3.0.0",
     "@types/node": "^25.3.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
@@ -65,25 +65,28 @@
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@lloyal-labs/lloyal.node-darwin-arm64": "2.1.1",
-    "@lloyal-labs/lloyal.node-darwin-x64": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-cuda": "2.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "2.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64": "2.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "2.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64": "2.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-cuda": "2.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "2.1.1"
+    "@lloyal-labs/lloyal.node-darwin-arm64": "3.0.0",
+    "@lloyal-labs/lloyal.node-darwin-x64": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-arm64": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-x64": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "3.0.0",
+    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "3.0.0",
+    "@lloyal-labs/lloyal.node-win32-arm64": "3.0.0",
+    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "3.0.0",
+    "@lloyal-labs/lloyal.node-win32-x64": "3.0.0",
+    "@lloyal-labs/lloyal.node-win32-x64-cuda": "3.0.0",
+    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "3.0.0"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "files": [
     "dist/",
-    "scripts/"
+    "scripts/",
+    "LICENSE",
+    "NOTICE",
+    "LICENSE-FAQ.md"
   ]
 }

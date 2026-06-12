@@ -3,14 +3,14 @@
 [![Build & Test](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml)
 [![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
 [![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![llama.cpp](https://img.shields.io/badge/llama.cpp-b8087-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b8087)
+[![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-b8795-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b8795)
 
 **Native backend for the lloyal inference platform.**
 
-Prebuilt llama.cpp binaries for 13 platform/GPU combinations, exposing a `SessionContext` that powers the [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk) inference primitives (Branch, BranchStore, Session, Rerank) and [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents) multi-agent framework. Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
+Prebuilt llama.cpp binaries for 13 platform/GPU combinations, exposing a `SessionContext` that powers the [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) inference primitives (Branch, BranchStore, Session, Rerank) and [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) multi-agent framework. Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
 
-All SDK and agent exports are re-exported from this package for convenience — `import { Branch, runAgents } from "@lloyal-labs/lloyal.node"` works out of the box.
+All SDK and agent exports are re-exported from this package for convenience — `import { Branch, useAgent, agentPool } from "@lloyal-labs/lloyal.node"` works out of the box.
 
 ## Install
 
@@ -66,7 +66,7 @@ for await (const { token, text } of branch) {
 }
 ```
 
-See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk) for the full Branch API, continuous tree batching, KV tenancy, and topology documentation.
+See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) for the full Branch API, continuous tree batching, KV tenancy, and topology documentation.
 
 ### Without the SDK
 
@@ -125,18 +125,19 @@ const sep = await ctx.getTurnSeparator();
 - `loadBinary(options?)` — explicit GPU variant selection with automatic fallback
 - Prebuilt binaries for 13 platform/GPU combinations
 
-**Re-exported from [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk):**
+**Re-exported from [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk):**
 
 - `Branch`, `BranchStore`, `Session`, `Rerank`
 - Per-token metrics: `modelEntropy()`, `modelSurprisal()`, `samplingPerplexity`
 - Chat formatting: `formatChat()`, `parseChatOutput()`
 - Grammar: `jsonSchemaToGrammar()`, `setGrammar()`
 
-**Re-exported from [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents):**
+**Re-exported from [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents):**
 
-- `runAgents`, `useAgentPool`, `generate`, `diverge`, `createToolkit`
+- `useAgent`, `agentPool`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`
 - Structured concurrency DAG via Effection generators
 - In-loop orchestration: agents as branches of a single running process
+- App protocol surfaces (`AppRegistryCtx`, `AppConfigStoreCtx`, `App`, `AppManifest`) when paired with [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig)'s `defineApp` / `createAppRegistry`
 
 ## GPU Variant Selection
 
@@ -184,8 +185,10 @@ See [distribution.md](docs/distribution.md) for details.
 
 | Package                                                                                    | Description                                                                  |
 | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/sdk)                                     | Backend-agnostic inference primitives (Branch, BranchStore, Session, Rerank) |
-| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/sdk/tree/main/packages/agents) | Multi-agent framework — in-loop orchestration via structured concurrency     |
+| [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk)              | Backend-agnostic inference primitives (Branch, BranchStore, Session, Rerank) |
+| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime + App protocol primitives                                |
+| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig)              | App protocol helpers, retrieval providers, framework tools (Plan/Delegate/Report) |
+| [`harness.dev`](https://www.npmjs.com/package/harness.dev)                                 | CLI — scaffold harnesses + Apps; publish/install signed Apps via the channel |
 | [liblloyal](https://github.com/lloyal-ai/liblloyal)                                        | Header-only C++20 inference kernel for llama.cpp                             |
 | **lloyal.node**                                                                            | This package — native backend + prebuilt binaries                            |
 | [nitro-llama](https://github.com/lloyal-ai/nitro-llama)                                    | React Native backend via Nitro Modules                                       |
@@ -197,4 +200,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and release proce
 
 ## License
 
-Apache 2.0 — See [LICENSE](./LICENSE) for details.
+You can build and sell commercial products using lloyal.node.
+
+lloyal.node 3.0 is source-available under FSL-1.1-Apache-2.0 and converts
+to Apache 2.0 two years after each release. The restriction is narrow: you
+cannot offer a competing HDK runtime, managed HDK service, or alternative
+HDK App distribution channel.
+
+See [`LICENSE-FAQ.md`](./LICENSE-FAQ.md) for concrete examples of what's
+permitted and what's restricted. See [`LICENSE`](./LICENSE) for the legal
+text and [`NOTICE`](./NOTICE) for attribution including the bundled
+llama.cpp MIT dependency.

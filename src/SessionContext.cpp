@@ -817,6 +817,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchGetPosition", &SessionContext::_branchGetPosition),
     InstanceMethod("_branchGetPerplexity", &SessionContext::_branchGetPerplexity),
     InstanceMethod("_branchGetLogits", &SessionContext::_branchGetLogits),
+    InstanceMethod("_branchLogitsAt", &SessionContext::_branchLogitsAt),
     InstanceMethod("_branchSetLogits", &SessionContext::_branchSetLogits),
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchPruneSubtree", &SessionContext::_branchPruneSubtree),
@@ -1860,12 +1861,17 @@ Napi::Value SessionContext::_branchFork(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
 
   if (info.Length() < 1) {
-    throw Napi::Error::New(env, "_branchFork requires (handle)");
+    throw Napi::Error::New(env, "_branchFork requires (handle, cloneLogits?)");
   }
 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
 
-  auto newHandle = lloyal::branch::fork(handle, _branchStore);
+  lloyal::branch::ForkOpts opts;
+  if (info.Length() >= 2 && info[1].IsBoolean()) {
+    opts.clone_logits = info[1].As<Napi::Boolean>().Value();
+  }
+
+  auto newHandle = lloyal::branch::fork(handle, _branchStore, opts);
 
   if (newHandle == lloyal::branch::INVALID_HANDLE) {
     throw Napi::Error::New(env, "Failed to fork branch");
@@ -1981,6 +1987,42 @@ Napi::Value SessionContext::_branchGetLogits(const Napi::CallbackInfo& info) {
   int n_vocab = lloyal::branch::get_n_vocab(handle, _branchStore);
   Napi::Float32Array result = Napi::Float32Array::New(env, n_vocab);
   std::memcpy(result.Data(), logits, n_vocab * sizeof(float));
+
+  return result;
+}
+
+// Read a few logit values at vocab indices, without copying n_vocab floats out.
+// Wrapped by Branch.logitsAt() (added in R1) for use by rerank yes/no probe,
+// entailment scoring, semantic-entropy reads.
+Napi::Value SessionContext::_branchLogitsAt(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsTypedArray()) {
+    throw Napi::Error::New(env, "_branchLogitsAt requires (handle, Int32Array)");
+  }
+
+  Napi::TypedArray ta = info[1].As<Napi::TypedArray>();
+  if (ta.TypedArrayType() != napi_int32_array) {
+    throw Napi::TypeError::New(env, "_branchLogitsAt: indices must be Int32Array");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  Napi::Int32Array indices = ta.As<Napi::Int32Array>();
+  size_t n = indices.ElementLength();
+
+  Napi::Float32Array result = Napi::Float32Array::New(env, n);
+
+  try {
+    lloyal::branch::get_logits_at(
+        handle,
+        std::span<const int32_t>(indices.Data(), n),
+        std::span<float>(result.Data(), n),
+        _branchStore);
+  } catch (const std::runtime_error& e) {
+    // Bounds-check failures surface as RangeError so JS callers get a typed exception.
+    throw Napi::RangeError::New(env, e.what());
+  }
 
   return result;
 }

@@ -253,6 +253,7 @@ private:
   Napi::Value _branchGetPosition(const Napi::CallbackInfo& info);
   Napi::Value _branchGetPerplexity(const Napi::CallbackInfo& info);
   Napi::Value _branchGetLogits(const Napi::CallbackInfo& info);
+  Napi::Value _branchLogitsAt(const Napi::CallbackInfo& info);
   Napi::Value _branchSetLogits(const Napi::CallbackInfo& info);
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
   Napi::Value _branchPruneSubtree(const Napi::CallbackInfo& info);
