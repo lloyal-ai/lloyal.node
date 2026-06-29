@@ -37,7 +37,8 @@ const AVX512 = new RegExp(
   [
     '\\bzmm[0-9]',                       // 512-bit registers
     '\\{%?k[0-7]\\}',                    // masked operand {k1} / {%k1}
-    '\\bk(?:mov[bwdq]|and[bwdq]?|or[bwdq]?|xor|not|add|shift|test|unpck)\\b', // k-register ops
+    // k-mask ops — size suffix (b/w/d/q, or bw/wd/dq for unpck) is mandatory:
+    '\\bk(?:mov|andn|and|xnor|xor|ortest|or|not|add|shiftl|shiftr|test|unpck)[bwdq]{1,2}\\b',
     // EVEX-only mnemonics:
     '\\bv(?:pternlog|pconflict|plzcnt|pmadd52|popcnt[bwdq]|permt2|permi2|' +
       'fixupimm|rndscale|reduce[ps][sd]|scalef|rcp14|rsqrt14|getexp|getmant)',
@@ -59,7 +60,14 @@ function pickDisassembler() {
   const candidates =
     process.platform === 'win32'
       ? [['llvm-objdump', ['-d'], ['--version']], ['dumpbin', ['/disasm:nobytes'], ['/?']]]
-      : [['llvm-objdump', ['-d'], ['--version']], ['objdump', ['-d'], ['--version']]];
+      : process.platform === 'darwin'
+        ? [
+            ['llvm-objdump', ['-d'], ['--version']],
+            ['objdump', ['-d'], ['--version']],
+            // macOS often ships llvm-objdump only via the Xcode toolchain.
+            ['xcrun', ['llvm-objdump', '-d'], ['llvm-objdump', '--version']],
+          ]
+        : [['llvm-objdump', ['-d'], ['--version']], ['objdump', ['-d'], ['--version']]];
   for (const [bin, baseArgs, probeArgs] of candidates) {
     const probe = spawnSync(bin, probeArgs, { encoding: 'utf8' });
     if (!probe.error) return { bin, baseArgs };

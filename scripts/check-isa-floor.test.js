@@ -15,6 +15,14 @@ const positives = [
   'vaddps %zmm2, %zmm3, %zmm1 {%k1}',
   '  4a1: 62 f1 ... vaddps zmm1{k1}, zmm2, zmm3', // Intel/EVEX form
   'kmovw %k1, %eax',
+  // k-mask ops with mandatory size suffixes (the cases the first pattern missed):
+  'kaddw %k1, %k2, %k3',
+  'knotw %k1, %k2',
+  'kshiftlw $1, %k1, %k2',
+  'kandnq %k1, %k2, %k3',
+  'kunpckbw %k1, %k2, %k3',
+  'kxnorw %k1, %k2, %k3',
+  'kortestw %k1, %k2',
   'vpternlogd $0xff, %zmm0, %zmm0, %zmm0',
   'vpconflictd %zmm0, %zmm1',
 ];
