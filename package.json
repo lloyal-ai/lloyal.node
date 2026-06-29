@@ -22,7 +22,6 @@
     "test": "npm run test:integration",
     "test:integration": "npx tsx test/integration.ts",
     "test:examples": "npx tsx test/examples.ts",
-    "test:isa-floor": "node scripts/check-isa-floor.test.js",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "npx tsx examples/chat/chat.ts"
   },

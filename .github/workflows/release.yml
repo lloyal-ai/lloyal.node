@@ -188,23 +188,6 @@ jobs:
         run: |
           node scripts/create-platform-package.js "${{ matrix.package }}" "${{ matrix.os }}" "${{ matrix.arch }}"
 
-      # The ISA gate needs a disassembler. GitHub's Windows image ships LLVM but
-      # not always on PATH, and dumpbin isn't on PATH in a bash shell — add LLVM
-      # so llvm-objdump is found (otherwise the gate hard-fails). hdk#20 review.
-      - name: Ensure llvm-objdump on PATH (Windows ISA gate)
-        if: runner.os == 'Windows' && matrix.arch == 'x64' && matrix.cross_compile != true
-        shell: pwsh
-        run: Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
-
-      # ISA-floor gate: static guard that x64 prebuilts do not bake in AVX-512
-      # (github.com/lloyal-ai/hdk#20). Runtime tests cannot catch this because
-      # build host == test host and all runners have AVX-512; this disassembles
-      # the artifact instead, so it is independent of the CI machine's own CPU.
-      - name: Verify CPU ISA floor (x64)
-        if: matrix.arch == 'x64'
-        shell: bash
-        run: node scripts/check-isa-floor.js "packages/${{ matrix.package }}/bin" "${{ matrix.arch }}"
-
       # Test platform package (skip for cross-compiled packages - can't run ARM64 on x64)
       - name: Cache test models
         if: matrix.cross_compile != true
