@@ -101,13 +101,18 @@ const hasCudaGpu = (): boolean => {
         "/usr/lib/libcuda.so.1",
       ].some((p) => existsSync(p));
       if (!_cudaProbe) {
-        // The NVIDIA driver also ships nvidia-smi on PATH.
-        const smi = spawnSync("nvidia-smi", ["-L"], {
-          encoding: "utf8",
-          timeout: 3000,
-        });
-        _cudaProbe =
-          !smi.error && smi.status === 0 && /GPU \d+:/.test(smi.stdout || "");
+        // Fallback: the driver installs nvidia-smi at a fixed path. Use an
+        // absolute path (no PATH lookup — avoids running an unexpected binary)
+        // and skip if it isn't present.
+        const smiPath = "/usr/bin/nvidia-smi";
+        if (existsSync(smiPath)) {
+          const smi = spawnSync(smiPath, ["-L"], {
+            encoding: "utf8",
+            timeout: 3000,
+          });
+          _cudaProbe =
+            !smi.error && smi.status === 0 && /GPU \d+:/.test(smi.stdout || "");
+        }
       }
     }
   } catch {
@@ -173,7 +178,8 @@ export const loadBinary = (variant?: GpuVariant): NativeBinding => {
   // CPU if the cuda package is unavailable. Set LLOYAL_GPU=cpu to opt out.
   if (!resolvedVariant && !useLocal && hasCudaGpu()) {
     resolvedVariant = "cuda";
-    console.log("[lloyal.node] auto-detected NVIDIA GPU → trying cuda variant");
+    // stderr (warn), not stdout — keep stdout clean for consumers.
+    console.warn("[lloyal.node] auto-detected NVIDIA GPU → trying cuda variant");
   }
 
   // 0. Use local build if explicitly requested (no fallback)

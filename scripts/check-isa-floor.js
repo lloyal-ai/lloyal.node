@@ -47,13 +47,17 @@ const isX64 = (arch) => arch === 'x64' || arch === 'x86_64';
 
 // Pick a disassembler: prefer llvm-objdump (portable), then platform default.
 function pickDisassembler() {
+  // [binary, disassemble-args, availability-probe-args]. dumpbin has no
+  // --version (it takes /options), so probe each tool with its own benign
+  // command and treat "spawned without ENOENT" as available — otherwise
+  // dumpbin is never selected on Windows runners lacking llvm-objdump.
   const candidates =
     process.platform === 'win32'
-      ? [['llvm-objdump', ['-d']], ['dumpbin', ['/disasm:nobytes']]]
-      : [['llvm-objdump', ['-d']], ['objdump', ['-d']]];
-  for (const [bin, baseArgs] of candidates) {
-    const probe = spawnSync(bin, ['--version'], { encoding: 'utf8' });
-    if (!probe.error && probe.status === 0) return { bin, baseArgs };
+      ? [['llvm-objdump', ['-d'], ['--version']], ['dumpbin', ['/disasm:nobytes'], ['/?']]]
+      : [['llvm-objdump', ['-d'], ['--version']], ['objdump', ['-d'], ['--version']]];
+  for (const [bin, baseArgs, probeArgs] of candidates) {
+    const probe = spawnSync(bin, probeArgs, { encoding: 'utf8' });
+    if (!probe.error) return { bin, baseArgs };
   }
   return null;
 }
