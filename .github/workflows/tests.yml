@@ -35,6 +35,10 @@ jobs:
           node-version: 24
           cache: 'npm'
 
+      # Fast pure-JS unit test for the ISA-floor detector (no build needed).
+      - name: Unit-test ISA-floor detector
+        run: node scripts/check-isa-floor.test.js
+
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |

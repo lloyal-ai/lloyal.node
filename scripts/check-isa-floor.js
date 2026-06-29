@@ -11,19 +11,24 @@
  * disassembly check can, independent of the CI machine's own CPU.
  *
  * This script disassembles the addon + bundled ggml/llama libraries and fails
- * if AVX-512 instructions/registers appear in an x64 artifact.
+ * if AVX-512 instructions/registers appear in an x64 artifact. Disassembly is
+ * streamed line-by-line (bounded memory, early-exit) so large GPU libraries
+ * don't blow memory or hang the job.
  *
  * Usage:  node scripts/check-isa-floor.js <dir> [arch]
  *   <dir>  directory containing lloyal.node + shared libs
  *          (e.g. build/Release, or packages/<name>/bin)
  *   [arch] target arch (default: process.arch). arm64 targets are exempt.
  *
- * Exit codes: 0 = clean / exempt, 1 = AVX-512 found, 2 = no disassembler / no input.
+ * Exit codes: 0 = clean / exempt, 1 = AVX-512 found, 2 = no disassembler / no input / error.
  */
 
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
+const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
+
+const DISASM_TIMEOUT_MS = 120000;
 
 // AVX-512 signal: 512-bit zmm registers, k-mask predication ({k1}), k-register
 // ops, and EVEX-only mnemonics. Any of these in an x64 binary => AVX-512 baked
@@ -66,18 +71,53 @@ const BIN_EXTS = ['.node', '.so', '.dll', '.dylib'];
 const isBinary = (f) =>
   f === 'lloyal.node' || BIN_EXTS.some((e) => f.endsWith(e)) || /\.so(\.\d+)+$/.test(f);
 
-/** Returns true if any line of the file's disassembly uses AVX-512. */
-function fileHasAvx512(tool, file) {
-  const out = spawnSync(tool.bin, [...tool.baseArgs, file], {
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024 * 1024,
+/**
+ * Resolves to the first disassembly line that uses AVX-512, or `null` if none.
+ * Streams the disassembly line-by-line (bounded memory) and stops at the first
+ * hit. Rejects on spawn failure, timeout, or a hard disassembler error (so an
+ * unreadable artifact is never mistaken for a clean "no AVX-512" pass).
+ */
+function firstAvx512Line(tool, file) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(tool.bin, [...tool.baseArgs, file]);
+    let found = null;
+    let lines = 0;
+    let stderr = '';
+    let settled = false;
+    const done = (err, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { proc.kill('SIGKILL'); } catch { /* already exited */ }
+      if (err) reject(err);
+      else resolve(val);
+    };
+    const timer = setTimeout(
+      () => done(new Error(`disassembly timed out (${DISASM_TIMEOUT_MS}ms): ${path.basename(file)}`)),
+      DISASM_TIMEOUT_MS,
+    );
+    proc.on('error', (e) => done(e)); // spawn failure, e.g. ENOENT
+    proc.stderr.on('data', (d) => { if (stderr.length < 4096) stderr += d.toString(); });
+    readline.createInterface({ input: proc.stdout }).on('line', (line) => {
+      lines++;
+      if (!found && lineHasAvx512(line)) {
+        found = line;
+        done(null, line); // early exit — kill the disassembler
+      }
+    });
+    proc.on('close', (code) => {
+      // Non-zero exit with no output => the disassembler actually failed
+      // (e.g. unreadable file); never treat that as a clean pass.
+      if (found === null && code !== 0 && lines === 0) {
+        done(new Error(`${tool.bin} failed on ${path.basename(file)} (exit ${code}): ${stderr.trim().slice(0, 200)}`));
+      } else {
+        done(null, found);
+      }
+    });
   });
-  if (out.error) throw new Error(`disassemble ${path.basename(file)}: ${out.error.message}`);
-  const text = (out.stdout || '') + (out.stderr || '');
-  return text.split('\n').find(lineHasAvx512) || null;
 }
 
-function main(argv) {
+async function main(argv) {
   const dir = argv[0] || path.join(__dirname, '..', 'build', 'Release');
   const arch = (argv[1] || process.arch).toLowerCase();
 
@@ -110,7 +150,7 @@ function main(argv) {
   for (const file of targets) {
     let hit;
     try {
-      hit = fileHasAvx512(tool, file);
+      hit = await firstAvx512Line(tool, file);
     } catch (e) {
       console.error(`[check-isa-floor] ${e.message}`);
       return 2;
@@ -136,7 +176,13 @@ function main(argv) {
 }
 
 if (require.main === module) {
-  process.exit(main(process.argv.slice(2)));
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (e) => {
+      console.error(`[check-isa-floor] ${e && e.message ? e.message : e}`);
+      process.exit(2);
+    },
+  );
 }
 
-module.exports = { AVX512, lineHasAvx512, isX64, fileHasAvx512, pickDisassembler, main };
+module.exports = { AVX512, lineHasAvx512, isX64, firstAvx512Line, pickDisassembler, main };
