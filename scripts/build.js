@@ -43,6 +43,24 @@ if (gpuBackend === 'cuda') {
   console.log('[lloyal.node] GPU backend: CPU only');
 }
 
+// --- CPU ISA baseline (portability floor) ---
+// llama.cpp defaults GGML_NATIVE=ON (-march=native), which bakes the *build
+// host's* instruction set into the binary. On an AVX-512-capable CI host that
+// yields prebuilts that abort with an illegal instruction (0xC000001D) inside
+// createContext() on any consumer CPU without AVX-512. Pin an explicit AVX2
+// baseline for x64 so prebuilts run on Intel Haswell (2013+) / AMD Zen (2017+)
+// and newer. arm64 keeps GGML_NATIVE (its detection probes safely; no AVX).
+// Target arch (not host): the Windows-ARM64 cross build sets ARCH=arm64 and
+// uses cmake/arm64-cross.cmake, which already forces GGML_NATIVE off.
+// See https://github.com/lloyal-ai/hdk/issues/20.
+const targetArch = (process.env.ARCH || process.arch).toLowerCase();
+if (targetArch === 'x64' || targetArch === 'x86_64') {
+  cmakeFlags.push('--CDGGML_NATIVE=OFF', '--CDGGML_AVX2=ON');
+  console.log('[lloyal.node] CPU ISA baseline: AVX2 (x64 portable floor)');
+} else {
+  console.log(`[lloyal.node] CPU ISA baseline: native (${targetArch})`);
+}
+
 const buildCmd = `npx cmake-js compile ${cmakeFlags.join(' ')}`.trim();
 console.log(`[lloyal.node] Running: ${buildCmd}`);
 
