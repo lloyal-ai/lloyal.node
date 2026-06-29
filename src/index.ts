@@ -95,17 +95,21 @@ const hasCudaGpu = (): boolean => {
       _cudaProbe = existsSync(join(sys, "System32", "nvcuda.dll"));
     } else if (process.platform === "linux") {
       _cudaProbe = [
-        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
-        "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
-        "/usr/lib64/libcuda.so.1",
-        "/usr/lib/libcuda.so.1",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1", // Debian/Ubuntu x64
+        "/usr/lib/aarch64-linux-gnu/libcuda.so.1", // Debian/Ubuntu arm64 (Jetson)
+        "/usr/lib64/libcuda.so.1", // RHEL/Fedora
+        "/usr/lib/libcuda.so.1", // generic
+        "/usr/lib/wsl/lib/libcuda.so.1", // WSL2 GPU passthrough
       ].some((p) => existsSync(p));
       if (!_cudaProbe) {
-        // Fallback: the driver installs nvidia-smi at a fixed path. Use an
-        // absolute path (no PATH lookup — avoids running an unexpected binary)
-        // and skip if it isn't present.
-        const smiPath = "/usr/bin/nvidia-smi";
-        if (existsSync(smiPath)) {
+        // Fallback: the driver installs nvidia-smi at a known location. Probe
+        // absolute paths only (no PATH lookup — avoids running an unexpected
+        // binary); skip if none is present.
+        const smiPath = [
+          "/usr/bin/nvidia-smi",
+          "/usr/local/bin/nvidia-smi",
+        ].find((p) => existsSync(p));
+        if (smiPath) {
           const smi = spawnSync(smiPath, ["-L"], {
             encoding: "utf8",
             timeout: 3000,
