@@ -63,6 +63,17 @@ if (targetArch === 'x64' || targetArch === 'x86_64') {
   console.log(`[lloyal.node] CPU ISA baseline: native (${targetArch})`);
 }
 
+// --- Self-contained prebuilt: drop llama.cpp's HTTPS download client ---
+// llama.cpp's `common` links cpp-httplib, and LLAMA_OPENSSL (default ON) makes
+// it link the *build host's* OpenSSL by ABSOLUTE path (e.g. Homebrew
+// /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib), which doesn't exist on a
+// clean user machine → dlopen fails at load and the addon can't be loaded.
+// lloyal.node never uses llama.cpp's HTTP layer (models load from local paths),
+// so disable it: no external OpenSSL dependency, fully relocatable prebuilt.
+// See https://github.com/lloyal-ai/lloyal.node/issues/35.
+cmakeFlags.push('--CDLLAMA_OPENSSL=OFF');
+console.log('[lloyal.node] LLAMA_OPENSSL=OFF (self-contained: no external OpenSSL)');
+
 const buildCmd = `npx cmake-js compile ${cmakeFlags.join(' ')}`.trim();
 console.log(`[lloyal.node] Running: ${buildCmd}`);
 
