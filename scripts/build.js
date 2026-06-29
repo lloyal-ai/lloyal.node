@@ -50,8 +50,10 @@ if (gpuBackend === 'cuda') {
 // createContext() on any consumer CPU without AVX-512. Pin an explicit AVX2
 // baseline for x64 so prebuilts run on Intel Haswell (2013+) / AMD Zen (2017+)
 // and newer. arm64 keeps GGML_NATIVE (its detection probes safely; no AVX).
-// Target arch (not host): the Windows-ARM64 cross build sets ARCH=arm64 and
-// uses cmake/arm64-cross.cmake, which already forces GGML_NATIVE off.
+// Target arch (not host): the Windows-ARM64 cross build sets ARCH=arm64 and a
+// cross toolchain (cmake/arm64-cross.cmake), so CMAKE_CROSSCOMPILING is set and
+// ggml defaults GGML_NATIVE OFF for cross-compiles (llama.cpp/ggml/CMakeLists.txt,
+// GGML_NATIVE_DEFAULT) — no -march=native, nothing to pin.
 // See https://github.com/lloyal-ai/hdk/issues/20.
 const targetArch = (process.env.ARCH || process.arch).toLowerCase();
 if (targetArch === 'x64' || targetArch === 'x86_64') {
