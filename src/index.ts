@@ -33,6 +33,10 @@ import type { GpuVariant, LoadOptions, NativeBinding } from "./types";
 
 import type { ContextOptions, SessionContext } from "@lloyal-labs/sdk";
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+
 /**
  * Platform package naming: @lloyal-labs/lloyal.node-{platform}-{arch}[-{gpu}]
  */
@@ -75,6 +79,41 @@ const tryLoadPackage = (
     }
     return null;
   }
+};
+
+// Auto-detect an NVIDIA CUDA GPU so the correct prebuilt is chosen without the
+// caller setting LLOYAL_GPU. Cheap, cached, never throws. Meaningful only on
+// linux/win (macOS GPU = Metal, in the base package). See hdk#20: the GPU was
+// never auto-selected, so an installed NVIDIA GPU silently ran on CPU.
+let _cudaProbe: boolean | undefined;
+const hasCudaGpu = (): boolean => {
+  if (_cudaProbe !== undefined) return _cudaProbe;
+  _cudaProbe = false;
+  try {
+    if (process.platform === "win32") {
+      const sys = process.env.SystemRoot || "C:\\Windows";
+      _cudaProbe = existsSync(join(sys, "System32", "nvcuda.dll"));
+    } else if (process.platform === "linux") {
+      _cudaProbe = [
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+        "/usr/lib64/libcuda.so.1",
+        "/usr/lib/libcuda.so.1",
+      ].some((p) => existsSync(p));
+      if (!_cudaProbe) {
+        // The NVIDIA driver also ships nvidia-smi on PATH.
+        const smi = spawnSync("nvidia-smi", ["-L"], {
+          encoding: "utf8",
+          timeout: 3000,
+        });
+        _cudaProbe =
+          !smi.error && smi.status === 0 && /GPU \d+:/.test(smi.stdout || "");
+      }
+    }
+  } catch {
+    _cudaProbe = false;
+  }
+  return _cudaProbe;
 };
 
 /**
@@ -124,9 +163,18 @@ const tryLoadPackage = (
  * @category Core
  */
 export const loadBinary = (variant?: GpuVariant): NativeBinding => {
-  const resolvedVariant = variant ?? process.env.LLOYAL_GPU;
+  let resolvedVariant = variant ?? process.env.LLOYAL_GPU;
   const noFallback = process.env.LLOYAL_NO_FALLBACK === "1";
   const useLocal = process.env.LLOYAL_LOCAL === "1";
+
+  // No explicit GPU request → auto-detect an NVIDIA GPU and prefer the cuda
+  // prebuilt (hdk#20: GPU was never auto-selected, so consumers silently ran
+  // on CPU even with a capable GPU). The fallback chain below still drops to
+  // CPU if the cuda package is unavailable. Set LLOYAL_GPU=cpu to opt out.
+  if (!resolvedVariant && !useLocal && hasCudaGpu()) {
+    resolvedVariant = "cuda";
+    console.log("[lloyal.node] auto-detected NVIDIA GPU → trying cuda variant");
+  }
 
   // 0. Use local build if explicitly requested (no fallback)
   if (useLocal) {
