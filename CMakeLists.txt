@@ -263,138 +263,29 @@ endif()
 # Note: On Windows, BUILD_SHARED_LIBS=OFF (static linking), so this section is skipped.
 
 if(BUILD_SHARED_LIBS)
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:llama>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_SONAME_FILE:llama>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_LINKER_FILE:llama>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libllama to output directory"
-    )
-
-    # Copy llama-common dylib if it's built shared (b9100+ default; legacy was STATIC).
-    # lloyal.node now has a runtime dependency on @rpath/libllama-common.dylib after
-    # the upstream split into common-base (static) + common (shared).
-    get_target_property(_LLAMA_COMMON_TYPE ${LLAMA_COMMON_TARGET} TYPE)
-    if(_LLAMA_COMMON_TYPE STREQUAL "SHARED_LIBRARY")
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:${LLAMA_COMMON_TARGET}>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_SONAME_FILE:${LLAMA_COMMON_TARGET}>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_LINKER_FILE:${LLAMA_COMMON_TARGET}>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMENT "Copying lib${LLAMA_COMMON_TARGET} to output directory"
-        )
-    endif()
-
-    # Copy ggml shared libraries
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_SONAME_FILE:ggml>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_LINKER_FILE:ggml>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml to output directory"
-    )
-
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-base>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_SONAME_FILE:ggml-base>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_LINKER_FILE:ggml-base>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-base to output directory"
-    )
-
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:ggml-cpu>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_SONAME_FILE:ggml-cpu>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_LINKER_FILE:ggml-cpu>
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying libggml-cpu to output directory"
-    )
-
-    # Copy GPU backend libraries if built
-    if(TARGET ggml-metal)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:ggml-metal>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_SONAME_FILE:ggml-metal>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_LINKER_FILE:ggml-metal>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMENT "Copying libggml-metal to output directory"
-        )
-    endif()
-
-    if(TARGET ggml-cuda)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:ggml-cuda>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_SONAME_FILE:ggml-cuda>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_LINKER_FILE:ggml-cuda>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMENT "Copying libggml-cuda to output directory"
-        )
-    endif()
-
-    if(TARGET ggml-vulkan)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:ggml-vulkan>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_SONAME_FILE:ggml-vulkan>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_LINKER_FILE:ggml-vulkan>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMENT "Copying libggml-vulkan to output directory"
-        )
-    endif()
-
-    if(TARGET ggml-blas)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:ggml-blas>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_SONAME_FILE:ggml-blas>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_LINKER_FILE:ggml-blas>
-                $<TARGET_FILE_DIR:${PROJECT_NAME}>
-            COMMENT "Copying libggml-blas to output directory"
-        )
-    endif()
+    # Copy each shared lib's SONAME file (e.g. libllama.0.dylib / libggml.so.0)
+    # next to the .node so the @loader_path/$ORIGIN RPATH resolves it. ONLY the
+    # SONAME is needed: the addon's load commands reference libX.0.dylib / libX.so.0,
+    # never the linker (libX.dylib) or fully-versioned (libX.0.0.X) names (verified
+    # via `otool -L`). Copying just the SONAME also avoids tripling every lib —
+    # `copy_if_different` dereferences the SOVERSION symlinks, so emitting
+    # TARGET_FILE + SONAME + LINKER wrote three identical real files (3x566MB for
+    # libggml-cuda alone). Symlinks are intentionally avoided: they require admin /
+    # Developer Mode on Windows (see liblloyal/CMakeLists.txt). This block is
+    # Linux/macOS only (Windows links statically; SONAMEs don't apply to DLLs).
+    foreach(_lib IN ITEMS llama ${LLAMA_COMMON_TARGET} ggml ggml-base ggml-cpu ggml-metal ggml-cuda ggml-vulkan ggml-blas)
+        if(TARGET ${_lib})
+            get_target_property(_lloyal_lib_type ${_lib} TYPE)
+            if(_lloyal_lib_type STREQUAL "SHARED_LIBRARY")
+                add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_SONAME_FILE:${_lib}>
+                        $<TARGET_FILE_DIR:${PROJECT_NAME}>
+                    COMMENT "Copying ${_lib} (soname) to output directory"
+                )
+            endif()
+        endif()
+    endforeach()
 endif()
 
 # =============================================================================
