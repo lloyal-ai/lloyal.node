@@ -35,7 +35,7 @@ const DISASM_TIMEOUT_MS = 120000;
 // in. Heuristic but low-false-positive (none exist below AVX-512).
 const AVX512 = new RegExp(
   [
-    '\\bzmm[0-9]',                       // 512-bit registers
+    '\\bzmm[0-9]{1,2}\\b',               // 512-bit registers zmm0–zmm31
     '\\{%?k[0-7]\\}',                    // masked operand {k1} / {%k1}
     // k-mask ops — size suffix (b/w/d/q, or bw/wd/dq for unpck) is mandatory:
     '\\bk(?:mov|andn|and|xnor|xor|ortest|or|not|add|shiftl|shiftr|test|unpck)[bwdq]{1,2}\\b',

@@ -12,6 +12,9 @@ const { lineHasAvx512, isX64 } = require('./check-isa-floor.js');
 const positives = [
   'vpaddd %zmm1, %zmm2, %zmm3',
   'vmovdqu64 (%rax), %zmm0',
+  // 2-digit zmm registers (zmm16..zmm31) must also be caught:
+  'vpaddd %zmm16, %zmm17, %zmm18',
+  'vmovdqa64 zmm31, zmm0',
   'vaddps %zmm2, %zmm3, %zmm1 {%k1}',
   '  4a1: 62 f1 ... vaddps zmm1{k1}, zmm2, zmm3', // Intel/EVEX form
   'kmovw %k1, %eax',
