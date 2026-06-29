@@ -165,11 +165,39 @@ jobs:
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 
+      # Compiler cache: reuse object files across releases (the CUDA recompile
+      # is the long pole). Linux/macOS use it via CMAKE_*_COMPILER_LAUNCHER
+      # below; Windows needs Ninja (the default MSBuild generator ignores
+      # COMPILER_LAUNCHER) — set up next. See lloyal.node#36.
+      - name: Setup ccache
+        if: matrix.cross_compile != true
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.package }}
+          variant: ccache
+
+      # Windows native: activate MSVC + switch to Ninja so ccache takes effect
+      # and CUDA compiles in parallel. (The arm64 cross build already uses Ninja.)
+      - name: Setup MSVC dev environment (Windows native)
+        if: runner.os == 'Windows' && matrix.cross_compile != true
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Use Ninja for the Windows native build
+        if: runner.os == 'Windows' && matrix.cross_compile != true
+        shell: bash
+        run: |
+          choco install ninja -y --no-progress
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+
       - name: Build native module (Native builds)
         if: matrix.cross_compile != true
         run: npm run build
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
 
       - name: Build native module (Windows ARM64 cross-compile)
         if: runner.os == 'Windows' && matrix.cross_compile == true

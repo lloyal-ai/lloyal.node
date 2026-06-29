@@ -91,6 +91,22 @@ elseif(UNIX)
     set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE CACHE BOOL "Use install RPATH during build" FORCE)
 endif()
 
+# Pin CUDA architectures so GPU coverage is deterministic and decoupled from
+# GGML_NATIVE. ggml-cuda derives CMAKE_CUDA_ARCHITECTURES from GGML_NATIVE:
+# ON -> "native" (1 arch), OFF -> a full ~9-arch fat-binary list. Our AVX2 CPU
+# floor (scripts/build.js) sets GGML_NATIVE=OFF for x64, which would otherwise
+# expand the CUDA build ~4x. Controlled list: PTX for Turing+ (back-compat via
+# JIT) and native SASS for the common Ampere/Ada GPUs; tunable. See lloyal.node#36.
+if(GGML_CUDA AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    # 61-virtual = Pascal PTX floor (JITs forward to all newer GPUs incl. the
+    # GTX 10xx/V100 the full list covered); native SASS for the common Ampere
+    # (3080) and Ada (L4/4090); 90-virtual = Hopper+ forward PTX. 2 real archs
+    # (vs the default 3) keeps it lean. Tune for the build-time/coverage trade.
+    set(CMAKE_CUDA_ARCHITECTURES "61-virtual;86-real;89-real;90-virtual"
+        CACHE STRING "lloyal.node CUDA arch coverage")
+    message(STATUS "lloyal.node: CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
+endif()
+
 add_subdirectory(${LLAMA_CPP_DIR} llama.cpp)
 
 # MSVC C++20 char8_t workaround: llama.cpp uses u8"" literals which MSVC treats
