@@ -10,7 +10,7 @@
  * L4 rig (gpu-tests-dl) and the end-to-end run.
  */
 
-import assert from 'node:assert/strict';
+import { strict as assert } from 'node:assert';
 import { generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
