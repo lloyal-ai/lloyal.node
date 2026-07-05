@@ -364,7 +364,15 @@ export interface EnsureBackendPackOpts {
     sha256: string;
     runtimeArchive?: { url: string; sha256: string };
   };
-  /** Force-include the companion runtime archive regardless of the probe. */
+  /**
+   * Override the runtime-archive decision when the caller has ALREADY
+   * probed (harness flow: probe once for the offer UI, pass
+   * `probe.needsRuntimeArchive` here — avoids a second manifest fetch +
+   * nvidia-smi pass). `true` = include, `false` = skip, `undefined` =
+   * probe internally. A wrong `false` on a runtime-skewed box yields a
+   * pack whose CUDA module cannot dlopen — caught LOUDLY by loadBinary's
+   * device assertion, never a silent CPU fallback.
+   */
   includeRuntime?: boolean;
 }
 
@@ -429,7 +437,20 @@ export async function ensureBackendPack(opts: EnsureBackendPackOpts = {}): Promi
 
     // Atomic publish of the cache: rename, then marker (marker-last means a
     // crash anywhere before this line leaves an invisible, re-acquirable dir).
-    fs.renameSync(staging, dir);
+    try {
+      fs.renameSync(staging, dir);
+    } catch (renameErr) {
+      // N harnesses cold-starting on one box can race this install (the
+      // shared cache invites exactly that). If another process won and
+      // completed, use its pack; a dir without a marker (winner mid-flight
+      // or crashed) stays a hard error — never guess at a partial install.
+      const winner = resolveBackendPackDirSync(version);
+      if (winner) {
+        fs.rmSync(staging, { recursive: true, force: true });
+        return winner;
+      }
+      throw renameErr;
+    }
     fs.writeFileSync(path.join(dir, MARKER_FILE), JSON.stringify(markerBody, null, 2));
     return dir;
   } catch (err) {

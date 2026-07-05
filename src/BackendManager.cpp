@@ -16,16 +16,16 @@ BackendManager* BackendManager::instance_ = nullptr;
 
 #ifdef LLOYAL_BACKEND_DL
 namespace {
-// File-local anchor whose address dladdr resolves to THIS shared object
-// (the addon .node file) — not a member function, whose pointer-to-void
-// cast is UB-adjacent on some toolchains.
-void backend_dir_anchor() {}
+// File-local OBJECT anchor whose address dladdr resolves to THIS shared
+// object (the addon .node file). An object, not a function: function
+// pointer → void* conversion is only conditionally-supported in standard
+// C++, while an object pointer converts implicitly with no cast at all.
+const int backend_dir_anchor = 0;
 } // namespace
 
 void BackendManager::resolveBackends() {
   Dl_info info;
-  if (dladdr(reinterpret_cast<void*>(&backend_dir_anchor), &info) == 0 ||
-      info.dli_fname == nullptr) {
+  if (dladdr(&backend_dir_anchor, &info) == 0 || info.dli_fname == nullptr) {
     // Loud, not silent: a DL build that can't find its own directory would
     // otherwise let llama_backend_init discover from exe-dir/cwd — the
     // wrong-search-path landmine this function exists to defuse.
