@@ -13,6 +13,7 @@
 import { strict as assert } from 'node:assert';
 import { generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
 import * as fs from 'node:fs';
+import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
@@ -22,6 +23,7 @@ import {
   backendPackCacheDir,
   detectCudaRuntime,
   detectGpu,
+  ensureBackendPack,
   extractTarZst,
   probeBackendPack,
   resolveBackendPackDirSync,
@@ -294,6 +296,81 @@ async function main(): Promise<void> {
       extractTarZst(makeTarZst([tarEntry('big', Buffer.alloc(4096, 7))], 2048), dest),
       /Truncated/,
     );
+  });
+
+  await test('finish() rejects trailing partial headers and dangling long-names', async () => {
+    // Complete entry followed by nonzero garbage where a header/terminator
+    // should be — previously accepted silently, dropping trailing entries.
+    const partialHeader = Buffer.concat([
+      ...tarEntry('ok.so', Buffer.from('fine')),
+      Buffer.alloc(100, 0x41),
+    ]);
+    const f1 = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pack-')), 'p.tar.zst');
+    fs.writeFileSync(f1, zlib.zstdCompressSync(partialHeader));
+    await assert.rejects(
+      extractTarZst(f1, fs.mkdtempSync(path.join(os.tmpdir(), 'extract-'))),
+      /trailing partial header/,
+    );
+
+    // GNU long-name blocks with the named entry cut off entirely.
+    const nameBuf = Buffer.from('x'.repeat(150) + '\0', 'utf8');
+    const dangling = Buffer.concat([tarHeader('././@LongLink', nameBuf.length, 'L'), pad512(nameBuf)]);
+    const f2 = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pack-')), 'd.tar.zst');
+    fs.writeFileSync(f2, zlib.zstdCompressSync(dangling));
+    await assert.rejects(
+      extractTarZst(f2, fs.mkdtempSync(path.join(os.tmpdir(), 'extract-'))),
+      /long-name without its entry/,
+    );
+  });
+
+  await test('verifyPlatformSignature returns false (not throw) on malformed key material', () => {
+    const bytes = new TextEncoder().encode('{}');
+    assert.equal(verifyPlatformSignature(bytes, 'AAAA', new Uint8Array(7)), false);
+    assert.equal(verifyPlatformSignature(bytes, 'AAAA', new Uint8Array(0)), false);
+  });
+
+  console.log('ensureBackendPack (pinned mode, local http)');
+
+  await test('full pipeline: download → sha256 → extract → marker → resolve; remnant recovery; hash mismatch loud', async () => {
+    const archive = fs.readFileSync(
+      makeTarZst([tarEntry('lloyal.node', Buffer.from('fake-addon')), tarEntry('libggml-cuda.so', Buffer.from('module'))]),
+    );
+    const sha = createHash('sha256').update(archive).digest('hex');
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-length': String(archive.length) });
+      res.end(archive);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${port}/pack.tar.zst`;
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-'));
+    const prev = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = tmp;
+    try {
+      const version = '9.9.9-pipeline';
+      const dir = await ensureBackendPack({ version, pinned: { archiveUrl: url, sha256: sha } });
+      assert.equal(fs.readFileSync(path.join(dir, 'lloyal.node'), 'utf8'), 'fake-addon');
+      assert.equal(resolveBackendPackDirSync(version), dir);
+
+      // Crash-between-rename-and-marker remnant: marker gone, dir present —
+      // the next ensure must reclaim and reinstall, not hard-fail.
+      fs.unlinkSync(path.join(dir, '.lloyal-pack.json'));
+      assert.equal(resolveBackendPackDirSync(version), null);
+      const dir2 = await ensureBackendPack({ version, pinned: { archiveUrl: url, sha256: sha } });
+      assert.equal(resolveBackendPackDirSync(version), dir2);
+
+      // Tampered bytes (wrong pin) fail loud and leave no visible cache.
+      await assert.rejects(
+        ensureBackendPack({ version: '9.9.9-tampered', pinned: { archiveUrl: url, sha256: 'f'.repeat(64) } }),
+        /sha256 mismatch/,
+      );
+      assert.equal(resolveBackendPackDirSync('9.9.9-tampered'), null);
+    } finally {
+      if (prev === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = prev;
+      server.close();
+    }
   });
 
   console.log(`\nPASSED: ${passed}`);

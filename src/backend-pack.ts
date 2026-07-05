@@ -396,6 +396,15 @@ export async function ensureBackendPack(opts: EnsureBackendPackOpts = {}): Promi
   if (existing) return existing;
 
   const dir = backendPackCacheDir(version);
+  // A destination dir WITHOUT a marker at this point is a crashed install
+  // (the only live-racer window is the instant between a winner's rename
+  // and its marker write, and a full download cannot fit inside it) —
+  // remove the remnant so a crash stays re-acquirable, per the design's
+  // crash-anywhere contract. The rename-failure path below stays strict:
+  // mid-download races resolve to the winner or a hard error, never a guess.
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   const parent = path.dirname(dir);
   fs.mkdirSync(parent, { recursive: true });
   const staging = fs.mkdtempSync(path.join(parent, `.staging-${version}-`));
@@ -438,8 +447,11 @@ export async function ensureBackendPack(opts: EnsureBackendPackOpts = {}): Promi
       fs.unlinkSync(archivePath);
     }
 
-    // Atomic publish of the cache: rename, then marker (marker-last means a
-    // crash anywhere before this line leaves an invisible, re-acquirable dir).
+    // Publish the cache: rename, then marker. A crash before the rename
+    // leaves only invisible staging; a crash between rename and marker
+    // leaves a marker-less dir that resolveBackendPackDirSync ignores and
+    // the remnant sweep above reclaims on the next ensure — re-acquirable
+    // either way, visible to loadBinary only once the marker lands.
     try {
       fs.renameSync(staging, dir);
     } catch (renameErr) {
@@ -541,10 +553,22 @@ class TarExtractor {
 
   finish(): void {
     this.drain();
+    // EOF is only clean when nothing is mid-flight: no open file body, no
+    // padding/pax bytes still owed, no dangling GNU long-name, and any
+    // leftover buffer is all-zero terminator blocks. Anything else is a
+    // truncated archive that would otherwise silently drop trailing entries.
     if (this.current) {
       throw new Error('[lloyal.node] Truncated archive: file body ended mid-entry.');
     }
-    // Trailing zero blocks may remain in the buffer — that's the terminator.
+    if (this.skip > 0) {
+      throw new Error('[lloyal.node] Truncated archive: ended inside entry padding.');
+    }
+    if (this.pendingLongName !== null) {
+      throw new Error('[lloyal.node] Truncated archive: GNU long-name without its entry.');
+    }
+    if (!this.buffer.every((b) => b === 0)) {
+      throw new Error('[lloyal.node] Truncated archive: trailing partial header.');
+    }
   }
 
   /** Best-effort fd cleanup on abort paths; safe to call twice. */
@@ -571,7 +595,16 @@ class TarExtractor {
       if (this.current) {
         const take = Math.min(this.current.remaining, this.buffer.length);
         if (take > 0) {
-          fs.writeSync(this.current.fd, this.buffer.subarray(0, take));
+          // write(2) may legally return short counts — loop to completion
+          // so `remaining` never over-decrements against bytes on disk.
+          let written = 0;
+          while (written < take) {
+            const n = fs.writeSync(this.current.fd, this.buffer.subarray(written, take));
+            if (n <= 0) {
+              throw new Error('[lloyal.node] Extraction write made no progress (disk full?).');
+            }
+            written += n;
+          }
           this.buffer = this.buffer.subarray(take);
           this.current.remaining -= take;
         }

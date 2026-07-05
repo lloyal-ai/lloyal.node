@@ -43,11 +43,17 @@ export function verifyPlatformSignature(
   signatureB64: string,
   rawPublicKey: Uint8Array = LLOYAL_PLATFORM_KEY_2026_Q2,
 ): boolean {
-  const spki = Buffer.concat([ED25519_SPKI_PREFIX, rawPublicKey]);
-  const key = createPublicKey({ key: spki, format: 'der', type: 'spki' });
-  const signature = Buffer.from(signatureB64, 'base64');
-  if (signature.length !== 64) return false;
-  return cryptoVerify(null, bytes, key, signature);
+  try {
+    const spki = Buffer.concat([ED25519_SPKI_PREFIX, rawPublicKey]);
+    const key = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    const signature = Buffer.from(signatureB64, 'base64');
+    if (signature.length !== 64) return false;
+    return cryptoVerify(null, bytes, key, signature);
+  } catch {
+    // Malformed key/signature material is a failed verification, not an
+    // exception — the docstring's boolean contract holds for any input.
+    return false;
+  }
 }
 
 /** Lowercase-hex sha256 of a byte buffer. */

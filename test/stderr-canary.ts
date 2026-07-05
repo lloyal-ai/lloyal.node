@@ -31,7 +31,13 @@ async function main(): Promise<void> {
   let stderr = '';
   child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
   child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
-  const exitCode: number | null = await new Promise((resolve) => child.on('close', resolve));
+  // 'error' fires INSTEAD of 'close' when the spawn itself fails (e.g.
+  // npx missing) — without this the promise never settles and the test
+  // hangs to the CI timeout.
+  const exitCode: number | null = await new Promise((resolve, reject) => {
+    child.on('close', resolve);
+    child.on('error', reject);
+  });
 
   const complete = stdout.includes('CANARY_RUN_COMPLETE');
   const leaked = stderr.includes(CANARY);
