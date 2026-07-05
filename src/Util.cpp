@@ -1,4 +1,6 @@
 #include "Util.hpp"
+#include "BackendManager.hpp"
+#include <ggml-backend.h>
 #include <md4c.h>
 #include <algorithm>
 #include <climits>
@@ -125,6 +127,44 @@ static int on_text(MD_TEXTTYPE /* type */, const MD_CHAR* text, MD_SIZE size, vo
 
 void Util::Init(Napi::Env env, Napi::Object exports) {
   exports.Set("parseMarkdown", Napi::Function::New(env, ParseMarkdown));
+  exports.Set("listDevices", Napi::Function::New(env, ListDevices));
+}
+
+// Enumerate the backend devices ggml registered. Works in both flavors:
+// statically-linked backends register inside llama_backend_init(); the
+// BACKEND_DL flavor's modules are dlopen'd by BackendManager just before
+// it. JS uses this to assert a requested GPU backend actually registered —
+// ggml skips broken modules SILENTLY in release builds, so without this
+// check a missing CUDA runtime degrades to CPU with no error anywhere.
+Napi::Value Util::ListDevices(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  // Same init path CreateContext takes (thread-safe, once per process).
+  BackendManager::ensureInitialized();
+
+  size_t count = ggml_backend_dev_count();
+  Napi::Array result = Napi::Array::New(env, count);
+  for (size_t i = 0; i < count; i++) {
+    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+    Napi::Object obj = Napi::Object::New(env);
+    obj.Set("name", Napi::String::New(env, ggml_backend_dev_name(dev)));
+    const char* type;
+    switch (ggml_backend_dev_type(dev)) {
+      case GGML_BACKEND_DEVICE_TYPE_CPU:
+        type = "cpu";
+        break;
+      case GGML_BACKEND_DEVICE_TYPE_GPU:
+      case GGML_BACKEND_DEVICE_TYPE_IGPU:
+        type = "gpu";
+        break;
+      default:
+        type = "accel";
+        break;
+    }
+    obj.Set("type", Napi::String::New(env, type));
+    result.Set(static_cast<uint32_t>(i), obj);
+  }
+  return result;
 }
 
 Napi::Value Util::ParseMarkdown(const Napi::CallbackInfo& info) {

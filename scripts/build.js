@@ -18,8 +18,46 @@ const os = require('os');
 const PLATFORM = process.platform;
 const gpuBackend = process.env.LLOYAL_GPU?.toLowerCase();
 
+// --- BACKEND_DL flavor (LLOYAL_BACKEND_DL=1) ---
+// The additive R2-channel build: backends become dlopen-able MODULE libs
+// selected at runtime by ggml (dlopen + score), with every CUDA arch and
+// every CPU variant in one pack. Never published to npm (lloyal.node#38's
+// ~384 MiB ceiling is the whole reason this flavor exists). linux-x64 +
+// CUDA only for now — arm64 (GB200/GB10 hosts) is a named follow-on.
+const backendDl = process.env.LLOYAL_BACKEND_DL === '1';
+if (backendDl) {
+  const targetArchDl = (process.env.ARCH || process.arch).toLowerCase();
+  if (gpuBackend !== 'cuda' || PLATFORM !== 'linux' || (targetArchDl !== 'x64' && targetArchDl !== 'x86_64')) {
+    console.error(
+      `[lloyal.node] LLOYAL_BACKEND_DL=1 requires LLOYAL_GPU=cuda on linux-x64 ` +
+        `(got gpu=${gpuBackend ?? 'unset'}, platform=${PLATFORM}, arch=${targetArchDl}).`,
+    );
+    process.exit(1);
+  }
+}
+
+// Explicit CUDA arch list for the DL flavor — mirror-and-gate: pure
+// inheritance of ggml's derivation is unreachable (both the root pin and
+// ggml's derivation are NOT-DEFINED-gated), so scripts/dl-archs.js holds an
+// explicit mirror (+ the documented 100a-real extension), asserted against
+// the built fatbin per-arch in CI (create-dl-pack.js) and drift-checked on
+// every llama.cpp sync (--check-archs).
+const DL_CUDA_ARCHS = require('./dl-archs').DL_CUDA_ARCHS.join(';');
+
 // Build cmake-js command with appropriate flags
 const cmakeFlags = [];
+
+if (backendDl) {
+  cmakeFlags.push(
+    '--CDLLOYAL_BACKEND_DL=ON',
+    '--CDGGML_BACKEND_DL=ON',
+    '--CDBUILD_SHARED_LIBS=ON',
+    '--CDGGML_CPU_ALL_VARIANTS=ON',
+    `"--CDCMAKE_CUDA_ARCHITECTURES=${DL_CUDA_ARCHS}"`,
+  );
+  console.log('[lloyal.node] Flavor: BACKEND_DL (runtime backend selection)');
+  console.log(`[lloyal.node] CUDA archs: ${DL_CUDA_ARCHS}`);
+}
 
 if (gpuBackend === 'cuda') {
   cmakeFlags.push('--CDGGML_CUDA=ON');
@@ -56,7 +94,14 @@ if (gpuBackend === 'cuda') {
 // GGML_NATIVE_DEFAULT) — no -march=native, nothing to pin.
 // See https://github.com/lloyal-ai/hdk/issues/20.
 const targetArch = (process.env.ARCH || process.arch).toLowerCase();
-if (targetArch === 'x64' || targetArch === 'x86_64') {
+if (backendDl) {
+  // ALL_VARIANTS owns per-variant ISA flags (each variant resets the full
+  // x86 feature set — a global GGML_AVX2 would be ignored, but passing it
+  // anyway invites confusion; the baseline x64 variant MUST stay
+  // featureless so it always scores 1). GGML_NATIVE stays OFF.
+  cmakeFlags.push('--CDGGML_NATIVE=OFF');
+  console.log('[lloyal.node] CPU ISA baseline: ALL_VARIANTS (per-variant, baseline x64 featureless)');
+} else if (targetArch === 'x64' || targetArch === 'x86_64') {
   cmakeFlags.push('--CDGGML_NATIVE=OFF', '--CDGGML_AVX2=ON');
   console.log('[lloyal.node] CPU ISA baseline: AVX2 (x64 portable floor)');
 } else {

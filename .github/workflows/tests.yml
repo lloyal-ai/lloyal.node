@@ -62,6 +62,17 @@ jobs:
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 
+      # No GPU, no network, no native build needed — verify chain, probe
+      # gates (the A100/H100/L4/B200 matrix runs on linux-x64 runners),
+      # cache resolution, and the pack extractor. Plus the arch-mirror
+      # drift gate: fails when a llama.cpp sync changes ggml's CUDA arch
+      # derivation without scripts/dl-archs.js being reconciled.
+      - name: Backend-pack unit tests + arch drift gate
+        if: runner.os == 'Linux'
+        run: |
+          npm run test:unit
+          node scripts/create-dl-pack.js --check-archs
+
       - name: Build from submodules
         run: npm run build
         env:

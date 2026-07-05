@@ -10,6 +10,7 @@ public:
 
 private:
   static Napi::Value ParseMarkdown(const Napi::CallbackInfo& info);
+  static Napi::Value ListDevices(const Napi::CallbackInfo& info);
 };
 
 } // namespace liblloyal_node

@@ -166,6 +166,19 @@ set(ADDON_SOURCES
 
 add_library(${PROJECT_NAME} MODULE ${ADDON_SOURCES} ${CMAKE_JS_SRC})
 
+# BACKEND_DL flavor (set by scripts/build.js under LLOYAL_BACKEND_DL=1):
+# compiles BackendManager's resolveBackends seam — dlopen backend modules
+# from the addon's own directory strictly BEFORE llama_backend_init(). The
+# npm flavor never defines this; its statically-registered backends need no
+# discovery. GGML_BACKEND_DL/BUILD_SHARED_LIBS/GGML_CPU_ALL_VARIANTS and
+# the explicit CMAKE_CUDA_ARCHITECTURES list are all passed by build.js —
+# the explicit arch pass bypasses the interim pin above by construction
+# (it fires only when nothing is defined).
+option(LLOYAL_BACKEND_DL "Build the BACKEND_DL flavor (runtime dlopen backend selection)" OFF)
+if(LLOYAL_BACKEND_DL)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE LLOYAL_BACKEND_DL)
+endif()
+
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_JS_INC}
