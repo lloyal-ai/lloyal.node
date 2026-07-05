@@ -21,6 +21,7 @@
     "docs": "npx typedoc",
     "test": "npm run test:integration",
     "test:unit": "npx tsx test/backend-pack-unit.ts",
+    "test:canary": "npx tsx test/stderr-canary.ts",
     "test:integration": "npx tsx test/integration.ts",
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
