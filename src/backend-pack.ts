@@ -26,6 +26,9 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import * as zlib from 'node:zlib';
 
 import { sha256Hex, verifyPlatformSignature } from './verify';
@@ -49,7 +52,7 @@ function platformTag(): BackendPackPlatform | null {
   return process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64-dl' : null;
 }
 
-/** `~/.cache/lloyal/backends/<version>-<platform>/` (sibling of the models cache). */
+/** `~/.cache/lloyal/backends/<version>-<platform>-<arch>/` (sibling of the models cache). */
 export function backendPackCacheDir(version = packageVersion()): string {
   const cacheRoot =
     process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
@@ -473,24 +476,20 @@ async function downloadWithHash(
   const total = Number(res.headers.get('content-length') ?? 0);
   const hash = createHash('sha256');
   let got = 0;
-  const out = fs.createWriteStream(dest);
-  const reader = res.body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      hash.update(value);
-      got += value.byteLength;
-      onProgress?.(got, total, label);
-      if (!out.write(value)) {
-        await new Promise<void>((resolve) => out.once('drain', resolve));
-      }
-    }
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      out.end((e?: Error | null) => (e ? reject(e) : resolve()));
-    });
-  }
+  const meter = new PassThrough();
+  meter.on('data', (chunk: Buffer) => {
+    hash.update(chunk);
+    got += chunk.byteLength;
+    onProgress?.(got, total, label);
+  });
+  // pipeline owns backpressure, error propagation (incl. write-stream I/O
+  // failures like disk-full), and teardown of every stage on failure —
+  // no hand-rolled drain-wait that could hang after an 'error' event.
+  await pipeline(
+    Readable.fromWeb(res.body as WebReadableStream<Uint8Array>),
+    meter,
+    fs.createWriteStream(dest),
+  );
   const actual = hash.digest('hex');
   if (actual !== expectedSha256) {
     throw new Error(
