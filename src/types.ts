@@ -46,10 +46,27 @@ export interface LoadOptions {
 }
 
 /**
+ * A backend device registered with ggml after backend initialization.
+ *
+ * @category Core
+ */
+export interface BackendDevice {
+  name: string;
+  type: 'cpu' | 'gpu' | 'accel';
+}
+
+/**
  * Native binding interface — what loadBinary() returns
  *
  * @category Core
  */
 export interface NativeBinding {
   createContext(options: ContextOptions): Promise<SessionContext>;
+  /**
+   * Enumerate the backend devices ggml registered (initializes the backend
+   * on first call). `loadBinary` uses it to assert a requested GPU backend
+   * actually registered — the fail-loud counter to ggml's silent
+   * module-skip in release builds. Optional: absent on older prebuilts.
+   */
+  listDevices?(): BackendDevice[];
 }

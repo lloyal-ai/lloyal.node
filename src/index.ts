@@ -29,7 +29,10 @@
  * ```
  */
 
-import type { GpuVariant, LoadOptions, NativeBinding } from "./types";
+import * as path from "node:path";
+
+import { resolveBackendPackDirSync } from "./backend-pack";
+import type { BackendDevice, GpuVariant, LoadOptions, NativeBinding } from "./types";
 
 import type { ContextOptions, SessionContext } from "@lloyal-labs/sdk";
 
@@ -101,9 +104,21 @@ const tryLoadPackage = (
  * **Environment variables:**
  * - `LLOYAL_LOCAL=1` — Force local build only; throws if not found
  *   (use during development to test local C++ changes)
+ * - `LLOYAL_BACKEND_DIR=<dir>` — Load the BACKEND_DL flavor addon from this
+ *   directory ONLY; throws on any failure (provisioner/dev override —
+ *   mirrors `LLOYAL_LOCAL`'s exclusivity). ggml dlopens backend modules
+ *   from the same directory at init.
  * - `LLOYAL_GPU=cuda|vulkan` — Request GPU variant (equivalent to `variant` param)
  * - `LLOYAL_NO_FALLBACK=1` — Disable silent CPU fallback; throws if GPU
  *   variant fails (use in CI to catch missing runtime libraries)
+ *
+ * **Backend pack resolution (BACKEND_DL flavor):** before the npm chain,
+ * `loadBinary` checks (a) `LLOYAL_BACKEND_DIR`, then (b) the shared cache
+ * (`~/.cache/lloyal/backends/<version>-<platform>-<arch>/`, populated only
+ * by explicit consent via {@link ensureBackendPack} or by a provisioner —
+ * its existence IS the consent record). Both are exclusive: a resolution
+ * failure throws and never falls through — a corrupt pack must not
+ * silently degrade to the npm CPU package.
  *
  * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
  * @returns Native binary module with createContext method
@@ -140,6 +155,30 @@ export const loadBinary = (variant?: GpuVariant): NativeBinding => {
     }
   }
 
+  // 0.5. Explicit backend-pack pointer — exclusive, fail loud (the
+  // LLOYAL_LOCAL pattern): a provisioner or dev that names a dir gets
+  // exactly that dir or an error, never a silent substitute.
+  const backendDir = process.env.LLOYAL_BACKEND_DIR;
+  if (backendDir) {
+    return assertRequestedDevices(
+      loadPackAddon(backendDir, `LLOYAL_BACKEND_DIR=${backendDir}`),
+      resolvedVariant,
+    );
+  }
+
+  // 0.6. Verified backend-pack cache for THIS lloyal.node version. The
+  // cache only exists through explicit consent (ensureBackendPack) or
+  // explicit provisioning, so preferring it honors a prior decision. A
+  // present-but-invalid cache throws inside the resolver; a load failure
+  // of a valid cache throws here — no fallthrough to npm either way.
+  const packDir = resolveBackendPackDirSync();
+  if (packDir) {
+    return assertRequestedDevices(
+      loadPackAddon(packDir, `backend pack cache ${packDir}`),
+      resolvedVariant,
+    );
+  }
+
   // 1. Try requested variant (if specified)
   if (resolvedVariant && resolvedVariant !== "default") {
     const pkgName = getPlatformPackageName(resolvedVariant);
@@ -173,6 +212,50 @@ export const loadBinary = (variant?: GpuVariant): NativeBinding => {
     `No lloyal.node binary found for ${process.platform}-${process.arch}. ` +
       `Tried: ${resolvedVariant ? getPlatformPackageName(resolvedVariant) + ", " : ""}${defaultPkg}`,
   );
+};
+
+/** Require the DL-flavor addon out of a resolved pack dir; loud on failure. */
+const loadPackAddon = (dir: string, sourceLabel: string): NativeBinding => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require(path.join(dir, "lloyal.node")) as NativeBinding;
+    if (!mod || typeof mod.createContext !== "function") {
+      throw new Error("loaded module is missing createContext");
+    }
+    return mod;
+  } catch (e) {
+    throw new Error(
+      `[lloyal.node] Failed to load backend pack addon from ${sourceLabel}: ` +
+        `${(e as Error).message}. Refusing to fall back — delete the pack ` +
+        `directory (or unset LLOYAL_BACKEND_DIR) to use the npm packages.`,
+    );
+  }
+};
+
+/**
+ * Post-load fail-loud assertion: a requested GPU backend must actually
+ * have registered a device. In DL builds ggml SKIPS broken modules
+ * silently in release builds (missing CUDA runtime, ABI mismatch) and
+ * would proceed on CPU — the exact silent-fallback class LLOYAL_NO_FALLBACK
+ * exists to kill, one layer down.
+ */
+const assertRequestedDevices = (
+  binding: NativeBinding,
+  requestedVariant: string | undefined,
+): NativeBinding => {
+  const wantsGpu = requestedVariant === "cuda" || requestedVariant === "vulkan";
+  if (!wantsGpu || typeof binding.listDevices !== "function") return binding;
+  const devices = binding.listDevices();
+  if (!devices.some((d: BackendDevice) => d.type === "gpu")) {
+    throw new Error(
+      `[lloyal.node] GPU variant "${requestedVariant}" was requested but no GPU ` +
+        `device registered after backend load (devices: ` +
+        `${devices.map((d) => `${d.name}:${d.type}`).join(", ") || "none"}). ` +
+        `Likely a missing/skewed CUDA runtime — the backend module was ` +
+        `silently skipped at dlopen. Refusing to run on CPU.`,
+    );
+  }
+  return binding;
 };
 
 // Default binary (loaded lazily on first use)
@@ -334,5 +417,21 @@ export type {
   SpawnSpec,
 } from "@lloyal-labs/lloyal-agents";
 
+// ── Backend pack (BACKEND_DL flavor acquisition) ─────────────────
+export {
+  ensureBackendPack,
+  probeBackendPack,
+  resolveBackendPackDirSync,
+  backendPackCacheDir,
+} from "./backend-pack";
+export type {
+  BackendPackManifest,
+  BackendPackProbe,
+  BackendPackPlatform,
+  EnsureBackendPackOpts,
+  ArchiveRef,
+  GpuInfo,
+} from "./backend-pack";
+
 // ── Native-only types (stay in lloyal.node) ──────────────────────
-export type { GpuVariant, LoadOptions, NativeBinding } from "./types";
+export type { BackendDevice, GpuVariant, LoadOptions, NativeBinding } from "./types";

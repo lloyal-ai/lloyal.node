@@ -62,6 +62,18 @@ jobs:
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 
+      # No GPU, no network, no native build needed — verify chain, probe
+      # gates (the A100/H100/L4/B200 matrix runs on linux-x64 runners),
+      # cache resolution, and the pack extractor. Plus the arch-mirror
+      # drift gate: fails when a llama.cpp sync changes ggml's CUDA arch
+      # derivation without scripts/dl-archs.js being reconciled.
+      - name: Backend-pack unit tests + arch drift gate + stderr allowlist
+        if: runner.os == 'Linux'
+        run: |
+          npm run test:unit
+          node scripts/create-dl-pack.js --check-archs
+          node scripts/check-stderr-allowlist.js
+
       - name: Build from submodules
         run: npm run build
         env:
@@ -89,6 +101,16 @@ jobs:
         if: runner.os != 'Windows'
         run: npm run test:integration
         timeout-minutes: 10
+        env:
+          LLOYAL_LOCAL: '1'
+
+      # Runtime half of the boot-only-logging invariant: real inference in
+      # a child process, prompt canary must never reach stderr (covers the
+      # addon, liblloyal, AND llama.cpp's logger — anything writing fd 2).
+      - name: Stderr egress canary
+        if: runner.os != 'Windows'
+        run: npm run test:canary
+        timeout-minutes: 5
         env:
           LLOYAL_LOCAL: '1'
 

@@ -31,12 +31,34 @@ private:
   /**
    * Private constructor - initializes backend and logging
    * Called exactly once by ensureInitialized()
+   *
+   * BACKEND_DL flavor: resolveBackends() MUST run before
+   * llama_backend_init() — init auto-triggers ggml's backend discovery
+   * over the WRONG search paths (the node executable's dir + cwd) whenever
+   * the registry is empty. Loading from the addon's own directory first
+   * leaves the registry populated, so init performs no discovery of its
+   * own. std::call_once bakes the module set once per process, which is
+   * what keeps ModelRegistry's (path, n_gpu_layers, use_mmap) cache key
+   * sufficient — backends are immutable for the process lifetime.
    */
   BackendManager() {
+#ifdef LLOYAL_BACKEND_DL
+    resolveBackends();
+#endif
     llama_backend_init();
     common_log_set_verbosity_thold(LOG_DEFAULT_LLAMA);
     llama_log_set(common_log_default_callback, nullptr);
   }
+
+#ifdef LLOYAL_BACKEND_DL
+  /**
+   * dlopen + score every backend module sitting BESIDE this addon binary
+   * (dladdr self-location). The pack ships modules next to lloyal.node, so
+   * "selection = which addon you require" — zero JS→native plumbing.
+   * Implemented in BackendManager.cpp.
+   */
+  static void resolveBackends();
+#endif
 
   /**
    * Destructor cleans up backend
