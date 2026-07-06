@@ -455,10 +455,19 @@ jobs:
       - name: Upload archives to R2 (presigned)
         id: upload
         run: |
-          if [ -z "$CF_ACCESS_CLIENT_ID" ]; then
+          # Three-state gate: both secrets absent = pre-activation, degrade
+          # to build+gates with a notice. Exactly ONE set = someone tried
+          # to activate the channel and misconfigured it — fail loud and
+          # named, never degrade (a silent skip would hide a typo'd secret
+          # behind green releases indefinitely).
+          if [ -z "$CF_ACCESS_CLIENT_ID" ] && [ -z "$CF_ACCESS_CLIENT_SECRET" ]; then
             echo "::notice::binaries-channel service token not configured — skipping upload (build+gates still validated)"
             echo "uploaded=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ -z "$CF_ACCESS_CLIENT_ID" ] || [ -z "$CF_ACCESS_CLIENT_SECRET" ]; then
+            echo "::error::partial binaries-channel config — exactly one of CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET is set; set both (activate) or neither (skip)"
+            exit 1
           fi
           VERSION=$(node -p "require('./package.json').version")
           presign_and_put () {
