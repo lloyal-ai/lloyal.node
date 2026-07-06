@@ -132,3 +132,30 @@ try {
   console.error('[lloyal.node] ❌ Build failed');
   process.exit(1);
 }
+
+if (backendDl) {
+  // The DL flavor's shared objects (libggml-* modules, libllama.so*) link
+  // into build/bin — ggml owns that output directory. Both the pack
+  // script and the dladdr load model expect every module BESIDE the addon
+  // in build/Release, so copy them over (copyFileSync follows symlinks,
+  // materializing linker-name → SONAME chains as regular files).
+  const fs = require('fs');
+  const path = require('path');
+  const binDir = path.join(__dirname, '..', 'build', 'bin');
+  const releaseDir = path.join(__dirname, '..', 'build', 'Release');
+  if (!fs.existsSync(binDir)) {
+    console.error(`[lloyal.node] DL: expected module output dir missing: ${binDir}`);
+    process.exit(1);
+  }
+  let copied = 0;
+  for (const f of fs.readdirSync(binDir)) {
+    if (!/\.so(\.\d+)*$/.test(f)) continue;
+    fs.copyFileSync(path.join(binDir, f), path.join(releaseDir, f));
+    copied++;
+  }
+  console.log(`[lloyal.node] DL: copied ${copied} shared objects build/bin → build/Release`);
+  if (copied === 0) {
+    console.error('[lloyal.node] DL: no .so modules in build/bin — the pack would be empty');
+    process.exit(1);
+  }
+}

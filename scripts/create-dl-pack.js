@@ -128,7 +128,14 @@ const mtimeEpoch = execSync('git log -1 --format=%ct', { cwd: ROOT, encoding: 'u
 const cudaModule = fs
   .readdirSync(BUILD_DIR)
   .find((f) => /^libggml-cuda.*\.so$/.test(f));
-if (!cudaModule) fail(`no libggml-cuda*.so module in ${BUILD_DIR}`);
+if (!cudaModule) {
+  const sos = fs.readdirSync(BUILD_DIR).filter((f) => /\.so(\.\d+)*$/.test(f));
+  fail(
+    `no libggml-cuda*.so module in ${BUILD_DIR} — found ${sos.length} .so file(s)` +
+      (sos.length ? `: ${sos.slice(0, 10).join(', ')}` : '') +
+      ' (DL modules link into build/bin; scripts/build.js copies them to build/Release post-build)',
+  );
+}
 const cudaModulePath = path.join(BUILD_DIR, cudaModule);
 
 const listElf = execSync(`cuobjdump --list-elf ${JSON.stringify(cudaModulePath)}`, {
