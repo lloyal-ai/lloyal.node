@@ -563,7 +563,7 @@ jobs:
           IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:${{ github.sha }}-dl"
           docker build -f ci/Dockerfile.dl-tests -t "$IMAGE" .
           docker push "$IMAGE"
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Deploy and run DL GPU tests
         run: bash ci/deploy-gpu-tests.sh
@@ -597,6 +597,10 @@ jobs:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
+          # Default run: shell is `bash -e` WITHOUT pipefail — a failed curl
+          # would feed empty input to the trailing jq, which exits 0, and
+          # the SIGNING act would report success without publishing.
+          set -o pipefail
           VERSION="${{ needs.build-dl-flavor.outputs.version }}"
           jq -n --arg v "$VERSION" --slurpfile m dl-manifest/manifest.json \
             '{version: $v, platform: "linux-x64-dl", manifest: $m[0]}' \
