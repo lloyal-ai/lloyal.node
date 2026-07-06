@@ -583,7 +583,12 @@ jobs:
 
       - name: Compile TypeScript (src + tests)
         run: |
-          npm ci --ignore-scripts
+          # npm install, NOT npm ci: at gate time this version's platform
+          # packages aren't on the registry yet (publish runs after), so the
+          # lockfile can only hold stubs for them and npm ci's sync check
+          # rejects it for EVERY new release — structurally, not incidentally.
+          # Matches gpu-test.yml and every other job in this workflow.
+          npm install --ignore-scripts
           npm run build:ts
           npm run build:test
 
