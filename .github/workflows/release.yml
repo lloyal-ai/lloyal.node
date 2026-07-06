@@ -424,13 +424,31 @@ jobs:
         run: npm install --ignore-scripts
 
       - name: Build BACKEND_DL flavor
-        run: npm run build
+        # Log to a file so the collision gate below can inspect it; pipefail
+        # keeps the build's own exit code authoritative through the tee.
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee dl-build.log
         env:
           LLOYAL_GPU: cuda
           LLOYAL_BACKEND_DL: '1'
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+
+      # nvcc reports a colliding flag (same option passed twice, last wins)
+      # as a WARNING and proceeds — which is how the v3.1.1 fix shipped
+      # silently overridden (--compress-mode passed by us AND by ggml's
+      # GGML_CUDA_COMPRESSION_MODE machinery). Any redefinition means some
+      # build flag is not what we think it is: fail loud, immediately.
+      - name: Gate — no nvcc flag collisions
+        run: |
+          if grep -n "incompatible redefinition" dl-build.log; then
+            echo "::error::nvcc flag redefinition detected — a CUDA build flag is being silently overridden"
+            exit 1
+          fi
+          echo "no nvcc flag collisions"
 
       # Per-arch INDEPENDENT gates (cuobjdump SASS + PTX asserts, CPU
       # variant count, arch-mirror drift) + deterministic pack + manifest.
