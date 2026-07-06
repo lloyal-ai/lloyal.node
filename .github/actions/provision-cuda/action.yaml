@@ -102,6 +102,13 @@ runs:
         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/arm64/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update -qq
+
+        # Same legibility guard as the x64 step — a vanished minor must
+        # fail with a named error, not apt's generic resolution noise.
+        if ! apt-cache show "cuda-toolkit-${version_slug}" > /dev/null 2>&1; then
+          echo "::error::cuda-toolkit-${version_slug} not available in NVIDIA's ubuntu2204 arm64 repo (requested: ${VERSION})"
+          exit 1
+        fi
         sudo apt-get install -y -qq cuda-toolkit-${version_slug}
 
     # Linux: Set CUDA environment variables (always - cached or fresh install)
