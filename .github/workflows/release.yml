@@ -451,15 +451,20 @@ jobs:
           presign_and_put () {
             local file="$1"
             local key="v1/binaries/lloyal.node/${VERSION}/$(basename "$file")"
-            local size sha url
+            local size sha resp url checksum
             size=$(stat -c%s "$file")
             sha=$(sha256sum "$file" | cut -d' ' -f1)
-            url=$(curl -sfS -X POST https://api.lloyal.ai/v1/binaries/uploads \
+            resp=$(curl -sfS -X POST https://api.lloyal.ai/v1/binaries/uploads \
               -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
               -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
               -H "content-type: application/json" \
-              -d "{\"key\":\"$key\",\"sizeBytes\":$size,\"sha256\":\"$sha\"}" | jq -re .url)
-            curl -sfS -X PUT --upload-file "$file" "$url" > /dev/null
+              -d "{\"key\":\"$key\",\"sizeBytes\":$size,\"sha256\":\"$sha\"}")
+            url=$(jq -re .url <<<"$resp")
+            # Signed into the presign — the PUT must carry it byte-exact, and
+            # R2 validates the body against it (the URL is bound to these bytes).
+            checksum=$(jq -re '.headers["x-amz-checksum-sha256"]' <<<"$resp")
+            curl -sfS -X PUT -H "x-amz-checksum-sha256: $checksum" \
+              --upload-file "$file" "$url" > /dev/null
             echo "https://apps.lloyal.ai/$key"
           }
           ARCHIVE_URL=$(presign_and_put "packs/linux-x64-dl.tar.zst")
