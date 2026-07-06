@@ -581,15 +581,20 @@ jobs:
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
+      # Explicit path: correctness here otherwise rests on two chained
+      # implicit defaults (upload's LCA flattening + download's root
+      # extraction), and this is the signing act — the worst place to
+      # discover a default shifted across an actions major.
       - name: Download manifest artifact
         uses: actions/download-artifact@v4
         with:
           name: dl-manifest
+          path: dl-manifest
 
       - name: Publish signed manifest
         run: |
           VERSION="${{ needs.build-dl-flavor.outputs.version }}"
-          jq -n --arg v "$VERSION" --slurpfile m manifest.json \
+          jq -n --arg v "$VERSION" --slurpfile m dl-manifest/manifest.json \
             '{version: $v, platform: "linux-x64-dl", manifest: $m[0]}' \
           | curl -sfS -X POST https://api.lloyal.ai/v1/binaries/publish \
               -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
