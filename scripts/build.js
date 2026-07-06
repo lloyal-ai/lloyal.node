@@ -54,6 +54,15 @@ if (backendDl) {
     '--CDBUILD_SHARED_LIBS=ON',
     '--CDGGML_CPU_ALL_VARIANTS=ON',
     `"--CDCMAKE_CUDA_ARCHITECTURES=${DL_CUDA_ARCHS}"`,
+    // Fatbin compression OFF. nvcc >= 12.8 compresses embedded device code
+    // with a scheme whose decompressor lives in the DRIVER, and NVIDIA
+    // documents it as "not compatible with drivers released before CUDA
+    // Toolkit's 12.4 Release" (r550). This flavor's entire audience is
+    // old-driver fleets (Cloud Run L4 = 535/12.2), where every kernel load
+    // then dies with "device kernel image is invalid" — proven on the
+    // v3.1.0 rig run. Uncompressed device code costs on-disk size only;
+    // the delivery archive is zstd-19 so the download barely changes.
+    '"--CDCMAKE_CUDA_FLAGS=--compress-mode=none"',
   );
   console.log('[lloyal.node] Flavor: BACKEND_DL (runtime backend selection)');
   console.log(`[lloyal.node] CUDA archs: ${DL_CUDA_ARCHS}`);
