@@ -114,8 +114,13 @@ jobs:
           cache: 'npm'
 
       - name: Compile TypeScript (src + tests)
+        # npm install, NOT npm ci — see the gpu-tests-dl job in release.yml:
+        # the lockfile's platform-package stubs make npm ci's verdict depend
+        # on whether this version is on the registry yet. This job usually
+        # runs pre-publish (passes), but a slow runner or a post-release
+        # re-run puts it after publish and it fails EUSAGE.
         run: |
-          npm ci --ignore-scripts
+          npm install --ignore-scripts
           npm run build:ts
           npm run build:test
 
