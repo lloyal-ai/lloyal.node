@@ -333,6 +333,243 @@ jobs:
       contents: read
       id-token: write
 
+  # ── BACKEND_DL flavor (the additive R2 channel — lloyal.node#38/#39) ──
+  # Same v* tag as the npm matrix (one version drives both channels), but
+  # DELIBERATELY absent from the npm publish job's `needs`: a flavor
+  # failure can never block the npm release. Upload/publish steps gate on
+  # the CI service token being configured, so this job degrades to a pure
+  # build+gates check until the binaries channel is live.
+  build-dl-flavor:
+    name: Build BACKEND_DL flavor (linux-x64-dl)
+    runs-on: ubuntu-22.04
+    outputs:
+      uploaded: ${{ steps.upload.outputs.uploaded }}
+      version: ${{ steps.pack.outputs.version }}
+      archive_url: ${{ steps.upload.outputs.archive_url }}
+      archive_sha256: ${{ steps.pack.outputs.archive_sha256 }}
+      runtime_url: ${{ steps.upload.outputs.runtime_url }}
+      runtime_sha256: ${{ steps.pack.outputs.runtime_sha256 }}
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate llama.cpp version
+        run: node scripts/sync-llama-cpp.js --check
+
+      # The 11-arch fatbin build needs headroom the stock runner image
+      # doesn't leave after preinstalled SDKs.
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      # 12.9.1 = the last 12.x toolkit: emits sm_100a/120a/121a (Blackwell)
+      # while 12.x cubins keep minor-version compat with the whole 12.x
+      # driver fleet (13.x would drop the 50/61/70-virtual floor AND
+      # require 13-era drivers). Version-scoped cache coexists with the
+      # npm matrix's 12.2.2.
+      - name: Provision CUDA toolkit
+        uses: ./.github/actions/provision-cuda
+        with:
+          version: '12.9.1'
+          arch: x64
+
+      - name: Install zstd (pack compression)
+        run: sudo apt-get install -y -qq zstd
+
+      # Full-arch CUDA is the 2h-class build (#36); ccache makes
+      # re-releases sane. Key is flavor-scoped — never shares npm objects.
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-x64-dl
+          variant: ccache
+
+      - name: Install npm dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build BACKEND_DL flavor
+        run: npm run build
+        env:
+          LLOYAL_GPU: cuda
+          LLOYAL_BACKEND_DL: '1'
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+
+      # Per-arch INDEPENDENT gates (cuobjdump SASS + PTX asserts, CPU
+      # variant count, arch-mirror drift) + deterministic pack + manifest.
+      - name: Assemble pack + arch gates
+        id: pack
+        run: |
+          node scripts/create-dl-pack.js
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$(node -p "require('./packs/manifest.json').archive.sha256")" >> "$GITHUB_OUTPUT"
+          echo "runtime_sha256=$(node -p "require('./packs/manifest.json').runtimeArchive.sha256")" >> "$GITHUB_OUTPUT"
+
+      # CPU loader smoke on the GPU-less runner: assert not just that A
+      # variant registered but WHICH — ggml logs the winning module path
+      # at INFO; anything below haswell here is a scoring regression that
+      # "something loaded" would wave through. The CUDA module silently
+      # skips on this runner (no driver) — expected; asserted on L4 below.
+      - name: CPU variant selection smoke
+        run: |
+          mkdir -p /tmp/dl-smoke
+          tar --zstd -xf packs/linux-x64-dl.tar.zst -C /tmp/dl-smoke
+          set -o pipefail
+          LLOYAL_BACKEND_DIR=/tmp/dl-smoke node -e "
+            const { loadBinary } = require('./dist');
+            const devs = loadBinary().listDevices();
+            console.log('devices:', JSON.stringify(devs));
+            if (!devs.some(d => d.type === 'cpu')) { console.error('no CPU device registered'); process.exit(1); }
+          " 2> /tmp/dl-smoke/stderr.log
+          cat /tmp/dl-smoke/stderr.log
+          grep -E 'libggml-cpu-(haswell|skylakex|cannonlake|cascadelake|icelake|cooperlake|zen4|alderlake|sapphirerapids)\.so' /tmp/dl-smoke/stderr.log \
+            || { echo "::error::CPU variant selection regressed — no >=haswell variant won (see stderr above)"; exit 1; }
+
+      # Write-once uploads via the binaries channel (worker presigns
+      # single PUTs; bytes go straight to R2). Skipped with a notice until
+      # the CI service token is configured — the manifest is signed and
+      # published ONLY by publish-dl, after the L4 gate passes.
+      - name: Upload archives to R2 (presigned)
+        id: upload
+        run: |
+          if [ -z "$CF_ACCESS_CLIENT_ID" ]; then
+            echo "::notice::binaries-channel service token not configured — skipping upload (build+gates still validated)"
+            echo "uploaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          presign_and_put () {
+            local file="$1"
+            local key="v1/binaries/lloyal.node/${VERSION}/$(basename "$file")"
+            local size sha url
+            size=$(stat -c%s "$file")
+            sha=$(sha256sum "$file" | cut -d' ' -f1)
+            url=$(curl -sfS -X POST https://api.lloyal.ai/v1/binaries/uploads \
+              -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+              -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+              -H "content-type: application/json" \
+              -d "{\"key\":\"$key\",\"sizeBytes\":$size,\"sha256\":\"$sha\"}" | jq -re .url)
+            curl -sfS -X PUT --upload-file "$file" "$url" > /dev/null
+            echo "https://apps.lloyal.ai/$key"
+          }
+          ARCHIVE_URL=$(presign_and_put "packs/linux-x64-dl.tar.zst")
+          RUNTIME_FILE=$(node -p "require('./packs/manifest.json').runtimeArchive.file")
+          RUNTIME_URL=$(presign_and_put "packs/${RUNTIME_FILE}")
+          {
+            echo "uploaded=true"
+            echo "archive_url=$ARCHIVE_URL"
+            echo "runtime_url=$RUNTIME_URL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-manifest
+          path: packs/manifest.json
+          retention-days: 7
+
+  # The L4 rig consumes the pack THE PRODUCT'S WAY (design §3.3 path-2):
+  # the 12.2.2-runtime image fails the runtime gate BY CONSTRUCTION →
+  # companion archive fetch → co-extract → RPATH resolution → device
+  # assertion → the full model-matrix inference suites. Strictly additive
+  # to the rig's two existing consumers: new script, new JOB_NAME, zero
+  # edits to run-gpu-tests.sh or existing job definitions.
+  gpu-tests-dl:
+    name: GPU Tests DL (L4, path-2 consumer)
+    needs: build-dl-flavor
+    if: needs.build-dl-flavor.outputs.uploaded == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout infrastructure scripts
+        uses: actions/checkout@v4
+        with:
+          repository: lloyal-ai/lloyal-infra
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: ci
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Compile TypeScript (src + tests)
+        run: |
+          npm ci --ignore-scripts
+          npm run build:ts
+          npm run build:test
+
+      - name: Build and push DL test image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/gpu-tests:${{ github.sha }}-dl"
+          docker build -f ci/Dockerfile.dl-tests -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy and run DL GPU tests
+        run: bash ci/deploy-gpu-tests.sh
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+          JOB_NAME: lloyal-gpu-test-dl
+          EXTRA_ENV_VARS: "LLOYAL_PACK_URL=${{ needs.build-dl-flavor.outputs.archive_url }},LLOYAL_PACK_SHA256=${{ needs.build-dl-flavor.outputs.archive_sha256 }},LLOYAL_RUNTIME_URL=${{ needs.build-dl-flavor.outputs.runtime_url }},LLOYAL_RUNTIME_SHA256=${{ needs.build-dl-flavor.outputs.runtime_sha256 }}"
+
+  # The publish act: sign + create-once the manifest — until this runs,
+  # the uploaded archives are unverifiable ⇒ effectively unpublished. Any
+  # red job upstream ⇒ no signed manifest for this version; npm unaffected.
+  publish-dl:
+    name: Publish DL manifest (signed)
+    needs: [build-dl-flavor, gpu-tests-dl]
+    if: needs.build-dl-flavor.outputs.uploaded == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Download manifest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dl-manifest
+
+      - name: Publish signed manifest
+        run: |
+          VERSION="${{ needs.build-dl-flavor.outputs.version }}"
+          jq -n --arg v "$VERSION" --slurpfile m manifest.json \
+            '{version: $v, platform: "linux-x64-dl", manifest: $m[0]}' \
+          | curl -sfS -X POST https://api.lloyal.ai/v1/binaries/publish \
+              -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+              -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+              -H "content-type: application/json" \
+              -d @- | jq .
+
   publish:
     name: Publish all packages
     needs: [build-and-test, gpu-tests]

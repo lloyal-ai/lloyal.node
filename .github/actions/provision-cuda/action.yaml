@@ -56,6 +56,16 @@ runs:
         sudo apt-get install -y -qq build-essential cmake
 
     # Linux x64: Install CUDA toolkit (cache miss only)
+    #
+    # Version semantics: apt installs the cuda-toolkit-<maj-min> META
+    # package, which resolves to the newest patch in the repo — the cache
+    # key above pins the full requested version, so the EFFECTIVE pin is
+    # the cache. A deliberate patch bump = bump the `version` input (the
+    # behavior the 12.2.2 pin has always relied on).
+    #
+    # NOTE: repo URLs are ubuntu2204-hardcoded — coupled to the runner
+    # image. When the matrix migrates off ubuntu-22.04 (deprecation
+    # begins 2026-09-17), these must become runner-conditional.
     - name: Install CUDA toolkit (Linux x64)
       if: runner.os == 'Linux' && inputs.arch == 'x64' && steps.cuda-cache.outputs.cache-hit != 'true'
       shell: bash
@@ -69,6 +79,13 @@ runs:
         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update -qq
+
+        # Fail legibly if the requested minor isn't in NVIDIA's repo —
+        # apt's generic resolution error buries the actual problem.
+        if ! apt-cache show "cuda-toolkit-${version_slug}" > /dev/null 2>&1; then
+          echo "::error::cuda-toolkit-${version_slug} not available in NVIDIA's ubuntu2204 x86_64 repo (requested: ${VERSION})"
+          exit 1
+        fi
         sudo apt-get install -y -qq cuda-toolkit-${version_slug}
 
     # Linux ARM64: Install CUDA toolkit (cache miss only)
