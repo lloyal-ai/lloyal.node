@@ -362,9 +362,6 @@ jobs:
       archive_sha256: ${{ steps.pack.outputs.archive_sha256 }}
       runtime_url: ${{ steps.upload.outputs.runtime_url }}
       runtime_sha256: ${{ steps.pack.outputs.runtime_sha256 }}
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -452,8 +449,15 @@ jobs:
       # single PUTs; bytes go straight to R2). Skipped with a notice until
       # the CI service token is configured — the manifest is signed and
       # published ONLY by publish-dl, after the L4 gate passes.
+      # Secrets are step-scoped (matching NODE_AUTH_TOKEN in the npm job):
+      # job-level env would expose the service token to every step's
+      # process environment, including third-party actions and the whole
+      # build toolchain — and this token can mint signed manifests.
       - name: Upload archives to R2 (presigned)
         id: upload
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           # Three-state gate: both secrets absent = pre-activation, degrade
           # to build+gates with a notice. Exactly ONE set = someone tried
@@ -577,9 +581,6 @@ jobs:
     needs: [build-dl-flavor, gpu-tests-dl]
     if: needs.build-dl-flavor.outputs.uploaded == 'true'
     runs-on: ubuntu-latest
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
       # Explicit path: correctness here otherwise rests on two chained
       # implicit defaults (upload's LCA flattening + download's root
@@ -592,6 +593,9 @@ jobs:
           path: dl-manifest
 
       - name: Publish signed manifest
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           VERSION="${{ needs.build-dl-flavor.outputs.version }}"
           jq -n --arg v "$VERSION" --slurpfile m dl-manifest/manifest.json \
