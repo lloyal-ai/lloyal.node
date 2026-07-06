@@ -396,13 +396,18 @@ export async function ensureBackendPack(opts: EnsureBackendPackOpts = {}): Promi
   if (existing) return existing;
 
   const dir = backendPackCacheDir(version);
-  // A destination dir WITHOUT a marker at this point is a crashed install
-  // (the only live-racer window is the instant between a winner's rename
-  // and its marker write, and a full download cannot fit inside it) —
-  // remove the remnant so a crash stays re-acquirable, per the design's
-  // crash-anywhere contract. The rename-failure path below stays strict:
-  // mid-download races resolve to the winner or a hard error, never a guess.
+  // A destination dir WITHOUT a marker is either a crashed install or a
+  // live winner caught in the instant between its rename and its marker
+  // write. Distinguish them with a grace re-check: the winner's marker
+  // lands within milliseconds, a crashed remnant never produces one. Only
+  // then reclaim — so a crash stays re-acquirable (the design's
+  // crash-anywhere contract) without ever deleting a competing install.
+  // The rename-failure path below stays strict: mid-download races resolve
+  // to the winner or a hard error, never a guess.
   if (fs.existsSync(dir)) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const winner = resolveBackendPackDirSync(version);
+    if (winner) return winner;
     fs.rmSync(dir, { recursive: true, force: true });
   }
   const parent = path.dirname(dir);
@@ -466,7 +471,15 @@ export async function ensureBackendPack(opts: EnsureBackendPackOpts = {}): Promi
       }
       throw renameErr;
     }
-    fs.writeFileSync(path.join(dir, MARKER_FILE), JSON.stringify(markerBody, null, 2));
+    // Atomic marker publication: the marker is read on EVERY boot of every
+    // harness on the box, so a partial write must never be observable (a
+    // torn read throws the hard corrupt-cache error at an innocent
+    // process, and a crash mid-write would poison the cache permanently).
+    // Same-directory temp + rename is atomic on POSIX; a crash before the
+    // rename leaves a marker-less dir the remnant sweep reclaims.
+    const markerTmp = path.join(dir, `${MARKER_FILE}.tmp`);
+    fs.writeFileSync(markerTmp, JSON.stringify(markerBody, null, 2));
+    fs.renameSync(markerTmp, path.join(dir, MARKER_FILE));
     return dir;
   } catch (err) {
     fs.rmSync(staging, { recursive: true, force: true });
@@ -655,7 +668,12 @@ class TarExtractor {
       this.pendingLongName = null;
       name = name.replace(/^\.\//, '');
 
-      if (path.isAbsolute(name) || name.split('/').includes('..')) {
+      // Backslashes are rejected outright: our CI's GNU tar never emits
+      // them (zero false positives), and on Windows path.join would honor
+      // `..\` traversal that a '/'-only split misses. Signed-for-
+      // authenticity is not shape-validated — the extractor defends
+      // regardless of provenance.
+      if (path.isAbsolute(name) || name.includes('\\') || name.split('/').includes('..')) {
         throw new Error(`[lloyal.node] Refusing archive entry with unsafe path: ${name}`);
       }
 

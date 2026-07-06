@@ -278,10 +278,20 @@ async function main(): Promise<void> {
     assert.equal(fs.readFileSync(path.join(dest, longName), 'utf8'), 'module');
   });
 
-  await test('rejects path traversal and symlink entries', async () => {
+  await test('rejects path traversal, backslash names, and symlink entries', async () => {
     const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'extract-'));
     await assert.rejects(
       extractTarZst(makeTarZst([tarEntry('../escape', Buffer.from('x'))]), dest),
+      /unsafe path/,
+    );
+    // Windows path.join honors `..\` — rejected on every platform since
+    // our own tar never emits backslashes.
+    await assert.rejects(
+      extractTarZst(makeTarZst([tarEntry('..\\escape', Buffer.from('x'))]), dest),
+      /unsafe path/,
+    );
+    await assert.rejects(
+      extractTarZst(makeTarZst([tarEntry('sub\\file.so', Buffer.from('x'))]), dest),
       /unsafe path/,
     );
     await assert.rejects(
@@ -336,7 +346,9 @@ async function main(): Promise<void> {
       makeTarZst([tarEntry('lloyal.node', Buffer.from('fake-addon')), tarEntry('libggml-cuda.so', Buffer.from('module'))]),
     );
     const sha = createHash('sha256').update(archive).digest('hex');
+    let requests = 0;
     const server = http.createServer((_req, res) => {
+      requests++;
       res.writeHead(200, { 'content-length': String(archive.length) });
       res.end(archive);
     });
@@ -366,6 +378,28 @@ async function main(): Promise<void> {
         /sha256 mismatch/,
       );
       assert.equal(resolveBackendPackDirSync('9.9.9-tampered'), null);
+
+      // Live-winner grace: a marker-less dir whose marker lands within the
+      // grace window is a competing install, not a remnant — ensure must
+      // return the winner's pack WITHOUT deleting it or re-downloading.
+      const winnerVersion = '9.9.9-winner';
+      const winnerDir = backendPackCacheDir(winnerVersion);
+      fs.mkdirSync(winnerDir, { recursive: true });
+      fs.writeFileSync(path.join(winnerDir, 'lloyal.node'), 'winner-addon');
+      setTimeout(() => {
+        fs.writeFileSync(
+          path.join(winnerDir, '.lloyal-pack.json'),
+          JSON.stringify({ version: winnerVersion }),
+        );
+      }, 100); // inside the 250ms grace window
+      const before = requests;
+      const won = await ensureBackendPack({
+        version: winnerVersion,
+        pinned: { archiveUrl: url, sha256: sha },
+      });
+      assert.equal(won, winnerDir);
+      assert.equal(fs.readFileSync(path.join(winnerDir, 'lloyal.node'), 'utf8'), 'winner-addon');
+      assert.equal(requests, before); // no download — the winner's install was honored
     } finally {
       if (prev === undefined) delete process.env.XDG_CACHE_HOME;
       else process.env.XDG_CACHE_HOME = prev;
