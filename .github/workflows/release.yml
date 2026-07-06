@@ -583,7 +583,18 @@ jobs:
 
       - name: Compile TypeScript (src + tests)
         run: |
-          npm ci --ignore-scripts
+          # npm install, NOT npm ci. The lockfile carries version-less stubs
+          # for this version's 13 platform packages (they don't exist on the
+          # registry until the publish job runs, so lockfile regeneration can
+          # only stub them). npm ci validates such stubs AGAINST THE REGISTRY:
+          # while the version 404s the stubs pass as unresolvable optionals,
+          # but the moment publish lands, the same lockfile fails EUSAGE
+          # ("lock file's X@ does not satisfy X@<version>"). This job runs
+          # after the ~2h DL build — always post-publish — so npm ci here
+          # fails every release. Proven on v3.1.0: gpu-test.yml's identical
+          # step passed at 09:25 (pre-publish), this one failed at 09:59
+          # (publish landed 09:36).
+          npm install --ignore-scripts
           npm run build:ts
           npm run build:test
 
