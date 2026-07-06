@@ -459,6 +459,18 @@ jobs:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
+          # skip_publish dry-runs must not touch the channel: the paths are
+          # write-once, so even an upload-without-publish would 409 the
+          # REAL release's upload step at this version. Mirrors the npm
+          # publish job's gate; a deliberate full-path validation is a
+          # dispatch with skip_publish unchecked. uploaded=false makes
+          # gpu-tests-dl + publish-dl skip too.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.skip_publish }}" = "true" ]; then
+            echo "::notice::skip_publish dry-run — DL upload/publish skipped (build + arch gates + CPU smoke still validated)"
+            echo "uploaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Three-state gate: both secrets absent = pre-activation, degrade
           # to build+gates with a notice. Exactly ONE set = someone tried
           # to activate the channel and misconfigured it — fail loud and
