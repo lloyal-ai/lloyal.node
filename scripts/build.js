@@ -54,15 +54,19 @@ if (backendDl) {
     '--CDBUILD_SHARED_LIBS=ON',
     '--CDGGML_CPU_ALL_VARIANTS=ON',
     `"--CDCMAKE_CUDA_ARCHITECTURES=${DL_CUDA_ARCHS}"`,
-    // Fatbin compression OFF. nvcc >= 12.8 compresses embedded device code
-    // with a scheme whose decompressor lives in the DRIVER, and NVIDIA
-    // documents it as "not compatible with drivers released before CUDA
-    // Toolkit's 12.4 Release" (r550). This flavor's entire audience is
-    // old-driver fleets (Cloud Run L4 = 535/12.2), where every kernel load
-    // then dies with "device kernel image is invalid" — proven on the
-    // v3.1.0 rig run. Uncompressed device code costs on-disk size only;
-    // the delivery archive is zstd-19 so the download barely changes.
-    '"--CDCMAKE_CUDA_FLAGS=--compress-mode=none"',
+    // Fatbin compression OFF — via ggml's own knob, which is the ONLY
+    // effective lever: ggml-cuda appends -compress-mode=<this> AFTER any
+    // base CMAKE_CUDA_FLAGS, and nvcc takes the LAST value (a raw base
+    // flag is silently overridden — proven by the v3.1.1 build's
+    // "incompatible redefinition" warning). ggml defaults it to "size",
+    // whose decompressor lives in the DRIVER; NVIDIA documents the new
+    // compress modes as incompatible with pre-CUDA-12.4 drivers (r550).
+    // This flavor's audience is exactly those old-driver fleets (Cloud
+    // Run L4 = 535/12.2), where every kernel load dies with "device
+    // kernel image is invalid" — proven on the v3.1.0 rig run. "none"
+    // costs on-disk size of the extracted module only; the delivery
+    // archive is zstd-19 so the download barely changes.
+    '--CDGGML_CUDA_COMPRESSION_MODE=none',
   );
   console.log('[lloyal.node] Flavor: BACKEND_DL (runtime backend selection)');
   console.log(`[lloyal.node] CUDA archs: ${DL_CUDA_ARCHS}`);
