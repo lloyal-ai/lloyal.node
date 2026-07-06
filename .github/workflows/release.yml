@@ -395,6 +395,18 @@ jobs:
       - name: Install zstd (pack compression)
         run: sudo apt-get install -y -qq zstd
 
+      # The ccache-action apt-installs ccache (4.5.1 on ubuntu-22.04),
+      # which predates nvcc support (added in 4.11) — device compilations,
+      # the bulk of this job's 99 minutes, would never cache. Put a modern
+      # static ccache on /usr/local/bin, which precedes /usr/bin in PATH,
+      # so the CMake launchers resolve it.
+      - name: Install nvcc-capable ccache
+        run: |
+          curl -sSL https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-glibc.tar.xz \
+            | tar -xJ --strip-components=1 -C /tmp ccache-4.13.6-linux-x86_64-glibc/ccache
+          sudo install -m 755 /tmp/ccache /usr/local/bin/ccache
+          ccache --version | head -1
+
       # Full-arch CUDA is the 2h-class build (#36); ccache makes
       # re-releases sane. Key is flavor-scoped — never shares npm objects.
       - name: Setup ccache
