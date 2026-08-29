@@ -12,6 +12,8 @@
 #include <lloyal/logits.hpp>
 #include <lloyal/embedding.hpp>
 #include <lloyal/metrics.hpp>
+#include <mtmd.h>
+#include <mtmd-helper.h>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -675,6 +677,206 @@ private:
 };
 
 /**
+ * AsyncWorker for multimodal prefill (the embedding rail beside the token
+ * rail). Owns everything it touches off-thread: per-branch sep tokens,
+ * templated prompt strings (containing <__media__> markers), and copied
+ * image bytes. All mtmd calls live HERE — liblloyal stays mtmd-free.
+ *
+ * Per branch, in order (segments are sequential store calls — start_pos is
+ * read from branch position at dispatch time):
+ *   1. sep tokens          → decode_scatter (token rail)
+ *   2. mtmd_tokenize       → interleaved TEXT/IMAGE chunks
+ *      (add_special=false, parse_special=true — parity with the text path)
+ *   3. TEXT chunk          → decode_scatter (ready token ids; never
+ *                            re-tokenized)
+ *      IMAGE chunk         → mtmd_encode_chunk → prefill_embd
+ *                            (section-major M-RoPE positions: y→s1, x→s2)
+ *      AUDIO chunk         → error (v1: not supported; never silently skip)
+ *   4. logits requested on the final chunk only
+ *
+ * Returns per-branch {tokensDecoded, positionAdvance} — JS cannot know
+ * multimodal token counts (mtmd owns tokenization) and the trace/pressure
+ * layers need them.
+ */
+class StorePrefillMultimodalWorker : public Napi::AsyncWorker {
+public:
+  struct BranchResult {
+    int64_t tokensDecoded = 0;
+    int64_t positionAdvance = 0;
+  };
+
+  StorePrefillMultimodalWorker(Napi::Env env,
+                               lloyal::branch::BranchStore& store,
+                               mtmd_context* mtmd,
+                               int32_t nEmbdInp,
+                               std::vector<lloyal::branch::BranchHandle> handles,
+                               std::vector<std::vector<llama_token>> sepStorage,
+                               std::vector<std::string> prompts,
+                               std::vector<std::vector<std::vector<uint8_t>>> bitmapBytes)
+    : AsyncWorker(env), _deferred(env), _store(store), _mtmd(mtmd),
+      _nEmbdInp(nEmbdInp), _handles(std::move(handles)),
+      _sepStorage(std::move(sepStorage)), _prompts(std::move(prompts)),
+      _bitmapBytes(std::move(bitmapBytes)) {}
+
+  void Execute() override {
+    try {
+      _results.resize(_handles.size());
+      for (size_t i = 0; i < _handles.size(); ++i) {
+        prefillBranch(i);
+      }
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::Array out = Napi::Array::New(env, _results.size());
+    for (size_t i = 0; i < _results.size(); ++i) {
+      Napi::Object r = Napi::Object::New(env);
+      r.Set("tokensDecoded", Napi::Number::New(env, static_cast<double>(_results[i].tokensDecoded)));
+      r.Set("positionAdvance", Napi::Number::New(env, static_cast<double>(_results[i].positionAdvance)));
+      out.Set(static_cast<uint32_t>(i), r);
+    }
+    _deferred.Resolve(out);
+  }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  void prefillBranch(size_t i) {
+    const auto handle = _handles[i];
+    auto* st = _store.get(handle);
+    if (!st) {
+      throw std::runtime_error("_storePrefillMultimodal: invalid handle at index " + std::to_string(i));
+    }
+    const llama_pos startPos = st->position;
+    int64_t tokensDecoded = 0;
+
+    // 1. Leading sep tokens via the token rail
+    if (!_sepStorage[i].empty()) {
+      lloyal::branch::DecodeScatterItem item{
+          handle, std::span<const llama_token>(_sepStorage[i])};
+      _store.decode_scatter(std::span<const lloyal::branch::DecodeScatterItem>(&item, 1));
+      tokensDecoded += static_cast<int64_t>(_sepStorage[i].size());
+    }
+
+    // 2. Bytes → bitmaps (audio bytes auto-route and are rejected below;
+    //    video files fail to decode with MTMD_VIDEO off — both fail loud)
+    std::vector<mtmd::bitmap_ptr> bitmaps;
+    std::vector<const mtmd_bitmap*> bitmapPtrs;
+    bitmaps.reserve(_bitmapBytes[i].size());
+    for (const auto& bytes : _bitmapBytes[i]) {
+      auto wrap = mtmd_helper_bitmap_init_from_buf(
+          _mtmd, bytes.data(), bytes.size(), /*placeholder*/ false);
+      if (wrap.video_ctx) {
+        mtmd_helper_video_free(wrap.video_ctx);
+        if (wrap.bitmap) mtmd_bitmap_free(wrap.bitmap);
+        throw std::runtime_error("_storePrefillMultimodal: video input is not supported");
+      }
+      if (!wrap.bitmap) {
+        throw std::runtime_error(
+            "_storePrefillMultimodal: unsupported media bytes at image " +
+            std::to_string(bitmaps.size()) + " (expected jpg/png/bmp/gif)");
+      }
+      bitmaps.emplace_back(wrap.bitmap);
+      bitmapPtrs.push_back(wrap.bitmap);
+    }
+
+    // 3. Tokenize: mtmd owns tokenization (no double-tokenize). Flags are
+    //    the text-path parity contract: add_special=false (no
+    //    mid-conversation BOS), parse_special=true (template specials).
+    mtmd::input_chunks_ptr chunks(mtmd_input_chunks_init());
+    mtmd_input_text txt{_prompts[i].c_str(), /*add_special*/ false, /*parse_special*/ true};
+    const int32_t rc = mtmd_tokenize(_mtmd, chunks.get(), &txt,
+                                     bitmapPtrs.data(), bitmapPtrs.size());
+    if (rc == 1) {
+      throw std::runtime_error(
+          "_storePrefillMultimodal: media marker count does not match image count");
+    }
+    if (rc != 0) {
+      throw std::runtime_error("_storePrefillMultimodal: image preprocessing failed");
+    }
+
+    // 4. Walk chunks in order
+    const bool useMrope = mtmd_decode_use_mrope(_mtmd);
+    const size_t nChunks = mtmd_input_chunks_size(chunks.get());
+    for (size_t c = 0; c < nChunks; ++c) {
+      const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks.get(), c);
+      const auto type = mtmd_input_chunk_get_type(chunk);
+      const bool isLast = (c == nChunks - 1);
+
+      if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        size_t nText = 0;
+        const llama_token* toks = mtmd_input_chunk_get_tokens_text(chunk, &nText);
+        if (nText == 0) continue;
+        lloyal::branch::DecodeScatterItem item{
+            handle, std::span<const llama_token>(toks, nText)};
+        _store.decode_scatter(std::span<const lloyal::branch::DecodeScatterItem>(&item, 1));
+        tokensDecoded += static_cast<int64_t>(nText);
+
+      } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+        if (mtmd_encode_chunk(_mtmd, chunk) != 0) {
+          throw std::runtime_error("_storePrefillMultimodal: image encode failed");
+        }
+        // Context-owned reused buffer — consumed by the decode below
+        // before the next encode.
+        const float* embd = mtmd_get_output_embd(_mtmd);
+        const int32_t nTokens = static_cast<int32_t>(mtmd_input_chunk_get_n_tokens(chunk));
+        const llama_pos nPos = mtmd_input_chunk_get_n_pos(chunk);
+        const llama_pos pos0 = _store.get(handle)->position;
+        const int32_t nppe = useMrope ? 4 : 1;
+
+        // Section-major positions. M-RoPE section order is t,y,x,z —
+        // y in section 1, x in section 2 (mtmd's decoder convention).
+        std::vector<llama_pos> pos(static_cast<size_t>(nTokens) * nppe);
+        if (useMrope) {
+          const mtmd_image_tokens* imgToks = mtmd_input_chunk_get_tokens_image(chunk);
+          if (!imgToks) {
+            throw std::runtime_error("_storePrefillMultimodal: image tokens missing");
+          }
+          std::vector<mtmd_decoder_pos> rel(static_cast<size_t>(nTokens));
+          mtmd_helper_image_get_decoder_pos(imgToks, pos0, rel.data());
+          for (int32_t k = 0; k < nTokens; ++k) {
+            pos[k] = static_cast<llama_pos>(rel[k].t);
+            pos[k + nTokens] = static_cast<llama_pos>(rel[k].y);
+            pos[k + 2 * nTokens] = static_cast<llama_pos>(rel[k].x);
+            pos[k + 3 * nTokens] = static_cast<llama_pos>(rel[k].z);
+          }
+        } else {
+          for (int32_t k = 0; k < nTokens; ++k) {
+            pos[k] = pos0 + k;
+          }
+        }
+
+        const bool nonCausal = mtmd_decode_use_non_causal(_mtmd, chunk);
+        _store.prefill_embd(handle, embd, nTokens, _nEmbdInp, nPos,
+                            pos.data(), nppe, nonCausal,
+                            /*want_logits*/ isLast);
+        tokensDecoded += static_cast<int64_t>(nTokens);
+
+      } else {
+        // AUDIO — the byte sniffer auto-routes audio; reject explicitly
+        // rather than silently skipping KV content the caller expected.
+        throw std::runtime_error("_storePrefillMultimodal: audio input is not supported");
+      }
+    }
+
+    _results[i].tokensDecoded = tokensDecoded;
+    _results[i].positionAdvance =
+        static_cast<int64_t>(_store.get(handle)->position - startPos);
+  }
+
+  Napi::Promise::Deferred _deferred;
+  lloyal::branch::BranchStore& _store;
+  mtmd_context* _mtmd;
+  int32_t _nEmbdInp;
+  std::vector<lloyal::branch::BranchHandle> _handles;
+  std::vector<std::vector<llama_token>> _sepStorage;
+  std::vector<std::string> _prompts;
+  std::vector<std::vector<std::vector<uint8_t>>> _bitmapBytes;
+  std::vector<BranchResult> _results;
+};
+
+/**
  * AsyncWorker for batch logit scoring (process_chunks)
  * Owns token storage and logit output buffers
  */
@@ -841,6 +1043,9 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     // ===== STORE API (internal, wrapped by lib/BranchStore.js) =====
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
     InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
+    InstanceMethod("_storePrefillMultimodal", &SessionContext::_storePrefillMultimodal),
+    InstanceMethod("supportsVision", &SessionContext::supportsVision),
+    InstanceMethod("supportsAudio", &SessionContext::supportsAudio),
     InstanceMethod("_storeMergeLogits", &SessionContext::_storeMergeLogits),
     InstanceMethod("_storeRetainOnly", &SessionContext::_storeRetainOnly),
     InstanceMethod("_storeAvailable", &SessionContext::_storeAvailable),
@@ -873,6 +1078,11 @@ SessionContext::SessionContext(const Napi::CallbackInfo& info)
 
 SessionContext::~SessionContext() {
   if (!_disposed) {
+    // Free mtmd first — it holds a reference to the model
+    if (_mtmdContext) {
+      mtmd_free(_mtmdContext);
+      _mtmdContext = nullptr;
+    }
     // Free context (depends on model)
     if (_context) {
       llama_free(_context);
@@ -896,6 +1106,14 @@ void SessionContext::initializeContext(
   std::cerr << "  Model ptr: " << static_cast<void*>(_model.get()) << std::endl;
   std::cerr << "  Context ptr: " << static_cast<void*>(_context) << std::endl;
   std::cerr << "  Shared refcount: " << _model.use_count() << std::endl;
+}
+
+void SessionContext::initializeMultimodal(struct mtmd_context* mtmd) {
+  _mtmdContext = mtmd;
+  std::cerr << "[SessionContext::initializeMultimodal] mmproj attached"
+            << " (vision=" << (mtmd_support_vision(mtmd) ? "yes" : "no")
+            << ", audio=" << (mtmd_support_audio(mtmd) ? "yes" : "no") << ")"
+            << std::endl;
 }
 
 Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
@@ -1262,6 +1480,12 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   if (!_disposed) {
     // Drain branch store while context is still alive
     _branchStore.drain();
+
+    // Free mtmd first — it holds a reference to the model
+    if (_mtmdContext) {
+      mtmd_free(_mtmdContext);
+      _mtmdContext = nullptr;
+    }
 
     // Free context
     if (_context) {
@@ -1736,6 +1960,23 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     typeV = t;
   }
 
+  // Extract mmprojPath (optional — enables multimodal input via mtmd)
+  std::string mmprojPath;
+  if (options.Has("mmprojPath") && options.Get("mmprojPath").IsString()) {
+    mmprojPath = options.Get("mmprojPath").As<Napi::String>().Utf8Value();
+  }
+
+  // Extract image token budget overrides (optional; -1 = model metadata).
+  // Per-image/per-frame token budgeting — pass-through to mtmd_context_params.
+  int32_t imageMinTokens = -1;
+  if (options.Has("imageMinTokens") && options.Get("imageMinTokens").IsNumber()) {
+    imageMinTokens = options.Get("imageMinTokens").As<Napi::Number>().Int32Value();
+  }
+  int32_t imageMaxTokens = -1;
+  if (options.Has("imageMaxTokens") && options.Get("imageMaxTokens").IsNumber()) {
+    imageMaxTokens = options.Get("imageMaxTokens").As<Napi::Number>().Int32Value();
+  }
+
   // Ensure llama backend is initialized on main thread (thread-safe, once)
   BackendManager::ensureInitialized();
 
@@ -1794,6 +2035,32 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
 
   std::cerr << "[CreateContext] Context created successfully" << std::endl;
 
+  // Load the mmproj (multimodal projector) BEFORE the model shared_ptr is
+  // moved into the instance — mtmd_init_from_file validates the projector's
+  // output dim against the text model and holds a model reference. Fail
+  // loud: a configured mmproj that cannot load must never silently degrade
+  // to text-only.
+  mtmd_context* mtmdCtx = nullptr;
+  if (!mmprojPath.empty()) {
+    std::string fsMmprojPath = liblloyal_node::FileSystem::normalizePath(mmprojPath);
+    if (!liblloyal_node::FileSystem::exists(fsMmprojPath)) {
+      llama_free(ctx);
+      throw Napi::Error::New(env, "mmproj file not found: " + fsMmprojPath);
+    }
+    mtmd_context_params mparams = mtmd_context_params_default();
+    mparams.print_timings = false;
+    if (nThreads > 0) mparams.n_threads = nThreads;
+    if (imageMinTokens > 0) mparams.image_min_tokens = imageMinTokens;
+    if (imageMaxTokens > 0) mparams.image_max_tokens = imageMaxTokens;
+    std::cerr << "[CreateContext] Loading mmproj: " << fsMmprojPath << std::endl;
+    mtmdCtx = mtmd_init_from_file(fsMmprojPath.c_str(), sharedModel.get(), mparams);
+    if (!mtmdCtx) {
+      llama_free(ctx);
+      throw Napi::Error::New(env,
+        "Failed to load mmproj (unsupported projector or corrupt file): " + fsMmprojPath);
+    }
+  }
+
   // Create SessionContext instance
   Napi::Function ctor = env.GetInstanceData<Napi::FunctionReference>()->Value();
   Napi::Object instance = ctor.New({});
@@ -1801,6 +2068,9 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
 
   // Initialize
   obj->initializeContext(std::move(sharedModel), ctx, nBatch);
+  if (mtmdCtx) {
+    obj->initializeMultimodal(mtmdCtx);
+  }
 
   std::cerr << "[CreateContext] SessionContext initialized" << std::endl;
   return instance;
@@ -2450,6 +2720,99 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
   auto* worker = new StorePrefillWorker(env, _branchStore, std::move(handles), std::move(tokenStorage));
   worker->Queue();
   return worker->GetPromise();
+}
+
+Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_mtmdContext) {
+    throw Napi::Error::New(env,
+      "_storePrefillMultimodal requires a multimodal context — pass mmprojPath to createContext");
+  }
+  if (info.Length() < 4 || !info[0].IsArray() || !info[1].IsArray() ||
+      !info[2].IsArray() || !info[3].IsArray()) {
+    throw Napi::Error::New(env,
+      "_storePrefillMultimodal requires (handles[], sepTokens[][], prompts[], bitmaps[][])");
+  }
+
+  Napi::Array jsHandles = info[0].As<Napi::Array>();
+  Napi::Array jsSeps = info[1].As<Napi::Array>();
+  Napi::Array jsPrompts = info[2].As<Napi::Array>();
+  Napi::Array jsBitmaps = info[3].As<Napi::Array>();
+  const uint32_t n = jsHandles.Length();
+
+  if (jsSeps.Length() != n || jsPrompts.Length() != n || jsBitmaps.Length() != n) {
+    throw Napi::Error::New(env,
+      "_storePrefillMultimodal: all argument arrays must have the same length");
+  }
+  if (n == 0) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(Napi::Array::New(env, 0));
+    return deferred.Promise();
+  }
+
+  // Marshal everything on the JS thread — the worker owns copies (Buffers
+  // must never be touched off-thread).
+  std::vector<lloyal::branch::BranchHandle> handles(n);
+  std::vector<std::vector<llama_token>> sepStorage(n);
+  std::vector<std::string> prompts(n);
+  std::vector<std::vector<std::vector<uint8_t>>> bitmapBytes(n);
+
+  for (uint32_t i = 0; i < n; i++) {
+    handles[i] = static_cast<lloyal::branch::BranchHandle>(
+      jsHandles.Get(i).As<Napi::Number>().Uint32Value());
+
+    Napi::Array jsSep = jsSeps.Get(i).As<Napi::Array>();
+    sepStorage[i].resize(jsSep.Length());
+    for (uint32_t j = 0; j < jsSep.Length(); j++) {
+      sepStorage[i][j] = static_cast<llama_token>(
+        jsSep.Get(j).As<Napi::Number>().Int32Value());
+    }
+
+    prompts[i] = jsPrompts.Get(i).As<Napi::String>().Utf8Value();
+
+    Napi::Array jsImgs = jsBitmaps.Get(i).As<Napi::Array>();
+    bitmapBytes[i].resize(jsImgs.Length());
+    for (uint32_t j = 0; j < jsImgs.Length(); j++) {
+      Napi::Value v = jsImgs.Get(j);
+      if (!v.IsBuffer() && !v.IsTypedArray()) {
+        throw Napi::Error::New(env,
+          "_storePrefillMultimodal: bitmaps must be Buffer/Uint8Array");
+      }
+      if (v.IsBuffer()) {
+        auto buf = v.As<Napi::Buffer<uint8_t>>();
+        bitmapBytes[i][j].assign(buf.Data(), buf.Data() + buf.Length());
+      } else {
+        auto ta = v.As<Napi::TypedArray>();
+        auto* base = static_cast<uint8_t*>(ta.ArrayBuffer().Data()) + ta.ByteOffset();
+        bitmapBytes[i][j].assign(base, base + ta.ByteLength());
+      }
+    }
+  }
+
+  const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
+
+  auto* worker = new StorePrefillMultimodalWorker(
+      env, _branchStore, _mtmdContext, nEmbdInp,
+      std::move(handles), std::move(sepStorage), std::move(prompts),
+      std::move(bitmapBytes));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::supportsVision(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+  return Napi::Boolean::New(env,
+    _mtmdContext != nullptr && mtmd_support_vision(_mtmdContext));
+}
+
+Napi::Value SessionContext::supportsAudio(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+  return Napi::Boolean::New(env,
+    _mtmdContext != nullptr && mtmd_support_audio(_mtmdContext));
 }
 
 Napi::Value SessionContext::_storeMergeLogits(const Napi::CallbackInfo& info) {

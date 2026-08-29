@@ -4,7 +4,7 @@
 [![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
 [![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
 [![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
-[![llama.cpp](https://img.shields.io/badge/llama.cpp-b8795-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b8795)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-b9581-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b9581)
 
 **Native backend for the lloyal inference platform.**
 
@@ -117,11 +117,53 @@ const tokens = await ctx.tokenize("Hello world");
 const sep = await ctx.getTurnSeparator();
 ```
 
+## Multimodal (Vision)
+
+Load a model's multimodal projector (`mmproj` GGUF) alongside it and prefill
+images into any branch's KV. Works with any llama.cpp-supported VL model —
+the projector decides the position mode (M-RoPE for Qwen, plain for
+llava-style) at runtime.
+
+```javascript
+const ctx = await createContext({
+  modelPath: "./Qwen3.5-4B-Q4_K_M.gguf",
+  mmprojPath: "./mmproj-F16.gguf",
+  nSeqMax: 8,
+});
+ctx.supportsVision(); // true
+
+// One <__media__> marker per image, injected as a media_marker content part
+const { prompt } = await ctx.formatChat(JSON.stringify([
+  { role: "user", content: [
+    { type: "text", text: "What is in this image?" },
+    { type: "media_marker", text: "<__media__>" },
+  ]},
+]));
+
+const bytes = fs.readFileSync("./photo.jpg"); // jpg/png/bmp/gif
+const [{ tokensDecoded, positionAdvance }] =
+  await ctx._storePrefillMultimodal([handle], [[]], [prompt], [[bytes]]);
+// ...then produce/commit as usual — the branch attends the image
+```
+
+The image lands in the KV as a shared prefix: fork the branch and every
+child attends the image with zero re-encode. Several markers with several
+images in one prefill also works — frames of a video, each preceded by a
+timestamp, are just that.
+
+Options: `imageMinTokens` / `imageMaxTokens` cap per-image token budgets
+(default: model metadata). A configured `mmprojPath` that fails to load
+throws at `createContext` — never a silent fall back to text-only. Audio
+bytes are rejected explicitly (no audio surface yet).
+
 ## What This Package Provides
 
 **Native-only** (not in SDK):
 
-- `createContext(options)` — load a GGUF model, return a `SessionContext`
+- `createContext(options)` — load a GGUF model, return a `SessionContext`;
+  `mmprojPath` loads the multimodal projector beside it
+- `_storePrefillMultimodal(...)` — image+text prefill into a branch's KV
+  (the embedding rail); `supportsVision()` / `supportsAudio()` probes
 - `loadBinary(options?)` — explicit GPU variant selection with automatic fallback
 - Prebuilt binaries for 13 platform/GPU combinations
 
@@ -178,6 +220,9 @@ Integration tests run real inference across architectures:
 | Gemma        | Gemma 3 1B   | gemma    |
 | SmolLM       | SmolLM2 1.7B | chatml   |
 | Ministral    | Ministral 3B | mistral  |
+
+Multimodal tests run on two tiers: SmolVLM-256M (plain positions, CI) and
+Qwen3.5-4B + mmproj (M-RoPE, local/GPU rig).
 
 See [distribution.md](docs/distribution.md) for details.
 

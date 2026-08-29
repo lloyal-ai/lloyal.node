@@ -11,6 +11,11 @@
 #include <string>
 #include <vector>
 
+// Forward declaration at GLOBAL scope — mtmd_context is llama.cpp/tools/mtmd's
+// opaque C type. Declaring it here (not inside the namespace below) keeps the
+// member/param types referring to ::mtmd_context, matching <mtmd.h>.
+struct mtmd_context;
+
 namespace liblloyal_node {
 
 /**
@@ -74,6 +79,14 @@ public:
     llama_context* context,
     int32_t nBatch = lloyal::defaults::N_BATCH_INIT
   );
+
+  /**
+   * Attach the mtmd (multimodal) context loaded from an mmproj file.
+   * Called by CreateContext when options.mmprojPath is set. Ownership
+   * transfers to this SessionContext (freed before the model in both
+   * the destructor and dispose()).
+   */
+  void initializeMultimodal(struct mtmd_context* mtmd);
 
 private:
   // ===== CORE PRIMITIVES =====
@@ -278,6 +291,21 @@ private:
 
   Napi::Value _storeCommit(const Napi::CallbackInfo& info);
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
+
+  /**
+   * Multimodal prefill: per-branch sep tokens + templated prompt (with
+   * media markers) + image bytes. mtmd tokenizes the prompt, the worker
+   * walks TEXT/IMAGE chunks in order (token rail / embedding rail).
+   * Args: (handles: number[], sepTokens: number[][], prompts: string[],
+   *        bitmaps: Buffer[][])
+   * Returns: Promise<{tokensDecoded, positionAdvance}[]>
+   */
+  Napi::Value _storePrefillMultimodal(const Napi::CallbackInfo& info);
+
+  /** True when the loaded mmproj has a vision encoder (no mmproj → false). */
+  Napi::Value supportsVision(const Napi::CallbackInfo& info);
+  /** True when the loaded mmproj has an audio encoder (no mmproj → false). */
+  Napi::Value supportsAudio(const Napi::CallbackInfo& info);
   Napi::Value _storeMergeLogits(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
@@ -292,6 +320,10 @@ private:
 
   std::shared_ptr<llama_model> _model;
   llama_context* _context = nullptr;
+  /// mtmd multimodal context (owned; nullptr when no mmproj was loaded).
+  /// Freed BEFORE _model in ~SessionContext and dispose() — mtmd holds a
+  /// reference to the model.
+  struct mtmd_context* _mtmdContext = nullptr;
   bool _disposed = false;
   int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
 

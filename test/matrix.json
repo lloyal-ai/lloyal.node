@@ -54,6 +54,18 @@
       "file": "slim-ner-tool.gguf",
       "url": "https://huggingface.co/llmware/slim-ner-tool/resolve/main/slim-ner-tool.gguf",
       "usedBy": ["entities"]
+    },
+    {
+      "name": "SmolVLM-256M",
+      "file": "SmolVLM-256M-Instruct-Q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/main/SmolVLM-256M-Instruct-Q8_0.gguf",
+      "usedBy": ["multimodal"]
+    },
+    {
+      "name": "SmolVLM-256M-mmproj",
+      "file": "mmproj-SmolVLM-256M-Instruct-Q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf",
+      "usedBy": ["multimodal"]
     }
   ]
 }

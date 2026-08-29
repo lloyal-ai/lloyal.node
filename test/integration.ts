@@ -2237,6 +2237,252 @@ async function testRerankConcurrent(): Promise<void> {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MULTIMODAL (mtmd) TESTS — the embedding rail
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Gated on a VL model + mmproj pair being present. Tier selection:
+//   env LLAMA_VL_MODEL + LLAMA_VL_MMPROJ (explicit), else
+//   Qwen3.5-4B + its mmproj (local dev — M-RoPE, content assertions), else
+//   SmolVLM-256M + its mmproj (CI tier — plain positions, mechanics only).
+
+const VL_PAIRS: Array<{ model: string; mmproj: string; mrope: boolean; strict: boolean }> = [
+  {
+    model: path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf'),
+    mmproj: path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'),
+    mrope: true,
+    strict: true,
+  },
+  {
+    model: path.join(__dirname, '../models/SmolVLM-256M-Instruct-Q8_0.gguf'),
+    mmproj: path.join(__dirname, '../models/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf'),
+    mrope: false,
+    strict: false,
+  },
+];
+
+function pickVlPair(): { model: string; mmproj: string; mrope: boolean; strict: boolean } | null {
+  if (process.env.LLAMA_VL_MODEL && process.env.LLAMA_VL_MMPROJ) {
+    const model = path.resolve(process.env.LLAMA_VL_MODEL);
+    return {
+      model,
+      mmproj: path.resolve(process.env.LLAMA_VL_MMPROJ),
+      mrope: /qwen/i.test(model),
+      strict: /qwen3\.5-4b|qwen3\.8/i.test(model),
+    };
+  }
+  for (const p of VL_PAIRS) {
+    if (fs.existsSync(p.model) && fs.existsSync(p.mmproj)) return p;
+  }
+  return null;
+}
+
+const MEDIA_MARKER = '<__media__>';
+
+async function testMultimodal(): Promise<void> {
+  const vl = pickVlPair();
+  if (!vl) {
+    console.log('\n--- Multimodal: SKIPPED (no VL model + mmproj pair in models/) ---');
+    return;
+  }
+  console.log(`\n--- Multimodal (${path.basename(vl.model)}, mrope=${vl.mrope}) ---`);
+
+  const IMG: Buffer = fs.readFileSync(path.join(__dirname, 'fixtures/red-square-blue-circle.png'));
+
+  // q4_0 KV (assertion 1) + small nBatch so any real image sub-chunks
+  // (assertion 3 — decode::embd's internal loop is the MAIN path).
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: vl.model,
+    mmprojPath: vl.mmproj,
+    nCtx: 8192,
+    nBatch: 256,
+    nSeqMax: 8,
+    typeK: 'q4_0',
+    typeV: 'q4_0',
+    nThreads: 4,
+  } as never);
+  const mm = ctx as unknown as {
+    _storePrefillMultimodal(
+      handles: number[], seps: number[][], prompts: string[], bitmaps: Buffer[][],
+    ): Promise<Array<{ tokensDecoded: number; positionAdvance: number }>>;
+    _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
+    _storeKvPressure(): { cellsUsed: number };
+    supportsVision(): boolean;
+    supportsAudio(): boolean;
+  };
+
+  try {
+    // Probes
+    assert(mm.supportsVision() === true, 'supportsVision() → true with mmproj loaded');
+    assert(mm.supportsAudio() === false, 'supportsAudio() → false (vision-only mmproj)');
+
+    // Assertion 2a — marker survives the SYSTEM-ONLY template route (the
+    // spine-header path; on Qwen3.5 this exercises the sentinel-retry).
+    const { prompt: sysPrompt } = await ctx.formatChat(
+      JSON.stringify([{
+        role: 'system',
+        content: [
+          { type: 'text', text: 'You can see the attached reference image.' },
+          { type: 'media_marker', text: MEDIA_MARKER },
+        ],
+      }]),
+      { addGenerationPrompt: false } as never,
+    );
+    assert(sysPrompt.includes(MEDIA_MARKER),
+      'marker verbatim through system-only route (media_marker content part)');
+
+    // The main user-turn prompt (generation prompt on — we produce after)
+    const { prompt: userPrompt } = await ctx.formatChat(JSON.stringify([
+      { role: 'system', content: 'You are a vision assistant. Answer briefly.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What shapes and colors are in this image?' },
+          { type: 'media_marker', text: MEDIA_MARKER },
+        ],
+      },
+    ]), { enableThinking: false } as never);
+    assert(userPrompt.includes(MEDIA_MARKER), 'marker verbatim through user-turn route');
+
+    // Assertion 1 + 4 — multimodal prefill on q4_0 KV; cells vs position
+    const root = Branch.create(ctx, 0, { temperature: 0 });
+    const cells0: number = mm._storeKvPressure().cellsUsed;
+    const res = await mm._storePrefillMultimodal([root.handle], [[]], [userPrompt], [[IMG]]);
+    const { tokensDecoded, positionAdvance } = res[0];
+    assert(tokensDecoded > 0, `prefill decoded ${tokensDecoded} tokens`);
+    assert(root.position === positionAdvance,
+      `branch position (${root.position}) == positionAdvance (${positionAdvance})`);
+    const cells1: number = mm._storeKvPressure().cellsUsed;
+    assert(cells1 - cells0 === tokensDecoded,
+      `cells grew by tokensDecoded (${cells1 - cells0} == ${tokensDecoded})`);
+    if (vl.mrope) {
+      assert(positionAdvance < tokensDecoded,
+        `M-RoPE decouple: positionAdvance (${positionAdvance}) < tokensDecoded (${tokensDecoded})`);
+    } else {
+      assert(positionAdvance === tokensDecoded,
+        `plain positions: positionAdvance == tokensDecoded (${tokensDecoded})`);
+    }
+    // Assertion 3 — with nBatch 256, a real image (>=256 rows on these
+    // models) exercised decode::embd's sub-chunk loop; reaching here with a
+    // coherent KV is the observable (a broken view/pos repack would throw or
+    // corrupt the grounded answer below).
+
+    // Grounded answer on the image
+    const gen: number[] = [];
+    for (let i = 0; i < 48; i++) {
+      const { token, isStop } = await root.produce();
+      if (isStop) break;
+      await root.commit(token);
+      gen.push(token);
+    }
+    assert(gen.length > 0, `generated ${gen.length} tokens after image prefill`);
+    const answer: string = await ctx.detokenize(gen);
+    if (vl.strict) {
+      assert(/red|square|blue|circle/i.test(answer),
+        `grounded answer names the content: "${answer.trim()}"`);
+    } else {
+      ok(`answer (mechanics tier): "${answer.trim()}"`);
+    }
+    const cellsAfterGen: number = mm._storeKvPressure().cellsUsed;
+
+    // Assertion 5 — spine-share: fork ×2 AFTER the image; forks add no cells
+    const childA = await root.fork();
+    const childB = await root.fork();
+    assert(mm._storeKvPressure().cellsUsed === cellsAfterGen,
+      'fork ×2 adds zero cells (image KV shared, not copied)');
+
+    const sep: number[] = ctx.getTurnSeparator();
+    const { prompt: qPrompt } = await ctx.formatChat(JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'user', content: 'In one word, what color is the square?' },
+    ]), { enableThinking: false } as never);
+    const qToks: number[] = await ctx.tokenize(qPrompt, false);
+    const childToks: number[] = [...sep, ...qToks];
+
+    let aCells = 0;
+    for (const child of [childA, childB]) {
+      const before: number = mm._storeKvPressure().cellsUsed;
+      await child.prefill(childToks);
+      const cgen: number[] = [];
+      for (let i = 0; i < 8; i++) {
+        const { token, isStop } = await child.produce();
+        if (isStop) break;
+        await child.commit(token);
+        cgen.push(token);
+      }
+      assert(cgen.length > 0, 'forked child answers over the shared image');
+      if (vl.strict && child === childA) {
+        const ctext: string = await ctx.detokenize(cgen);
+        assert(/red/i.test(ctext), `child sees the image (square color): "${ctext.trim()}"`);
+      }
+      if (child === childA) aCells = mm._storeKvPressure().cellsUsed - before;
+    }
+
+    // Assertion 4b — releasing a fork recovers exactly its OWN cells (text
+    // suffix only, never the shared image): the release-slack fix.
+    const beforeRelease: number = mm._storeKvPressure().cellsUsed;
+    await childA.prune();
+    const released: number = beforeRelease - mm._storeKvPressure().cellsUsed;
+    assert(released === aCells,
+      `release recovered exactly the fork's own cells (${released} == ${aCells})`);
+    await childB.prune();
+
+    // Assertion 6 — prefill ending AT the marker (no trailing template
+    // text): logits must be available for an immediate produce().
+    const term = Branch.create(ctx, 0, { temperature: 0 });
+    const termRes = await mm._storePrefillMultimodal(
+      [term.handle], [[]], [`Describe: ${MEDIA_MARKER}`], [[IMG]]);
+    assert(termRes[0].tokensDecoded > 0, 'marker-terminal prefill decoded');
+    const t1 = await term.produce();
+    assert(Number.isInteger(t1.token), 'produce() works immediately after marker-terminal prefill');
+    await term.prune();
+
+    // Assertion 7 — duplicate handle in one store call throws (fail loud)
+    let dupThrew = false;
+    try {
+      await mm._storePrefill([root.handle, root.handle], [[qToks[0]], [qToks[0]]]);
+    } catch { dupThrew = true; }
+    assert(dupThrew, 'duplicate handle in one _storePrefill rejects');
+
+    // Marker/bitmap count mismatch throws (mtmd_tokenize rc=1 path)
+    let mismatchThrew = false;
+    try {
+      const b = Branch.create(ctx, 0, { temperature: 0 });
+      try {
+        await mm._storePrefillMultimodal([b.handle], [[]], [`x ${MEDIA_MARKER}`], [[IMG, IMG]]);
+      } finally { await b.prune(); }
+    } catch { mismatchThrew = true; }
+    assert(mismatchThrew, 'marker/bitmap count mismatch rejects');
+
+    // Assertion 8 — frames (the video-carrying contract): several marker'd
+    // frames + timestamp text in ONE prefill.
+    const frames = Branch.create(ctx, 0, { temperature: 0 });
+    const framesPrompt =
+      `Video frames. t=0s: ${MEDIA_MARKER} t=1s: ${MEDIA_MARKER} t=2s: ${MEDIA_MARKER} ` +
+      `What color is the square across the frames? Answer in one word:`;
+    const fRes = await mm._storePrefillMultimodal(
+      [frames.handle], [[]], [framesPrompt], [[IMG, IMG, IMG]]);
+    assert(fRes[0].tokensDecoded > 0 && fRes[0].positionAdvance > 0,
+      `frames prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+    const fgen: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const { token, isStop } = await frames.produce();
+      if (isStop) break;
+      await frames.commit(token);
+      fgen.push(token);
+    }
+    assert(fgen.length > 0, 'answer over multi-frame prefill');
+    if (vl.strict) {
+      const ftext: string = await ctx.detokenize(fgen);
+      assert(/red/i.test(ftext), `temporal answer grounded: "${ftext.trim()}"`);
+    }
+    await frames.prune();
+    await root.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
 async function main(): Promise<void> {
   let mainCtx: SessionContext | null = null;
 
@@ -2278,6 +2524,7 @@ async function main(): Promise<void> {
     await testSetSamplerParams();
     await testSetGrammar();
     await testBranchMetrics();
+    await testMultimodal();
     await testRerank();
     await testRerankLargeCorpus();
     await testRerankConcurrent();
