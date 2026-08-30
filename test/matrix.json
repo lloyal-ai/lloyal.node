@@ -54,6 +54,12 @@
       "file": "slim-ner-tool.gguf",
       "url": "https://huggingface.co/llmware/slim-ner-tool/resolve/main/slim-ner-tool.gguf",
       "usedBy": ["entities"]
+    },
+    {
+      "name": "qwen3-reranker-0.6b-q8",
+      "file": "qwen3-reranker-0.6b-q8.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/qwen3-reranker-0.6b-q8_0.gguf",
+      "usedBy": ["rerank"]
     }
   ]
 }
