@@ -31,28 +31,15 @@ npm install @lloyal-labs/lloyal.node
 
 Resolution is ordered and mostly invisible — but when the wrong binary loads, this is the order that decided it.
 
-```mermaid
-flowchart TD
-    L{"LLOYAL_LOCAL=1"} -->|yes| LB["build/Release<br/>throws if absent — never falls back"]
-    L -->|no| D{"LLOYAL_BACKEND_DIR"}
-    D -->|set| DP["that pack — asserts the devices you asked for"]
-    D -->|unset| C{"cached backend pack"}
-    C -->|valid| CP["use it"]
-    C -->|none| V{"variant requested?<br/>argument or LLOYAL_GPU"}
-    V -->|yes| VP["platform package for that variant"]
-    VP -->|"fails"| W["warn, fall back<br/>unless LLOYAL_NO_FALLBACK=1"]
-    V -->|no| DEF["local build, then the default CPU package"]
-    W --> DEF
-```
+| # | Source | If it fails |
+| --- | --- | --- |
+| 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
+| 2 | `LLOYAL_BACKEND_DIR` → that pack | throws; asserts the devices you asked for |
+| 3 | a cached backend pack | throws if present-but-invalid — **no** fallthrough to npm |
+| 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
+| 5 | local `build/Release` | continues — fresher than an installed package during development |
+| 6 | default CPU package for the platform | throws, naming everything it tried |
 
-| Variable | Effect |
-| --- | --- |
-| `LLOYAL_GPU` | Variant to try — same values as the `loadBinary()` argument |
-| `LLOYAL_NO_FALLBACK=1` | A failed variant throws instead of warning and dropping to CPU |
-| `LLOYAL_LOCAL=1` | Force `build/Release`; fails loudly rather than silently using a published binary |
-| `LLOYAL_BACKEND_DIR` | Load a backend pack from a named directory |
-
-An invalid cached pack **throws** rather than falling through to npm — a corrupt cache is a bug to see, not to route around.
 
 ## Quick start
 
