@@ -4,7 +4,7 @@
 [![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
 [![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
 [![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
-[![llama.cpp](https://img.shields.io/badge/llama.cpp-b9581-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b9581)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-pinned-green.svg)](./liblloyal/.llama-cpp-version)
 
 **Vertical Inference on Node — the kernel prebuilt for 13 targets, GPU chosen at run time**
 
@@ -67,7 +67,7 @@ See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk
 
 ## What this package is
 
-lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel, on llama.cpp b9581 — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
+lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
 
 **What it owns:**
 
