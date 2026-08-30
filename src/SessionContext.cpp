@@ -13,7 +13,7 @@
 #include <lloyal/embedding.hpp>
 #include <lloyal/metrics.hpp>
 #include <mtmd.h>
-#include <mtmd-helper.h>
+#include <lloyal/mtmd.hpp>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -677,25 +677,17 @@ private:
 };
 
 /**
- * AsyncWorker for multimodal prefill (the embedding rail beside the token
- * rail). Owns everything it touches off-thread: per-branch sep tokens,
- * templated prompt strings (containing <__media__> markers), and copied
- * image bytes. All mtmd calls live HERE — liblloyal stays mtmd-free.
+ * AsyncWorker for multimodal prefill — a marshaller, like its siblings.
  *
- * Per branch, in order (segments are sequential store calls — start_pos is
- * read from branch position at dispatch time):
- *   1. sep tokens          → decode_scatter (token rail)
- *   2. mtmd_tokenize       → interleaved TEXT/IMAGE chunks
- *      (add_special=false, parse_special=true — parity with the text path)
- *   3. TEXT chunk          → decode_scatter (ready token ids; never
- *                            re-tokenized)
- *      IMAGE chunk         → mtmd_encode_chunk → prefill_embd
- *                            (section-major M-RoPE positions: y→s1, x→s2)
- *      AUDIO chunk         → error (v1: not supported; never silently skip)
- *   4. logits requested on the final chunk only
+ * Owns everything it touches off-thread (prompt strings, copied image bytes,
+ * sep tokens) and hands each branch to the kernel as one call. The pipeline
+ * itself lives where it belongs: `lloyal::MtmdSource` (mtmd.hpp) produces the
+ * segment stream, `BranchStore::decode_segments` places it — rails, positions,
+ * logits and cell/slack accounting are all the store's, so no KV state
+ * crosses into this layer.
  *
- * Returns per-branch {tokensDecoded, positionAdvance} — JS cannot know
- * multimodal token counts (mtmd owns tokenization) and the trace/pressure
+ * Returns per-branch {tokensDecoded, positionAdvance}: JS cannot know
+ * multimodal token counts (mtmd owns tokenization) and the trace + pressure
  * layers need them.
  */
 class StorePrefillMultimodalWorker : public Napi::AsyncWorker {
@@ -722,7 +714,11 @@ public:
     try {
       _results.resize(_handles.size());
       for (size_t i = 0; i < _handles.size(); ++i) {
-        prefillBranch(i);
+        lloyal::MtmdSource source(
+            _mtmd, _prompts[i], _bitmapBytes[i],
+            std::span<const llama_token>(_sepStorage[i]), _nEmbdInp);
+        const auto r = _store.decode_segments(_handles[i], source);
+        _results[i] = { r.cells, static_cast<int64_t>(r.advance) };
       }
     } catch (const std::exception& e) { SetError(e.what()); }
   }
@@ -742,129 +738,6 @@ public:
   Napi::Promise GetPromise() { return _deferred.Promise(); }
 
 private:
-  void prefillBranch(size_t i) {
-    const auto handle = _handles[i];
-    auto* st = _store.get(handle);
-    if (!st) {
-      throw std::runtime_error("_storePrefillMultimodal: invalid handle at index " + std::to_string(i));
-    }
-    const llama_pos startPos = st->position;
-    int64_t tokensDecoded = 0;
-
-    // 1. Leading sep tokens via the token rail
-    if (!_sepStorage[i].empty()) {
-      lloyal::branch::DecodeScatterItem item{
-          handle, std::span<const llama_token>(_sepStorage[i])};
-      _store.decode_scatter(std::span<const lloyal::branch::DecodeScatterItem>(&item, 1));
-      tokensDecoded += static_cast<int64_t>(_sepStorage[i].size());
-    }
-
-    // 2. Bytes → bitmaps (audio bytes auto-route and are rejected below;
-    //    video files fail to decode with MTMD_VIDEO off — both fail loud)
-    std::vector<mtmd::bitmap_ptr> bitmaps;
-    std::vector<const mtmd_bitmap*> bitmapPtrs;
-    bitmaps.reserve(_bitmapBytes[i].size());
-    for (const auto& bytes : _bitmapBytes[i]) {
-      auto wrap = mtmd_helper_bitmap_init_from_buf(
-          _mtmd, bytes.data(), bytes.size(), /*placeholder*/ false);
-      if (wrap.video_ctx) {
-        mtmd_helper_video_free(wrap.video_ctx);
-        if (wrap.bitmap) mtmd_bitmap_free(wrap.bitmap);
-        throw std::runtime_error("_storePrefillMultimodal: video input is not supported");
-      }
-      if (!wrap.bitmap) {
-        throw std::runtime_error(
-            "_storePrefillMultimodal: unsupported media bytes at image " +
-            std::to_string(bitmaps.size()) + " (expected jpg/png/bmp/gif)");
-      }
-      bitmaps.emplace_back(wrap.bitmap);
-      bitmapPtrs.push_back(wrap.bitmap);
-    }
-
-    // 3. Tokenize: mtmd owns tokenization (no double-tokenize). Flags are
-    //    the text-path parity contract: add_special=false (no
-    //    mid-conversation BOS), parse_special=true (template specials).
-    mtmd::input_chunks_ptr chunks(mtmd_input_chunks_init());
-    mtmd_input_text txt{_prompts[i].c_str(), /*add_special*/ false, /*parse_special*/ true};
-    const int32_t rc = mtmd_tokenize(_mtmd, chunks.get(), &txt,
-                                     bitmapPtrs.data(), bitmapPtrs.size());
-    if (rc == 1) {
-      throw std::runtime_error(
-          "_storePrefillMultimodal: media marker count does not match image count");
-    }
-    if (rc != 0) {
-      throw std::runtime_error("_storePrefillMultimodal: image preprocessing failed");
-    }
-
-    // 4. Walk chunks in order
-    const bool useMrope = mtmd_decode_use_mrope(_mtmd);
-    const size_t nChunks = mtmd_input_chunks_size(chunks.get());
-    for (size_t c = 0; c < nChunks; ++c) {
-      const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks.get(), c);
-      const auto type = mtmd_input_chunk_get_type(chunk);
-      const bool isLast = (c == nChunks - 1);
-
-      if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
-        size_t nText = 0;
-        const llama_token* toks = mtmd_input_chunk_get_tokens_text(chunk, &nText);
-        if (nText == 0) continue;
-        lloyal::branch::DecodeScatterItem item{
-            handle, std::span<const llama_token>(toks, nText)};
-        _store.decode_scatter(std::span<const lloyal::branch::DecodeScatterItem>(&item, 1));
-        tokensDecoded += static_cast<int64_t>(nText);
-
-      } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
-        if (mtmd_encode_chunk(_mtmd, chunk) != 0) {
-          throw std::runtime_error("_storePrefillMultimodal: image encode failed");
-        }
-        // Context-owned reused buffer — consumed by the decode below
-        // before the next encode.
-        const float* embd = mtmd_get_output_embd(_mtmd);
-        const int32_t nTokens = static_cast<int32_t>(mtmd_input_chunk_get_n_tokens(chunk));
-        const llama_pos nPos = mtmd_input_chunk_get_n_pos(chunk);
-        const llama_pos pos0 = _store.get(handle)->position;
-        const int32_t nppe = useMrope ? 4 : 1;
-
-        // Section-major positions. M-RoPE section order is t,y,x,z —
-        // y in section 1, x in section 2 (mtmd's decoder convention).
-        std::vector<llama_pos> pos(static_cast<size_t>(nTokens) * nppe);
-        if (useMrope) {
-          const mtmd_image_tokens* imgToks = mtmd_input_chunk_get_tokens_image(chunk);
-          if (!imgToks) {
-            throw std::runtime_error("_storePrefillMultimodal: image tokens missing");
-          }
-          std::vector<mtmd_decoder_pos> rel(static_cast<size_t>(nTokens));
-          mtmd_helper_image_get_decoder_pos(imgToks, pos0, rel.data());
-          for (int32_t k = 0; k < nTokens; ++k) {
-            pos[k] = static_cast<llama_pos>(rel[k].t);
-            pos[k + nTokens] = static_cast<llama_pos>(rel[k].y);
-            pos[k + 2 * nTokens] = static_cast<llama_pos>(rel[k].x);
-            pos[k + 3 * nTokens] = static_cast<llama_pos>(rel[k].z);
-          }
-        } else {
-          for (int32_t k = 0; k < nTokens; ++k) {
-            pos[k] = pos0 + k;
-          }
-        }
-
-        const bool nonCausal = mtmd_decode_use_non_causal(_mtmd, chunk);
-        _store.prefill_embd(handle, embd, nTokens, _nEmbdInp, nPos,
-                            pos.data(), nppe, nonCausal,
-                            /*want_logits*/ isLast);
-        tokensDecoded += static_cast<int64_t>(nTokens);
-
-      } else {
-        // AUDIO — the byte sniffer auto-routes audio; reject explicitly
-        // rather than silently skipping KV content the caller expected.
-        throw std::runtime_error("_storePrefillMultimodal: audio input is not supported");
-      }
-    }
-
-    _results[i].tokensDecoded = tokensDecoded;
-    _results[i].positionAdvance =
-        static_cast<int64_t>(_store.get(handle)->position - startPos);
-  }
-
   Napi::Promise::Deferred _deferred;
   lloyal::branch::BranchStore& _store;
   mtmd_context* _mtmd;

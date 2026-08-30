@@ -2477,6 +2477,84 @@ async function testMultimodal(): Promise<void> {
       assert(/red/i.test(ftext), `temporal answer grounded: "${ftext.trim()}"`);
     }
     await frames.prune();
+
+    // Assertion 9 — batched fan-out over the shared image, through the PUBLIC
+    // BranchStore surface. The spine-share above proves forks are free and
+    // drives its children ONE AT A TIME; this drives N children TOGETHER, each
+    // asking a different question, at one dispatch per tick. That is the
+    // README's "N branches, 1 GPU call" over a prefix encoded exactly once —
+    // and it exercises the JS→N-API marshalling of handle/token arrays that
+    // the kernel-level test cannot reach.
+    const store = new BranchStore(ctx);
+    // Short SENTENCES, not single words: a one-word answer emits its token and
+    // stops, so the loop below would do a single dispatch and prove nothing
+    // about sustained batching. Several tokens each keeps all four branches
+    // live across multiple ticks, which is the property under test.
+    const asks: Array<{ q: string; expect: RegExp }> = [
+      { q: 'Describe the red object in a short sentence.', expect: /square/i },
+      { q: 'Describe the blue object in a short sentence.', expect: /circle/i },
+      { q: 'In a short sentence, what color is the square?', expect: /red/i },
+      { q: 'In a short sentence, what color is the circle?', expect: /blue/i },
+    ];
+
+    const cellsBeforeFan: number = mm._storeKvPressure().cellsUsed;
+    const kids: InstanceType<typeof Branch>[] = [];
+    for (let i = 0; i < asks.length; i++) kids.push(await root.fork());
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan,
+      `fan-out: fork ×${asks.length} over the image adds zero cells`);
+
+    // Every child's question in ONE variable-length scatter.
+    const suffixes: number[][] = [];
+    for (const a of asks) {
+      const { prompt: p } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
+        { role: 'user', content: a.q },
+      ]), { enableThinking: false } as never);
+      suffixes.push([...sep, ...(await ctx.tokenize(p, false))]);
+    }
+    const suffixTotal: number = suffixes.reduce((n, s) => n + s.length, 0);
+    await store.prefill(kids.map((b, i) => [b, suffixes[i]] as [typeof b, number[]]));
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan + suffixTotal,
+      `fan-out: costs only the text suffixes (${suffixTotal}), never the image again`);
+
+    // One store.commit() per tick carries every live child.
+    const fanToks: number[][] = asks.map(() => []);
+    let ticks = 0;
+    for (let step = 0; step < 16; step++) {
+      const entries: Array<[InstanceType<typeof Branch>, number]> = [];
+      for (let i = 0; i < kids.length; i++) {
+        if (fanToks[i].length && fanToks[i][fanToks[i].length - 1] === -1) continue;
+        const { token, isStop } = await kids[i].produce();
+        if (isStop) { fanToks[i].push(-1); continue; }
+        fanToks[i].push(token);
+        entries.push([kids[i], token]);
+      }
+      if (!entries.length) break;
+      await store.commit(entries);
+      ticks++;
+    }
+    // >1 is the point: several consecutive ticks each carrying every live
+    // branch in ONE llama_decode is continuous tree batching. A single
+    // dispatch would satisfy "it batched" without showing it sustains.
+    assert(ticks > 1,
+      `fan-out: ${ticks} batched dispatches, each carrying up to ${kids.length} branches`);
+
+    for (let i = 0; i < asks.length; i++) {
+      const toks: number[] = fanToks[i].filter((t) => t !== -1);
+      assert(toks.length > 0, `fan-out: child ${i} produced an answer`);
+      const text: string = await ctx.detokenize(toks);
+      if (vl.strict) {
+        assert(asks[i].expect.test(text),
+          `fan-out: "${asks[i].q}" → "${text.trim()}"`);
+      } else {
+        ok(`fan-out child ${i} (mechanics tier): "${text.trim()}"`);
+      }
+    }
+
+    for (const k of kids) await k.prune();
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan,
+      'fan-out: children release their own cells, image prefix intact');
+
     await root.prune();
   } finally {
     ctx.dispose();
