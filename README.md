@@ -27,62 +27,6 @@ npm install @lloyal-labs/lloyal.node
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-## Which binary loads
-
-Resolution is ordered and mostly invisible — but when the wrong binary loads, this is the order that decided it.
-
-| # | Source | If it fails |
-| --- | --- | --- |
-| 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
-| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws; asserts the devices you asked for |
-| 3 | a cached [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws if present-but-invalid — **no** fallthrough to npm |
-| 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
-| 5 | local `build/Release` | continues — fresher than an installed package during development |
-| 6 | default CPU package for the platform | throws, naming everything it tried |
-
-
-## The backend pack — frontier GPUs, and every CPU
-
-The npm packages are one build per platform/GPU pair. The backend pack is the other shape: **one artifact carrying many backends as separately loadable modules** (`GGML_BACKEND_DL`), chosen at load time. It is a full `lloyal.node` addon plus its backends, not a set of loose libraries.
-
-That buys two things.
-
-**Frontier GPUs.** Blackwell is newer than most published builds, so an **sm_100** device would otherwise fall back to JIT or to CPU. The pack ships real SASS for it, and a per-arch `cuobjdump` gate at publish time refuses to build one where any declared arch is missing its SASS or PTX — the claim cannot silently rot.
-
-**Every CPU microarchitecture.** Built with `GGML_CPU_ALL_VARIANTS`, gated at **≥8** `libggml-cpu-<variant>.so` modules, so the best instruction set for the host is picked at load rather than baked in. This is not only a GPU feature.
-
-```javascript
-import { probeBackendPack, ensureBackendPack } from "@lloyal-labs/lloyal.node";
-
-const offer = await probeBackendPack();        // inspects only — never downloads
-if (offer.recommended) await ensureBackendPack();
-```
-
-**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — a pack arrives only through an explicit `ensureBackendPack()` or a provisioner. On load it also calls `listDevices()` and **throws if a GPU was requested and none registered**, so a pack that quietly came up CPU-only fails loudly instead of being slow.
-
-Three gates run before a pack is offered at all:
-
-| Gate | Question |
-| --- | --- |
-| device | is the GPU covered by real SASS, or by a JIT-able PTX floor? |
-| driver | native SASS needs no JIT; otherwise, can the driver JIT the pack's toolkit PTX? |
-| runtime | does the installed CUDA runtime meet the manifest's minimum, or is the companion runtime needed too? |
-
-| GPU | Outcome |
-| --- | --- |
-| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion archive with it |
-| H100 (sm_90) | PTX only — offered where the driver can JIT |
-| L4 (sm_89) | never offered; the npm package already ships native for it |
-| no NVIDIA GPU | never offered |
-
-The companion runtime is its own archive — `cudart`, `cublas`, `cublasLt`, `nvJitLink` — so a host with an older CUDA can still run the pack without touching its system install.
-
-Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than falling through to npm, which is why it sits above the variant lookup in the table above.
-
-> **Two channels, not one.** The 13 prebuilt npm packages cover macOS, Linux **and Windows** — `win32-x64-cuda` is one of them, so Windows CUDA ships that way and needs nothing from this section.
->
-> The backend pack is a separate, opt-in channel published only for **linux-x64**. `platformTag()` returns `null` anywhere else, so a pack is never even looked for, and `LLOYAL_BACKEND_DL=1` refuses to build one. linux-arm64 is the named follow-on.
-
 ## Quick start
 
 ```javascript
@@ -212,6 +156,20 @@ const [{ tokensDecoded, positionAdvance }] =
 
 A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is rejected explicitly.
 
+## Which binary loads
+
+Resolution is ordered and mostly invisible — but when the wrong binary loads, this is the order that decided it.
+
+| # | Source | If it fails |
+| --- | --- | --- |
+| 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
+| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws; asserts the devices you asked for |
+| 3 | a cached [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws if present-but-invalid — **no** fallthrough to npm |
+| 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
+| 5 | local `build/Release` | continues — fresher than an installed package during development |
+| 6 | default CPU package for the platform | throws, naming everything it tried |
+
+
 ## GPU variant selection
 
 ```javascript
@@ -225,6 +183,48 @@ const binding = loadBinary("cuda");           // "default" | "cuda" | "vulkan"
 const ctx2 = await binding.createContext({ modelPath: "./model.gguf" });
 // Falls back to CPU with a warning unless LLOYAL_NO_FALLBACK=1
 ```
+
+## The backend pack — frontier GPUs, and every CPU
+
+The npm packages are one build per platform/GPU pair. The backend pack is the other shape: **one artifact carrying many backends as separately loadable modules** (`GGML_BACKEND_DL`), chosen at load time. It is a full `lloyal.node` addon plus its backends, not a set of loose libraries.
+
+That buys two things.
+
+**Frontier GPUs.** Blackwell is newer than most published builds, so an **sm_100** device would otherwise fall back to JIT or to CPU. The pack ships real SASS for it, and a per-arch `cuobjdump` gate at publish time refuses to build one where any declared arch is missing its SASS or PTX — the claim cannot silently rot.
+
+**Every CPU microarchitecture.** Built with `GGML_CPU_ALL_VARIANTS`, gated at **≥8** `libggml-cpu-<variant>.so` modules, so the best instruction set for the host is picked at load rather than baked in. This is not only a GPU feature.
+
+```javascript
+import { probeBackendPack, ensureBackendPack } from "@lloyal-labs/lloyal.node";
+
+const offer = await probeBackendPack();        // inspects only — never downloads
+if (offer.recommended) await ensureBackendPack();
+```
+
+**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — a pack arrives only through an explicit `ensureBackendPack()` or a provisioner. On load it also calls `listDevices()` and **throws if a GPU was requested and none registered**, so a pack that quietly came up CPU-only fails loudly instead of being slow.
+
+Three gates run before a pack is offered at all:
+
+| Gate | Question |
+| --- | --- |
+| device | is the GPU covered by real SASS, or by a JIT-able PTX floor? |
+| driver | native SASS needs no JIT; otherwise, can the driver JIT the pack's toolkit PTX? |
+| runtime | does the installed CUDA runtime meet the manifest's minimum, or is the companion runtime needed too? |
+
+| GPU | Outcome |
+| --- | --- |
+| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion archive with it |
+| H100 (sm_90) | PTX only — offered where the driver can JIT |
+| L4 (sm_89) | never offered; the npm package already ships native for it |
+| no NVIDIA GPU | never offered |
+
+The companion runtime is its own archive — `cudart`, `cublas`, `cublasLt`, `nvJitLink` — so a host with an older CUDA can still run the pack without touching its system install.
+
+Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than falling through to npm, which is why it sits above the variant lookup in the table above.
+
+> **Two channels, not one.** The 13 prebuilt npm packages cover macOS, Linux **and Windows** — `win32-x64-cuda` is one of them, so Windows CUDA ships that way and needs nothing from this section.
+>
+> The backend pack is a separate, opt-in channel published only for **linux-x64**. `platformTag()` returns `null` anywhere else, so a pack is never even looked for, and `LLOYAL_BACKEND_DL=1` refuses to build one. linux-arm64 is the named follow-on.
 
 ## Examples
 
