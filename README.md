@@ -83,7 +83,7 @@ See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk
 
 ```mermaid
 flowchart TD
-    A["@lloyal-labs/rig<br/>Apps · retrieval"] --> B["@lloyal-labs/lloyal-agents<br/>agents · pools · spines"]
+    A["@lloyal-labs/rig<br/>Abilities · tools"] --> B["@lloyal-labs/lloyal-agents<br/>agents · pools · spines"]
     B --> C["@lloyal-labs/sdk<br/>Branch · BranchStore<br/>Session · Rerank"]
     C --> D["lloyal.node<br/>SessionContext<br/>binaries · GPU choice"]
     D --> E["liblloyal<br/>C++20 kernel · tree ops"]
@@ -99,7 +99,7 @@ Everything above `lloyal.node` is backend-agnostic; everything below is native. 
 - `loadBinary(variant?)` — pick the variant explicitly
 - The prebuilt binaries themselves
 
-**Re-exported, so one install is enough:** `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar`, per-token metrics — and from the agents package `useAgent`, `agentPool`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, plus the App protocol surfaces that pair with rig's `defineApp`.
+**Re-exported, so one install is enough:** `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar`, per-token metrics — and from the agents package `useAgent`, `agentPool`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, plus the Ability protocol surfaces (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`) that pair with rig's `defineAbility` / `createAbilityRegistry`.
 
 ## The native surface
 
@@ -214,9 +214,9 @@ Multimodal runs two tiers: SmolVLM-256M for plain positions in CI, Qwen3.5-4B + 
 | Package | Description |
 | --- | --- |
 | [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) | Backend-agnostic inference primitives |
-| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime + App protocol primitives |
-| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | App helpers, retrieval providers, framework tools |
-| [`harness.dev`](https://www.npmjs.com/package/harness.dev) | CLI — scaffold harnesses and Apps, publish/install signed Apps |
+| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime + Ability protocol primitives |
+| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | Abilities — `defineAbility`, the registry, and the retrieval and framework tools they are built from |
+| [`harness.dev`](https://www.npmjs.com/package/harness.dev) | CLI — scaffold harnesses and Abilities, publish/install signed Abilities |
 | [liblloyal](https://github.com/lloyal-ai/liblloyal) | The C++20 kernel |
 | **lloyal.node** | This package — native backend + prebuilt binaries |
 | [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native backend via Nitro Modules |
