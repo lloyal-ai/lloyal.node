@@ -83,10 +83,10 @@ See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk
 
 ```mermaid
 flowchart TD
-    A["@lloyal-labs/rig<br/>Apps, retrieval, framework tools"] --> B["@lloyal-labs/lloyal-agents<br/>agents, pools, spines"]
-    B --> C["@lloyal-labs/sdk<br/>Branch · BranchStore · Session · Rerank"]
-    C --> D["lloyal.node<br/>SessionContext · binaries · GPU selection"]
-    D --> E["liblloyal<br/>C++20 kernel — the tree ops"]
+    A["@lloyal-labs/rig<br/>Apps · retrieval"] --> B["@lloyal-labs/lloyal-agents<br/>agents · pools · spines"]
+    B --> C["@lloyal-labs/sdk<br/>Branch · BranchStore<br/>Session · Rerank"]
+    C --> D["lloyal.node<br/>SessionContext<br/>binaries · GPU choice"]
+    D --> E["liblloyal<br/>C++20 kernel · tree ops"]
     E --> F["llama.cpp b9581"]
 ```
 
