@@ -1908,6 +1908,20 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
 
   std::cerr << "[CreateContext] Context created successfully" << std::endl;
 
+  // ctx and mtmdCtx stay RAW until initializeContext/initializeMultimodal take
+  // ownership. Everything between here and there can throw — a missing mmproj,
+  // a failed projector load, ctor.New({}), Unwrap — and each would leak. The
+  // guard makes cleanup unconditional; release by nulling once ownership moves.
+  struct NativeHandles {
+    llama_context* ctx  = nullptr;
+    mtmd_context*  mtmd = nullptr;
+    ~NativeHandles() {
+      if (mtmd) mtmd_free(mtmd);
+      if (ctx)  llama_free(ctx);
+    }
+  } owned;
+  owned.ctx = ctx;
+
   // Load the mmproj (multimodal projector) BEFORE the model shared_ptr is
   // moved into the instance — mtmd_init_from_file validates the projector's
   // output dim against the text model and holds a model reference. Fail
@@ -1917,7 +1931,6 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   if (!mmprojPath.empty()) {
     std::string fsMmprojPath = liblloyal_node::FileSystem::normalizePath(mmprojPath);
     if (!liblloyal_node::FileSystem::exists(fsMmprojPath)) {
-      llama_free(ctx);
       throw Napi::Error::New(env, "mmproj file not found: " + fsMmprojPath);
     }
     mtmd_context_params mparams = mtmd_context_params_default();
@@ -1928,10 +1941,10 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
     std::cerr << "[CreateContext] Loading mmproj: " << fsMmprojPath << std::endl;
     mtmdCtx = mtmd_init_from_file(fsMmprojPath.c_str(), sharedModel.get(), mparams);
     if (!mtmdCtx) {
-      llama_free(ctx);
       throw Napi::Error::New(env,
         "Failed to load mmproj (unsupported projector or corrupt file): " + fsMmprojPath);
     }
+    owned.mtmd = mtmdCtx;
   }
 
   // Create SessionContext instance
@@ -1941,8 +1954,10 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
 
   // Initialize
   obj->initializeContext(std::move(sharedModel), ctx, nBatch);
+  owned.ctx = nullptr;   // ownership transferred
   if (mtmdCtx) {
     obj->initializeMultimodal(mtmdCtx);
+    owned.mtmd = nullptr;
   }
 
   std::cerr << "[CreateContext] SessionContext initialized" << std::endl;
@@ -2625,6 +2640,26 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
     return deferred.Promise();
   }
 
+  // Duplicate handles would prefill the same branch twice in sequence, each
+  // advancing its position. decode_scatter rejects duplicates, but this path
+  // dispatches one handle at a time so the pair never meets there — check it
+  // here to keep the same fail-loud contract as _storePrefill/_storeCommit.
+  {
+    std::vector<double> seen;
+    seen.reserve(n);
+    for (uint32_t i = 0; i < n; i++) {
+      const double h = jsHandles.Get(i).As<Napi::Number>().DoubleValue();
+      for (uint32_t j = 0; j < seen.size(); j++) {
+        if (seen[j] == h) {
+          throw Napi::Error::New(env,
+            "_storePrefillMultimodal: duplicate handle at indices " +
+            std::to_string(j) + " and " + std::to_string(i));
+        }
+      }
+      seen.push_back(h);
+    }
+  }
+
   // Marshal everything on the JS thread — the worker owns copies (Buffers
   // must never be touched off-thread).
   std::vector<lloyal::branch::BranchHandle> handles(n);
@@ -2649,7 +2684,12 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
     bitmapBytes[i].resize(jsImgs.Length());
     for (uint32_t j = 0; j < jsImgs.Length(); j++) {
       Napi::Value v = jsImgs.Get(j);
-      if (!v.IsBuffer() && !v.IsTypedArray()) {
+      // Uint8Array specifically, not any TypedArray: an Int32Array would
+      // pass a bare IsTypedArray() check and then be reinterpreted as raw
+      // bytes, silently feeding the decoder the wrong buffer.
+      const bool isU8 = v.IsTypedArray() &&
+          v.As<Napi::TypedArray>().TypedArrayType() == napi_uint8_array;
+      if (!v.IsBuffer() && !isU8) {
         throw Napi::Error::New(env,
           "_storePrefillMultimodal: bitmaps must be Buffer/Uint8Array");
       }

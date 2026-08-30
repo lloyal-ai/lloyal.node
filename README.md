@@ -140,6 +140,7 @@ const { prompt } = await ctx.formatChat(JSON.stringify([
   ]},
 ]));
 
+const handle = ctx._branchCreate(0, { temperature: 0 });
 const bytes = fs.readFileSync("./photo.jpg"); // jpg/png/bmp/gif
 const [{ tokensDecoded, positionAdvance }] =
   await ctx._storePrefillMultimodal([handle], [[]], [prompt], [[bytes]]);
@@ -150,6 +151,13 @@ The image lands in the KV as a shared prefix: fork the branch and every
 child attends the image with zero re-encode. Several markers with several
 images in one prefill also works — frames of a video, each preceded by a
 timestamp, are just that.
+
+> **Types.** `createContext` is typed as `ContextOptions` from
+> `@lloyal-labs/sdk`, so `mmprojPath` / `imageMinTokens` / `imageMaxTokens`
+> and the `supportsVision()` / `_storePrefillMultimodal()` members only
+> typecheck once an SDK carrying the multimodal `ContextOptions` is installed.
+> The runtime accepts them regardless; TypeScript consumers on an older SDK
+> will need that upgrade first.
 
 Options: `imageMinTokens` / `imageMaxTokens` cap per-image token budgets
 (default: model metadata). A configured `mmprojPath` that fails to load
