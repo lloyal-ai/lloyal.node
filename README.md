@@ -34,12 +34,44 @@ Resolution is ordered and mostly invisible — but when the wrong binary loads, 
 | # | Source | If it fails |
 | --- | --- | --- |
 | 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
-| 2 | `LLOYAL_BACKEND_DIR` → that pack | throws; asserts the devices you asked for |
-| 3 | a cached backend pack | throws if present-but-invalid — **no** fallthrough to npm |
+| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#frontier-gpus--the-backend-pack) | throws; asserts the devices you asked for |
+| 3 | a cached [backend pack](#frontier-gpus--the-backend-pack) | throws if present-but-invalid — **no** fallthrough to npm |
 | 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
 | 5 | local `build/Release` | continues — fresher than an installed package during development |
 | 6 | default CPU package for the platform | throws, naming everything it tried |
 
+
+## Frontier GPUs — the backend pack
+
+The npm packages carry native SASS for mainstream architectures. **Blackwell is newer than most published builds**, so an sm_100 device would otherwise fall back to JIT or to CPU. The backend pack closes that gap: a signed, dynamically-loaded backend bundle fetched from `apps.lloyal.ai` and cached per lloyal.node version.
+
+```javascript
+import { probeBackendPack, ensureBackendPack } from "@lloyal-labs/lloyal.node";
+
+const offer = await probeBackendPack();        // inspects only — never downloads
+if (offer.recommended) await ensureBackendPack();
+```
+
+**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — the cache appears only through an explicit `ensureBackendPack()` or a provisioner.
+
+Three gates run before a pack is even offered:
+
+| Gate | Question |
+| --- | --- |
+| device | is the GPU covered by real SASS, or by a JIT-able PTX floor? |
+| driver | native SASS needs no JIT; otherwise, can the driver JIT the pack's toolkit PTX? |
+| runtime | does the installed CUDA runtime meet the manifest's minimum, or is a companion runtime needed too? |
+
+What that decides in practice:
+
+| GPU | Outcome |
+| --- | --- |
+| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion runtime with it |
+| H100 (sm_90) | PTX only — offered where the driver can JIT the pack's toolkit |
+| L4 (sm_89) | never offered; the npm package already ships native for it |
+| no NVIDIA GPU | never offered |
+
+Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than quietly falling through to npm, which is why it sits above the variant lookup in the table above.
 
 ## Quick start
 
