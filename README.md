@@ -141,7 +141,9 @@ Everything above `lloyal.node` is backend-agnostic; everything below is native. 
 - `loadBinary(variant?)` — pick the variant explicitly
 - The prebuilt binaries themselves
 
-**Re-exported, so one install is enough:** `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar`, per-token metrics — and from the agents package `useAgent`, `agentPool`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, plus the Ability protocol surfaces (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`) that pair with rig's `defineAbility` / `createAbilityRegistry`.
+**Re-exported, so one install is enough:** from the SDK, `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar` and the per-token metrics; from agents, `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`.
+
+**Not re-exported** — import these from their own packages: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, and `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
 
 ## The native surface
 
@@ -256,8 +258,8 @@ Multimodal runs two tiers: SmolVLM-256M for plain positions in CI, Qwen3.5-4B + 
 | Package | Description |
 | --- | --- |
 | [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) | Backend-agnostic inference primitives |
-| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime + Ability protocol primitives |
-| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | Abilities — `defineAbility`, the registry, and the retrieval and framework tools they are built from |
+| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime; owns the Ability protocol contracts and the `GrantStore` / `authGuard` surface that gates `protected` tools |
+| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | Builds Abilities on those contracts — `defineAbility`, `createAbilityRegistry`, retrieval and framework tools, and `createGrantStore`, the reference in-memory grant store |
 | [`harness.dev`](https://www.npmjs.com/package/harness.dev) | CLI — scaffold harnesses and Abilities, publish/install signed Abilities |
 | [liblloyal](https://github.com/lloyal-ai/liblloyal) | The C++20 kernel |
 | **lloyal.node** | This package — native backend + prebuilt binaries |
