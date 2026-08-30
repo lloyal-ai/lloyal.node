@@ -1,12 +1,10 @@
 /**
- * Standalone runner for testRerankLargeCorpus — bypasses the rest of the
- * integration suite (which has an unrelated decode_each KV-pressure crash at
- * b9581 in the multi-turn session test). Pins whether R3's rounding fix
- * resolves the original CI failure that triggered the rerank-hardening
- * effort.
+ * Standalone runner for testRerankLargeCorpus — scores the 20-doc corpus
+ * without paying for the rest of the integration suite. Useful for bisecting
+ * the ranking against model quant, KV quant and nSeqMax.
  *
  * Usage:
- *   LLAMA_RERANK_MODEL=models/qwen3-reranker-0.6b-q4_k_m.gguf \
+ *   LLAMA_RERANK_MODEL=models/qwen3-reranker-0.6b-q8.gguf \
  *     npx tsx test/__rerank-large-corpus-standalone.ts
  */
 
@@ -16,7 +14,7 @@ import { createContext, Rerank } from '../dist/index.js';
 
 const RERANK_MODEL_PATH =
   process.env.LLAMA_RERANK_MODEL ||
-  path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf');
+  path.join(__dirname, '../models/qwen3-reranker-0.6b-q8.gguf');
 
 if (!fs.existsSync(RERANK_MODEL_PATH)) {
   console.error(`Model not found: ${RERANK_MODEL_PATH}`);
@@ -33,12 +31,16 @@ function assert(cond: boolean, msg: string): void {
 async function main() {
   console.log(`Model: ${path.basename(RERANK_MODEL_PATH)}\n`);
 
-  // nSeqMax=10 → trunk + queryBranch + 8 effective leaves (matches old code's
-  // 8-leaf batching). The original testRerankLargeCorpus hardcoded nSeqMax=8
-  // expecting 8 leaves directly; under the new architecture's 2-lease tax for
-  // trunk+queryBranch, the same setting drops to 6 effective leaves and
-  // produces different GEMM tiling that q4_k_m's quantization floor can't
-  // distinguish from distractors.
+  // nSeqMax=10 → trunk + queryBranch + 8 effective leaves. testRerankLargeCorpus
+  // hardcodes 8, which under the 2-lease tax for trunk+queryBranch yields only
+  // 6 effective leaves.
+  //
+  // That lease tax is a real difference in batching, but it is NOT what decided
+  // the old ranking failure. Measured on q4_k_m + q4_0 KV, the relevant doc
+  // scores -5.5427 at BOTH nSeqMax 8 and 10 — identical to four decimals. Only
+  // the distractors shuffle (doc 13: -1.347 -> -3.698), moving it 5th to 4th.
+  // The judge rejects the correct document either way; the cause is stacked
+  // quant loss (see RERANK_MODEL_PATH in test/integration.ts), not tiling.
   const rerankCtx = await createContext({
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,

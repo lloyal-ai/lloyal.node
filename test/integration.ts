@@ -27,9 +27,21 @@ const EMBED_MODEL_PATH: string | null = process.env.LLAMA_EMBED_MODEL ||
   (fs.existsSync(path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf'))
     ? path.join(__dirname, '../models/nomic-embed-text-v1.5.Q4_K_M.gguf')
     : null);
+// q8, not q4_k_m — deliberate, and measured. The large-corpus case scores 20
+// docs on q4_0 KV; at q4_k_m weights that stacks two lossy axes and the judge
+// returns NEGATIVE for every document, including the correct one (Paris
+// -5.54, ranking 5th behind 'The Great Wall of China is over 13,000 miles
+// long.'). The ranking is then noise among rejects, not a near-miss between
+// similar documents. Measured 2x2 — only that corner fails:
+//   q4_k_m + q4_0 KV -> rank 5, Paris -5.54  (trails by 1.23 ~= q4_0's noise floor)
+//   q4_k_m + f16  KV -> rank 0, Paris +3.36
+//   q8     + q4_0 KV -> rank 0, Paris +1.80
+//   q8     + f16  KV -> rank 0, Paris +4.72
+// Fixing either axis works; q8 is the one that keeps the quantized-KV path
+// under test, and matches what rig's catalog actually ships.
 const RERANK_MODEL_PATH: string | null = process.env.LLAMA_RERANK_MODEL ||
-  (fs.existsSync(path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf'))
-    ? path.join(__dirname, '../models/qwen3-reranker-0.6b-q4_k_m.gguf')
+  (fs.existsSync(path.join(__dirname, '../models/qwen3-reranker-0.6b-q8.gguf'))
+    ? path.join(__dirname, '../models/qwen3-reranker-0.6b-q8.gguf')
     : null);
 
 const CTX_SIZE: number = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
