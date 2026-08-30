@@ -65,29 +65,23 @@ for await (const { token, text } of branch) process.stdout.write(text);
 
 See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) for the Branch API, continuous tree batching, KV tenancy and topology.
 
-## Who owns what
+## What this package is
 
-```mermaid
-flowchart TD
-    B["@lloyal-labs/lloyal-agents<br/>what you write<br/>useAgent · agentPool"] --> C["@lloyal-labs/sdk<br/>Branch · BranchStore<br/>Session · Rerank"]
-    R["@lloyal-labs/rig<br/>Abilities you install"] -. plugs into .-> B
-    C --> D["lloyal.node<br/>SessionContext · binaries"]
-    D --> E["liblloyal<br/>C++20 kernel · tree ops"]
-    E --> F["llama.cpp b9581"]
-```
+lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel, on llama.cpp b9581 — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
 
-You write agents; Abilities plug into them; everything from the SDK down is machinery you rarely touch. Everything above `lloyal.node` is backend-agnostic and everything below is native — that seam is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
-
-**Native-only, not in the SDK:**
+**What it owns:**
 
 - `createContext(options)` — load a GGUF, get a `SessionContext`. `mmprojPath` loads a multimodal projector beside it.
 - `_storePrefillMultimodal(...)` — image + text into a branch's KV, plus `supportsVision()` / `supportsAudio()`
-- `loadBinary(variant?)` — pick the variant explicitly
-- The prebuilt binaries themselves
+- `loadBinary(variant?)` and the [binary resolution order](#which-binary-loads)
+- The prebuilt binaries and the [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu)
 
-**Re-exported, so one install is enough:** from the SDK, `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar` and the per-token metrics; from agents, `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`.
+**What it re-exports**, so one install is enough — these are [HDK](https://github.com/lloyal-ai/hdk) packages, documented there:
 
-**Not re-exported** — import these from their own packages: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, and `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
+- from `@lloyal-labs/sdk`: `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar`, per-token metrics
+- from `@lloyal-labs/lloyal-agents`: `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`
+
+Not re-exported — import from the package itself: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
 
 ## The native surface
 
