@@ -34,16 +34,22 @@ Resolution is ordered and mostly invisible — but when the wrong binary loads, 
 | # | Source | If it fails |
 | --- | --- | --- |
 | 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
-| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#frontier-gpus--the-backend-pack) | throws; asserts the devices you asked for |
-| 3 | a cached [backend pack](#frontier-gpus--the-backend-pack) | throws if present-but-invalid — **no** fallthrough to npm |
+| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws; asserts the devices you asked for |
+| 3 | a cached [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws if present-but-invalid — **no** fallthrough to npm |
 | 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
 | 5 | local `build/Release` | continues — fresher than an installed package during development |
 | 6 | default CPU package for the platform | throws, naming everything it tried |
 
 
-## Frontier GPUs — the backend pack
+## The backend pack — frontier GPUs, and every CPU
 
-The npm packages carry native SASS for mainstream architectures. **Blackwell is newer than most published builds**, so an sm_100 device would otherwise fall back to JIT or to CPU. The backend pack closes that gap: a signed, dynamically-loaded backend bundle fetched from `apps.lloyal.ai` and cached per lloyal.node version.
+The npm packages are one build per platform/GPU pair. The backend pack is the other shape: **one artifact carrying many backends as separately loadable modules** (`GGML_BACKEND_DL`), chosen at load time. It is a full `lloyal.node` addon plus its backends, not a set of loose libraries.
+
+That buys two things.
+
+**Frontier GPUs.** Blackwell is newer than most published builds, so an **sm_100** device would otherwise fall back to JIT or to CPU. The pack ships real SASS for it, and a per-arch `cuobjdump` gate at publish time refuses to build one where any declared arch is missing its SASS or PTX — the claim cannot silently rot.
+
+**Every CPU microarchitecture.** Built with `GGML_CPU_ALL_VARIANTS`, gated at **≥8** `libggml-cpu-<variant>.so` modules, so the best instruction set for the host is picked at load rather than baked in. This is not only a GPU feature.
 
 ```javascript
 import { probeBackendPack, ensureBackendPack } from "@lloyal-labs/lloyal.node";
@@ -52,26 +58,28 @@ const offer = await probeBackendPack();        // inspects only — never downlo
 if (offer.recommended) await ensureBackendPack();
 ```
 
-**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — the cache appears only through an explicit `ensureBackendPack()` or a provisioner.
+**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — a pack arrives only through an explicit `ensureBackendPack()` or a provisioner. On load it also calls `listDevices()` and **throws if a GPU was requested and none registered**, so a pack that quietly came up CPU-only fails loudly instead of being slow.
 
-Three gates run before a pack is even offered:
+Three gates run before a pack is offered at all:
 
 | Gate | Question |
 | --- | --- |
 | device | is the GPU covered by real SASS, or by a JIT-able PTX floor? |
 | driver | native SASS needs no JIT; otherwise, can the driver JIT the pack's toolkit PTX? |
-| runtime | does the installed CUDA runtime meet the manifest's minimum, or is a companion runtime needed too? |
-
-What that decides in practice:
+| runtime | does the installed CUDA runtime meet the manifest's minimum, or is the companion runtime needed too? |
 
 | GPU | Outcome |
 | --- | --- |
-| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion runtime with it |
-| H100 (sm_90) | PTX only — offered where the driver can JIT the pack's toolkit |
+| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion archive with it |
+| H100 (sm_90) | PTX only — offered where the driver can JIT |
 | L4 (sm_89) | never offered; the npm package already ships native for it |
 | no NVIDIA GPU | never offered |
 
-Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than quietly falling through to npm, which is why it sits above the variant lookup in the table above.
+The companion runtime is its own archive — `cudart`, `cublas`, `cublasLt`, `nvJitLink` — so a host with an older CUDA can still run the pack without touching its system install.
+
+Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than falling through to npm, which is why it sits above the variant lookup in the table above.
+
+> Packs are published for **linux-x64 with CUDA** today; `LLOYAL_BACKEND_DL=1` refuses any other combination at build time. Everywhere else, the npm packages are the whole story.
 
 ## Quick start
 
