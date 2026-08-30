@@ -6,11 +6,15 @@
 [![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-pinned-green.svg)](./liblloyal/.llama-cpp-version)
 
-**Vertical Inference on Node — the kernel prebuilt for 13 targets, GPU chosen at run time**
+**The Node runtime for the HDK — built on liblloyal and llama.cpp**
 
-[liblloyal](https://github.com/lloyal-ai/liblloyal) is the C++20 kernel: Git-like tree ops over live inference state. This package is how you run it. One `npm install` gets a binary compiled for your platform, a `SessionContext` bound to it, and the rest of the HDK re-exported — so `import { Branch, useAgent } from "@lloyal-labs/lloyal.node"` works without a second package.
+The HDK's packages are backend-agnostic TypeScript: `Branch` and `BranchStore` in the SDK, agents and pools above them. They describe what to do with inference state; they cannot decode a token on their own. On Node, this package is what they run on.
 
-Nothing compiles on install. The variant that matches your hardware is chosen when the process starts, so the same artifact ships to a CPU laptop and a CUDA box.
+`createContext()` returns the `SessionContext` every HDK primitive drives — forking a branch, batching N branches into one dispatch, prefilling text or image rows into a branch's KV. Underneath it is [liblloyal](https://github.com/lloyal-ai/liblloyal), the header-only C++20 kernel that enables Git-like tree ops for live inference state, on llama.cpp for the model execution.
+
+It ships **prebuilt for 13 platform/GPU targets**. Nothing compiles on install, and the variant matching your hardware is chosen when the process starts — so the same artifact ships to a laptop and a CUDA box.
+
+The rest of the HDK is re-exported, so `import { Branch, useAgent } from "@lloyal-labs/lloyal.node"` needs no second package.
 
 ## Install
 
