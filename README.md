@@ -69,14 +69,14 @@ See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk
 
 ```mermaid
 flowchart TD
-    A["@lloyal-labs/rig<br/>Abilities · tools"] --> B["@lloyal-labs/lloyal-agents<br/>agents · pools · spines"]
-    B --> C["@lloyal-labs/sdk<br/>Branch · BranchStore<br/>Session · Rerank"]
-    C --> D["lloyal.node<br/>SessionContext<br/>binaries · GPU choice"]
+    B["@lloyal-labs/lloyal-agents<br/>what you write<br/>useAgent · agentPool"] --> C["@lloyal-labs/sdk<br/>Branch · BranchStore<br/>Session · Rerank"]
+    R["@lloyal-labs/rig<br/>Abilities you install"] -. plugs into .-> B
+    C --> D["lloyal.node<br/>SessionContext · binaries"]
     D --> E["liblloyal<br/>C++20 kernel · tree ops"]
     E --> F["llama.cpp b9581"]
 ```
 
-Everything above `lloyal.node` is backend-agnostic; everything below is native. That seam is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
+You write agents; Abilities plug into them; everything from the SDK down is machinery you rarely touch. Everything above `lloyal.node` is backend-agnostic and everything below is native — that seam is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
 
 **Native-only, not in the SDK:**
 
