@@ -79,7 +79,9 @@ The companion runtime is its own archive — `cudart`, `cublas`, `cublasLt`, `nv
 
 Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than falling through to npm, which is why it sits above the variant lookup in the table above.
 
-> Packs are published for **linux-x64 with CUDA** today; `LLOYAL_BACKEND_DL=1` refuses any other combination at build time. Everywhere else, the npm packages are the whole story.
+> **Two channels, not one.** The 13 prebuilt npm packages cover macOS, Linux **and Windows** — `win32-x64-cuda` is one of them, so Windows CUDA ships that way and needs nothing from this section.
+>
+> The backend pack is a separate, opt-in channel published only for **linux-x64**. `platformTag()` returns `null` anywhere else, so a pack is never even looked for, and `LLOYAL_BACKEND_DL=1` refuses to build one. linux-arm64 is the named follow-on.
 
 ## Quick start
 
