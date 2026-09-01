@@ -695,9 +695,13 @@ public:
   struct BranchResult {
     int64_t tokensDecoded = 0;
     int64_t positionAdvance = 0;
-    /** Empty when this entry landed. Non-empty ⇒ its branch is POISONED —
-     *  decode_segments is not atomic, and partial-range KV ops are meaningless
-     *  on recurrent layers, so the caller prunes and replays from content. */
+    /** Empty when this entry landed. Non-empty ⇒ the entry FAILED — either
+     *  before its decode ran (bitmap decode, marker/bitmap mismatch: the
+     *  branch is untouched) or inside decode_segments (the branch is
+     *  POISONED — the op is not atomic, and partial-range KV ops are
+     *  meaningless on recurrent layers). The caller cannot tell which from
+     *  here, so the contract is uniform: prune and replay from content —
+     *  pruning an untouched branch is safe. */
     std::string error;
   };
 
@@ -860,6 +864,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(env, "SessionContext", {
     // ===== CORE =====
     InstanceMethod("tokenToText", &SessionContext::tokenToText),
+    InstanceMethod("tokenToBytes", &SessionContext::tokenToBytes),
     InstanceMethod("isStopToken", &SessionContext::isStopToken),
     InstanceMethod("getEogToken", &SessionContext::getEogToken),
     InstanceMethod("getTurnSeparator", &SessionContext::getTurnSeparator),
@@ -1103,6 +1108,26 @@ Napi::Value SessionContext::tokenToText(const Napi::CallbackInfo& info) {
   std::string text = lloyal::tokenizer::detokenize(_model.get(), token, true);
 
   return Napi::String::New(env, text);
+}
+
+Napi::Value SessionContext::tokenToBytes(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    throw Napi::TypeError::New(env, "Expected token ID (number)");
+  }
+
+  llama_token token = static_cast<llama_token>(info[0].As<Napi::Number>().Int32Value());
+
+  // Byte-level twin of tokenToText. A BPE piece is a byte sequence that can
+  // end mid-character, so converting one piece to a JS string can tear
+  // multi-byte UTF-8 into U+FFFD. The SDK assembles streamed text from bytes
+  // at character boundaries; the binding stays a passthrough.
+  std::string text = lloyal::tokenizer::detokenize(_model.get(), token, true);
+
+  return Napi::Buffer<uint8_t>::Copy(
+      env, reinterpret_cast<const uint8_t*>(text.data()), text.size());
 }
 
 // ===== EMBEDDING EXTRACTION =====

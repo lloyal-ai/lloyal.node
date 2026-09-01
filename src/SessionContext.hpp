@@ -118,6 +118,7 @@ private:
    * Returns: string
    */
   Napi::Value tokenToText(const Napi::CallbackInfo& info);
+  Napi::Value tokenToBytes(const Napi::CallbackInfo& info);
 
   /**
    * Check if token is a stop token (EOS)
