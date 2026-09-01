@@ -10,6 +10,10 @@ on:
         description: 'Skip npm publish (for testing)'
         type: boolean
         default: true
+      skip_gpu:
+        description: 'Skip GPU tests (alpha cuts — CPU/Metal matrix still gates)'
+        type: boolean
+        default: false
 
 jobs:
   build-and-test:
@@ -329,6 +333,7 @@ jobs:
   gpu-tests:
     name: GPU Tests
     needs: build-and-test
+    if: github.event_name == 'push' || inputs.skip_gpu != true
     uses: ./.github/workflows/gpu-test.yml
     secrets: inherit
     permissions:
@@ -674,8 +679,14 @@ jobs:
     name: Publish all packages
     needs: [build-and-test, gpu-tests]
     runs-on: ubuntu-latest
-    # Only run if ALL jobs succeeded AND either it's a tag push or manual run without skip
-    if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
+    # Publish when the matrix succeeded and GPU tests either succeeded or were
+    # deliberately skipped (alpha cuts) — `success()` alone would treat the
+    # skip as a veto. A GPU FAILURE still blocks.
+    if: >-
+      !cancelled() &&
+      needs.build-and-test.result == 'success' &&
+      (needs.gpu-tests.result == 'success' || needs.gpu-tests.result == 'skipped') &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
     permissions:
       contents: read
       id-token: write  # Required for npm provenance
