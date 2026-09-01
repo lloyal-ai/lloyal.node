@@ -695,6 +695,10 @@ public:
   struct BranchResult {
     int64_t tokensDecoded = 0;
     int64_t positionAdvance = 0;
+    /** Empty when this entry landed. Non-empty ⇒ its branch is POISONED —
+     *  decode_segments is not atomic, and partial-range KV ops are meaningless
+     *  on recurrent layers, so the caller prunes and replays from content. */
+    std::string error;
   };
 
   StorePrefillMultimodalWorker(Napi::Env env,
@@ -710,17 +714,28 @@ public:
       _sepStorage(std::move(sepStorage)), _prompts(std::move(prompts)),
       _bitmapBytes(std::move(bitmapBytes)) {}
 
+  // Per-entry isolation, deliberately: a corrupt image in one agent's tool
+  // result must not cost its siblings their prefills. Failing the whole call
+  // would also lose WHICH entries landed, and the caller needs that to prune
+  // exactly the poisoned branches. Only a failure outside the loop (an
+  // allocation) can still reject the promise, because then there are no
+  // per-entry results to report at all.
   void Execute() override {
     try {
       _results.resize(_handles.size());
-      for (size_t i = 0; i < _handles.size(); ++i) {
+    } catch (const std::exception& e) { SetError(e.what()); return; }
+
+    for (size_t i = 0; i < _handles.size(); ++i) {
+      try {
         lloyal::MtmdSource source(
             _mtmd, _prompts[i], _bitmapBytes[i],
             std::span<const llama_token>(_sepStorage[i]), _nEmbdInp);
         const auto r = _store.decode_segments(_handles[i], source);
-        _results[i] = { r.cells, static_cast<int64_t>(r.advance) };
+        _results[i] = { r.cells, static_cast<int64_t>(r.advance), "" };
+      } catch (const std::exception& e) {
+        _results[i] = { 0, 0, e.what() };
       }
-    } catch (const std::exception& e) { SetError(e.what()); }
+    }
   }
 
   void OnOK() override {
@@ -730,6 +745,9 @@ public:
       Napi::Object r = Napi::Object::New(env);
       r.Set("tokensDecoded", Napi::Number::New(env, static_cast<double>(_results[i].tokensDecoded)));
       r.Set("positionAdvance", Napi::Number::New(env, static_cast<double>(_results[i].positionAdvance)));
+      if (!_results[i].error.empty()) {
+        r.Set("error", Napi::String::New(env, _results[i].error));
+      }
       out.Set(static_cast<uint32_t>(i), r);
     }
     _deferred.Resolve(out);
@@ -917,6 +935,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_storeCommit", &SessionContext::_storeCommit),
     InstanceMethod("_storePrefill", &SessionContext::_storePrefill),
     InstanceMethod("_storePrefillMultimodal", &SessionContext::_storePrefillMultimodal),
+    InstanceMethod("_cellsMultimodal", &SessionContext::_cellsMultimodal),
     InstanceMethod("supportsVision", &SessionContext::supportsVision),
     InstanceMethod("supportsAudio", &SessionContext::supportsAudio),
     InstanceMethod("_storeMergeLogits", &SessionContext::_storeMergeLogits),
@@ -2610,6 +2629,56 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
   return worker->GetPromise();
 }
 
+/**
+ * Reports what a multimodal prefill WOULD cost, without decoding it.
+ *
+ * Admission needs a number before the branch is touched: `decode_segments` is
+ * not atomic, so a caller that discovers the overflow midway has poisoned the
+ * branch, while one that refuses up front has spent nothing. Text can be
+ * measured by tokenizing it; an image cannot, because the caller holds bytes
+ * and the row count depends on the projector's geometry.
+ *
+ * Constructing the source is the measurement: `MtmdSource` counts cells after
+ * `mtmd_tokenize` and BEFORE any clip encode, so this pays bitmap decode plus
+ * tokenization — not the vision-tower pass, which stays in the prefill.
+ */
+class CellsMultimodalWorker : public Napi::AsyncWorker {
+public:
+  CellsMultimodalWorker(Napi::Env env,
+                        mtmd_context* mtmd,
+                        int32_t nEmbdInp,
+                        std::vector<llama_token> sep,
+                        std::string prompt,
+                        std::vector<std::vector<uint8_t>> bitmapBytes)
+    : AsyncWorker(env), _deferred(env), _mtmd(mtmd), _nEmbdInp(nEmbdInp),
+      _sep(std::move(sep)), _prompt(std::move(prompt)),
+      _bitmapBytes(std::move(bitmapBytes)) {}
+
+  void Execute() override {
+    try {
+      lloyal::MtmdSource source(
+          _mtmd, _prompt, _bitmapBytes,
+          std::span<const llama_token>(_sep), _nEmbdInp);
+      _cells = static_cast<int64_t>(source.cells());
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override {
+    _deferred.Resolve(Napi::Number::New(Env(), static_cast<double>(_cells)));
+  }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  mtmd_context* _mtmd;
+  int32_t _nEmbdInp;
+  std::vector<llama_token> _sep;
+  std::string _prompt;
+  std::vector<std::vector<uint8_t>> _bitmapBytes;
+  int64_t _cells = 0;
+};
+
 Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
@@ -2710,6 +2779,61 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
       env, _branchStore, _mtmdContext, nEmbdInp,
       std::move(handles), std::move(sepStorage), std::move(prompts),
       std::move(bitmapBytes));
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::_cellsMultimodal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_mtmdContext) {
+    throw Napi::Error::New(env,
+      "_cellsMultimodal requires a multimodal context — pass mmprojPath to createContext");
+  }
+  if (info.Length() < 3 || !info[0].IsArray() || !info[1].IsString() || !info[2].IsArray()) {
+    throw Napi::Error::New(env,
+      "_cellsMultimodal requires (sepTokens[], prompt, bitmaps[])");
+  }
+
+  // One delta at a time: admission is a per-delta question, and SETTLE already
+  // walks its items in order deducting from a running headroom.
+  Napi::Array jsSep = info[0].As<Napi::Array>();
+  std::vector<llama_token> sep(jsSep.Length());
+  for (uint32_t i = 0; i < jsSep.Length(); i++) {
+    sep[i] = static_cast<llama_token>(jsSep.Get(i).As<Napi::Number>().Int32Value());
+  }
+
+  std::string prompt = info[1].As<Napi::String>().Utf8Value();
+
+  // Marshal on the JS thread — the worker owns copies (Buffers must never be
+  // touched off-thread).
+  Napi::Array jsImgs = info[2].As<Napi::Array>();
+  std::vector<std::vector<uint8_t>> bitmapBytes(jsImgs.Length());
+  for (uint32_t j = 0; j < jsImgs.Length(); j++) {
+    Napi::Value v = jsImgs.Get(j);
+    // Uint8Array specifically, not any TypedArray: an Int32Array would pass a
+    // bare IsTypedArray() check and then be reinterpreted as raw bytes.
+    const bool isU8 = v.IsTypedArray() &&
+        v.As<Napi::TypedArray>().TypedArrayType() == napi_uint8_array;
+    if (!v.IsBuffer() && !isU8) {
+      throw Napi::Error::New(env, "_cellsMultimodal: bitmaps must be Buffer/Uint8Array");
+    }
+    if (v.IsBuffer()) {
+      auto buf = v.As<Napi::Buffer<uint8_t>>();
+      bitmapBytes[j].assign(buf.Data(), buf.Data() + buf.Length());
+    } else {
+      auto ta = v.As<Napi::TypedArray>();
+      auto* base = static_cast<uint8_t*>(ta.ArrayBuffer().Data()) + ta.ByteOffset();
+      bitmapBytes[j].assign(base, base + ta.ByteLength());
+    }
+  }
+
+  const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
+
+  auto* worker = new CellsMultimodalWorker(
+      env, _mtmdContext, nEmbdInp,
+      std::move(sep), std::move(prompt), std::move(bitmapBytes));
   worker->Queue();
   return worker->GetPromise();
 }

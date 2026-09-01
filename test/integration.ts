@@ -2444,15 +2444,25 @@ async function testMultimodal(): Promise<void> {
     } catch { dupThrew = true; }
     assert(dupThrew, 'duplicate handle in one _storePrefill rejects');
 
-    // Marker/bitmap count mismatch throws (mtmd_tokenize rc=1 path)
-    let mismatchThrew = false;
-    try {
+    // Marker/bitmap count mismatch is reported PER ENTRY, not by rejecting the
+    // whole call. A cohort carries N independent branches: rejecting would lose
+    // which of them landed, and six agents settling images must not lose five
+    // because one page was corrupt. `MtmdSource` still refuses in its
+    // CONSTRUCTOR — before any decode, branch untouched — so the entry is
+    // rejected just as hard; only the reporting channel changed.
+    let mismatchErr = '';
+    {
       const b = Branch.create(ctx, 0, { temperature: 0 });
       try {
-        await mm._storePrefillMultimodal([b.handle], [[]], [`x ${MEDIA_MARKER}`], [[IMG, IMG]]);
+        const r = await mm._storePrefillMultimodal(
+          [b.handle], [[]], [`x ${MEDIA_MARKER}`], [[IMG, IMG]]);
+        mismatchErr = r[0].error ?? '';
+        assert(r[0].tokensDecoded === 0,
+          'a refused entry decodes nothing (its branch is untouched)');
       } finally { await b.prune(); }
-    } catch { mismatchThrew = true; }
-    assert(mismatchThrew, 'marker/bitmap count mismatch rejects');
+    }
+    assert(/marker count/i.test(mismatchErr),
+      `marker/bitmap mismatch reported per entry: "${mismatchErr}"`);
 
     // Assertion 8 — frames (the video-carrying contract): several marker'd
     // frames + timestamp text in ONE prefill.

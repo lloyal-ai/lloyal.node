@@ -301,6 +301,7 @@ private:
    * Returns: Promise<{tokensDecoded, positionAdvance}[]>
    */
   Napi::Value _storePrefillMultimodal(const Napi::CallbackInfo& info);
+  Napi::Value _cellsMultimodal(const Napi::CallbackInfo& info);
 
   /** True when the loaded mmproj has a vision encoder (no mmproj → false). */
   Napi::Value supportsVision(const Napi::CallbackInfo& info);
