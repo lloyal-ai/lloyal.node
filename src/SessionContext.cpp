@@ -626,16 +626,25 @@ public:
       }
       // ~Snapshot frees the swapped-out (post-accept) state
 
+      // One arm, dynamic_cast for the rc — no catch-order hazard. The typed
+      // exception never crosses N-API; the rc travels as data (see OnError).
+      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) _rc = de->rc;
       SetError(e.what());
     }
   }
 
   void OnOK() override { _deferred.Resolve(Env().Undefined()); }
-  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  void OnError(const Napi::Error& err) override {
+    // Attach the rc to the JS error we construct — a property on an object we
+    // own, set on the JS thread. This is the whole boundary crossing.
+    if (_rc != 0) err.Value().As<Napi::Object>().Set("rc", Napi::Number::New(Env(), _rc));
+    _deferred.Reject(err.Value());
+  }
   Napi::Promise GetPromise() { return _deferred.Promise(); }
 
 private:
   Napi::Promise::Deferred _deferred;
+  int32_t _rc = 0;
   lloyal::branch::BranchStore& _store;
   std::vector<lloyal::branch::DecodeEachItem> _items;
 };
@@ -662,15 +671,23 @@ public:
         items[i].tokens = _tokenStorage[i];
       }
       _store.decode_scatter(items);
-    } catch (const std::exception& e) { SetError(e.what()); }
+    } catch (const std::exception& e) {
+      // One arm, dynamic_cast for the rc — no catch-order hazard.
+      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) _rc = de->rc;
+      SetError(e.what());
+    }
   }
 
   void OnOK() override { _deferred.Resolve(Env().Undefined()); }
-  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  void OnError(const Napi::Error& err) override {
+    if (_rc != 0) err.Value().As<Napi::Object>().Set("rc", Napi::Number::New(Env(), _rc));
+    _deferred.Reject(err.Value());
+  }
   Napi::Promise GetPromise() { return _deferred.Promise(); }
 
 private:
   Napi::Promise::Deferred _deferred;
+  int32_t _rc = 0;
   lloyal::branch::BranchStore& _store;
   std::vector<lloyal::branch::BranchHandle> _handles;
   std::vector<std::vector<llama_token>> _tokenStorage;
@@ -703,6 +720,10 @@ public:
      *  here, so the contract is uniform: prune and replay from content —
      *  pruning an untouched branch is safe. */
     std::string error;
+    /** llama_decode's raw return code when the failure carried one (0
+     *  otherwise — validation throws never reached llama_decode). The
+     *  caller's classification: 1/-1 restored, 2/<-1 poisoned. */
+    int32_t rc = 0;
   };
 
   StorePrefillMultimodalWorker(Napi::Env env,
@@ -737,7 +758,8 @@ public:
         const auto r = _store.decode_segments(_handles[i], source);
         _results[i] = { r.cells, static_cast<int64_t>(r.advance), "" };
       } catch (const std::exception& e) {
-        _results[i] = { 0, 0, e.what() };
+        const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e);
+        _results[i] = { 0, 0, e.what(), de ? de->rc : 0 };
       }
     }
   }
@@ -751,6 +773,7 @@ public:
       r.Set("positionAdvance", Napi::Number::New(env, static_cast<double>(_results[i].positionAdvance)));
       if (!_results[i].error.empty()) {
         r.Set("error", Napi::String::New(env, _results[i].error));
+        if (_results[i].rc != 0) r.Set("rc", Napi::Number::New(env, _results[i].rc));
       }
       out.Set(static_cast<uint32_t>(i), r);
     }
