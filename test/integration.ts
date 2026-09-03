@@ -2447,6 +2447,15 @@ async function testMultimodal(): Promise<void> {
     } catch { dupThrew = true; }
     assert(dupThrew, 'duplicate handle in one _storePrefill rejects');
 
+    // The multimodal cohort coerces handles with Uint32Value: 5 and 5.5 name
+    // the SAME branch, and its duplicate guard must see that too.
+    let fracDupThrew = false;
+    try {
+      await mm._storePrefillMultimodal(
+        [root.handle, root.handle + 0.5], [[], []], [userPrompt, userPrompt], [[IMG], [IMG]]);
+    } catch { fracDupThrew = true; }
+    assert(fracDupThrew, 'fractional duplicate handle in one _storePrefillMultimodal rejects');
+
     // Marker/bitmap count mismatch is reported PER ENTRY, not by rejecting the
     // whole call. A cohort carries N independent branches: rejecting would lose
     // which of them landed, and six agents settling images must not lose five
@@ -2574,6 +2583,135 @@ async function testMultimodal(): Promise<void> {
   }
 }
 
+// ============================================================================
+// A failed decode says what landed — the JavaScript side of the kernel's
+// DecodeError. The kernel's own suite proves the producers; this proves the
+// last hop: `rc` and `partial` arrive on the rejection (token rail) and on
+// the per-entry result (media rail), and the books a caller reads agree.
+// Runs on the default model and, when present, on the production default
+// (Qwen3.5-4B: a Gated DeltaNet hybrid, the carrier that cannot be rewound —
+// the reason the contract is prune-and-replay in the first place).
+// ============================================================================
+async function testDecodeFailure(): Promise<void> {
+  console.log('\n--- Decode failure: partial ---');
+  const failureOf = (err: unknown): { rc?: number; partial?: boolean; message?: string } =>
+    err as { rc?: number; partial?: boolean; message?: string };
+  const pressure = (c: SessionContext): { cellsUsed: number } =>
+    (c as unknown as { _storeKvPressure(): { cellsUsed: number } })._storeKvPressure();
+  const filler = (n: number, base: number, vocab: number): number[] =>
+    Array.from({ length: n }, (_, j) => (base + j) % vocab);
+
+  const models: string[] = [MODEL_PATH];
+  const gdn = path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf');
+  if (path.resolve(gdn) !== path.resolve(MODEL_PATH) && fs.existsSync(gdn)) models.push(gdn);
+
+  for (const modelPath of models) {
+    console.log(`  model: ${path.basename(modelPath)}`);
+
+    // A later scatter chunk finds no KV slot: rc 1, partial true, the landed
+    // children moved, the refused one did not and still works.
+    {
+      const ctx: SessionContext = await addon.createContext({ modelPath, nCtx: 256, nBatch: 128, nSeqMax: 4, nThreads: 4 });
+      try {
+        const vocab = ctx.vocabSize;
+        const prompt = await ctx.tokenize('Hello');
+        assert(prompt.length > 0 && prompt.length < 40, 'scatter: a short prefix');
+        const store = new BranchStore(ctx);
+        const root = Branch.create(ctx, 0, { temperature: 0 });
+        await root.prefill(prompt);
+        const p = root.position;
+        const cells0 = pressure(ctx).cellsUsed;
+        const kids = [await root.fork(), await root.fork(), await root.fork()];
+        // 100 tokens each under nBatch 128: three chunks. 256 cells hold p+200, not p+300.
+        let caught: ReturnType<typeof failureOf> | null = null;
+        try {
+          await store.prefill([
+            [kids[0], filler(100, 1000, vocab)],
+            [kids[1], filler(100, 2000, vocab)],
+            [kids[2], filler(100, 3000, vocab)],
+          ]);
+        } catch (err) { caught = failureOf(err); }
+        assert(caught !== null, 'scatter: the third chunk is refused');
+        assert(caught!.rc === 1, `scatter: rc 1 on the rejection (got ${caught!.rc})`);
+        assert(caught!.partial === true, `scatter: partial:true on the rejection (got ${caught!.partial})`);
+        assert(kids[0].position === p + 100 && kids[1].position === p + 100, 'scatter: landed children moved');
+        assert(kids[2].position === p, 'scatter: the refused child did not move');
+        assert(pressure(ctx).cellsUsed === cells0 + 200, 'scatter: landed cells charged, refused cells not');
+        await store.prefill([[kids[2], filler(10, 4000, vocab)]]);
+        assert(kids[2].position === p + 10, 'scatter: the intact child still prefills');
+        await root.pruneSubtree();
+        assert(pressure(ctx).cellsUsed === 0, 'scatter: the pool is whole after prune');
+        ok('scatter: rc 1 + partial:true in JS; landed 2/3, intact child prefilled, pool reclaimed');
+      } finally {
+        ctx.dispose();
+      }
+    }
+
+    // A chunked prefill that dies mid-way: poisoned, says so, prune reclaims it.
+    {
+      const ctx: SessionContext = await addon.createContext({ modelPath, nCtx: 256, nBatch: 64, nSeqMax: 2, nThreads: 4 });
+      try {
+        const vocab = ctx.vocabSize;
+        const b = Branch.create(ctx, 0, { temperature: 0 });
+        let caught: ReturnType<typeof failureOf> | null = null;
+        try { await b.prefill(filler(300, 1000, vocab)); } catch (err) { caught = failureOf(err); }
+        assert(caught !== null && caught.rc === 1 && caught.partial === true,
+          `prefill: rc 1 + partial:true (got rc=${caught?.rc} partial=${caught?.partial})`);
+        assert(b.position === 0, 'prefill: the books did not move');
+        assert(pressure(ctx).cellsUsed === 0, 'prefill: nothing charged');
+        await b.prune();
+        const fresh = Branch.create(ctx, 0, { temperature: 0 });
+        await fresh.prefill(filler(10, 5000, vocab));
+        assert(fresh.position === 10 && pressure(ctx).cellsUsed === 10, 'prefill: prune reclaimed the orphans — a fresh branch prefills');
+        await fresh.prune();
+        ok('prefill: poisoned reported as partial:true, reclaimed by prune');
+      } finally {
+        ctx.dispose();
+      }
+    }
+  }
+
+  // The media rail reports PER ENTRY: an image whose cells outrun the pool
+  // comes back with error + rc 1 + partial:true, its siblings untouched.
+  const vl = pickVlPair();
+  const bigImage = path.join(__dirname, '../liblloyal/tests/fixtures/cat.jpg');
+  if (!vl || !fs.existsSync(bigImage)) {
+    console.log('  [SKIP] media: no VL pair or no large fixture');
+    return;
+  }
+  {
+    const ctx: SessionContext = await addon.createContext({
+      modelPath: vl.model, mmprojPath: vl.mmproj, nCtx: 256, nBatch: 16, nSeqMax: 2, nThreads: 4,
+    } as never);
+    try {
+      const mm = ctx as unknown as {
+        _storePrefillMultimodal(handles: number[], seps: number[][], prompts: string[], bitmaps: Buffer[][]):
+          Promise<Array<{ tokensDecoded: number; positionAdvance: number; error?: string; rc?: number; partial?: boolean }>>;
+        _cellsMultimodal(sep: number[], prompt: string, bitmaps: Buffer[]): Promise<number>;
+      };
+      const IMG: Buffer = fs.readFileSync(bigImage);
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'user', content: [{ type: 'text', text: 'Describe this image.' }, { type: 'media_marker', text: MEDIA_MARKER }] },
+      ]));
+      const cells = await mm._cellsMultimodal([], prompt, [IMG]);
+      if (cells <= 256) {
+        console.log(`  [SKIP] media: the image costs ${cells} cells and fits in 256`);
+      } else {
+        const b = Branch.create(ctx, 0, { temperature: 0 });
+        const [r] = await mm._storePrefillMultimodal([b.handle], [[]], [prompt], [[IMG]]);
+        assert(typeof r.error === 'string', 'media: the entry failed');
+        assert(r.rc === 1 && r.partial === true,
+          `media: entry carries rc 1 + partial:true (got rc=${r.rc} partial=${r.partial}: ${r.error})`);
+        await b.prune();
+        assert(pressure(ctx).cellsUsed === 0, 'media: prune reclaimed the poisoned branch');
+        ok(`media: ${cells} cells against a 256-cell pool → per-entry rc 1 + partial:true, reclaimed`);
+      }
+    } finally {
+      ctx.dispose();
+    }
+  }
+}
+
 async function main(): Promise<void> {
   let mainCtx: SessionContext | null = null;
 
@@ -2616,6 +2754,7 @@ async function main(): Promise<void> {
     await testSetGrammar();
     await testBranchMetrics();
     await testMultimodal();
+    await testDecodeFailure();
     await testRerank();
     await testRerankLargeCorpus();
     await testRerankConcurrent();

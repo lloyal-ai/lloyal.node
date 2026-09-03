@@ -194,7 +194,8 @@ const claimImage = (binding: NativeBinding): NativeBinding => {
  * failure throws and never falls through — a corrupt pack must not
  * silently degrade to the npm CPU package.
  *
- * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
+ * @param variant GPU variant — `'cuda'`, `'vulkan'` or `'default'`; `undefined`
+ *        resolves from `LLOYAL_GPU` and the platform (see {@link GpuVariant})
  * @returns Native binary module with createContext method
  * @throws Error if no binary is available for the current platform, or if a
  * DIFFERENT addon image is already loaded in this thread — see {@link

@@ -726,7 +726,8 @@ public:
      *  before its decode ran (bitmap decode, marker/bitmap mismatch: the
      *  branch is untouched) or inside decode_segments. `rc` and `partial`
      *  say which case a decode failure is (see DecodeError in liblloyal):
-     *  intact iff rc == 1 && !partial; anything else ⇒ prune and replay from
+     *  intact iff the failing call restored state (rc 1 or -1) and nothing
+     *  before it landed (!partial); anything else ⇒ prune and replay from
      *  content — pruning an untouched branch is safe. */
     std::string error;
     /** llama_decode's raw return code when the failure carried one (0
@@ -2776,10 +2777,12 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
   // dispatches one handle at a time so the pair never meets there — check it
   // here to keep the same fail-loud contract as _storePrefill/_storeCommit.
   {
-    std::vector<double> seen;
+    // Coerced exactly as the marshal below coerces them: 5 and 5.5 name the
+    // same branch, and the guard must see that.
+    std::vector<uint32_t> seen;
     seen.reserve(n);
     for (uint32_t i = 0; i < n; i++) {
-      const double h = jsHandles.Get(i).As<Napi::Number>().DoubleValue();
+      const uint32_t h = jsHandles.Get(i).As<Napi::Number>().Uint32Value();
       for (uint32_t j = 0; j < seen.size(); j++) {
         if (seen[j] == h) {
           throw Napi::Error::New(env,
