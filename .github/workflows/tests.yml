@@ -67,14 +67,15 @@ jobs:
       # cache resolution, and the pack extractor. Plus the arch-mirror
       # drift gate: fails when a llama.cpp sync changes ggml's CUDA arch
       # derivation without scripts/dl-archs.js being reconciled.
-      # The test entries run against dist, the output that ships — integration.ts
-    # always did, and the unit test does since 6962f5c (importing ../src from a
-    # test made the compile gate emit .js beside the sources). tsc only; no
-    # native build is needed for this.
-    - name: Build TypeScript
-      run: npm run build:ts
+      #
+      # The test entries run against dist, the output that ships —
+      # integration.ts always did, and the unit test does since 6962f5c
+      # (importing ../src from a test made the compile gate emit .js beside
+      # the sources). tsc only; no native build is needed for this.
+      - name: Build TypeScript
+        run: npm run build:ts
 
-    - name: Backend-pack unit tests + arch drift gate + stderr allowlist
+      - name: Backend-pack unit tests + arch drift gate + stderr allowlist
         if: runner.os == 'Linux'
         run: |
           npm run test:unit
