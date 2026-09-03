@@ -2772,28 +2772,6 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
     return deferred.Promise();
   }
 
-  // Duplicate handles would prefill the same branch twice in sequence, each
-  // advancing its position. decode_scatter rejects duplicates, but this path
-  // dispatches one handle at a time so the pair never meets there — check it
-  // here to keep the same fail-loud contract as _storePrefill/_storeCommit.
-  {
-    // Coerced exactly as the marshal below coerces them: 5 and 5.5 name the
-    // same branch, and the guard must see that.
-    std::vector<uint32_t> seen;
-    seen.reserve(n);
-    for (uint32_t i = 0; i < n; i++) {
-      const uint32_t h = jsHandles.Get(i).As<Napi::Number>().Uint32Value();
-      for (uint32_t j = 0; j < seen.size(); j++) {
-        if (seen[j] == h) {
-          throw Napi::Error::New(env,
-            "_storePrefillMultimodal: duplicate handle at indices " +
-            std::to_string(j) + " and " + std::to_string(i));
-        }
-      }
-      seen.push_back(h);
-    }
-  }
-
   // Marshal everything on the JS thread — the worker owns copies (Buffers
   // must never be touched off-thread).
   std::vector<lloyal::branch::BranchHandle> handles(n);
@@ -2836,6 +2814,16 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
         bitmapBytes[i][j].assign(base, base + ta.ByteLength());
       }
     }
+  }
+
+  // A handle may appear at most once per call — the kernel's rule, applied
+  // to the marshaled handles: this path dispatches one branch at a time, so
+  // decode_scatter never sees the pair, and the values checked are exactly
+  // the values dispatched.
+  try {
+    lloyal::branch::require_distinct_handles(handles, "_storePrefillMultimodal");
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, e.what());
   }
 
   const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
