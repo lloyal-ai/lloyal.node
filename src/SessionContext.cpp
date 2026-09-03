@@ -628,7 +628,7 @@ public:
 
       // One arm, dynamic_cast for the rc — no catch-order hazard. The typed
       // exception never crosses N-API; the rc travels as data (see OnError).
-      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) _rc = de->rc;
+      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) { _rc = de->rc; _partial = de->partial; }
       SetError(e.what());
     }
   }
@@ -637,7 +637,11 @@ public:
   void OnError(const Napi::Error& err) override {
     // Attach the rc to the JS error we construct — a property on an object we
     // own, set on the JS thread. This is the whole boundary crossing.
-    if (_rc != 0) err.Value().As<Napi::Object>().Set("rc", Napi::Number::New(Env(), _rc));
+    if (_rc != 0) {
+      auto o = err.Value().As<Napi::Object>();
+      o.Set("rc", Napi::Number::New(Env(), _rc));
+      o.Set("partial", Napi::Boolean::New(Env(), _partial));
+    }
     _deferred.Reject(err.Value());
   }
   Napi::Promise GetPromise() { return _deferred.Promise(); }
@@ -645,6 +649,7 @@ public:
 private:
   Napi::Promise::Deferred _deferred;
   int32_t _rc = 0;
+  bool _partial = false;
   lloyal::branch::BranchStore& _store;
   std::vector<lloyal::branch::DecodeEachItem> _items;
 };
@@ -673,14 +678,18 @@ public:
       _store.decode_scatter(items);
     } catch (const std::exception& e) {
       // One arm, dynamic_cast for the rc — no catch-order hazard.
-      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) _rc = de->rc;
+      if (const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e)) { _rc = de->rc; _partial = de->partial; }
       SetError(e.what());
     }
   }
 
   void OnOK() override { _deferred.Resolve(Env().Undefined()); }
   void OnError(const Napi::Error& err) override {
-    if (_rc != 0) err.Value().As<Napi::Object>().Set("rc", Napi::Number::New(Env(), _rc));
+    if (_rc != 0) {
+      auto o = err.Value().As<Napi::Object>();
+      o.Set("rc", Napi::Number::New(Env(), _rc));
+      o.Set("partial", Napi::Boolean::New(Env(), _partial));
+    }
     _deferred.Reject(err.Value());
   }
   Napi::Promise GetPromise() { return _deferred.Promise(); }
@@ -688,6 +697,7 @@ public:
 private:
   Napi::Promise::Deferred _deferred;
   int32_t _rc = 0;
+  bool _partial = false;
   lloyal::branch::BranchStore& _store;
   std::vector<lloyal::branch::BranchHandle> _handles;
   std::vector<std::vector<llama_token>> _tokenStorage;
@@ -714,16 +724,17 @@ public:
     int64_t positionAdvance = 0;
     /** Empty when this entry landed. Non-empty ⇒ the entry FAILED — either
      *  before its decode ran (bitmap decode, marker/bitmap mismatch: the
-     *  branch is untouched) or inside decode_segments (the branch is
-     *  POISONED — the op is not atomic, and partial-range KV ops are
-     *  meaningless on recurrent layers). The caller cannot tell which from
-     *  here, so the contract is uniform: prune and replay from content —
-     *  pruning an untouched branch is safe. */
+     *  branch is untouched) or inside decode_segments. `rc` and `partial`
+     *  say which case a decode failure is (see DecodeError in liblloyal):
+     *  intact iff rc == 1 && !partial; anything else ⇒ prune and replay from
+     *  content — pruning an untouched branch is safe. */
     std::string error;
     /** llama_decode's raw return code when the failure carried one (0
-     *  otherwise — validation throws never reached llama_decode). The
-     *  caller's classification: 1/-1 restored, 2/<-1 poisoned. */
+     *  otherwise — validation throws never reached llama_decode). */
     int32_t rc = 0;
+    /** True when an earlier chunk of this entry landed before the failing
+     *  call — the branch is then not intact even when `rc` restored state. */
+    bool partial = false;
   };
 
   StorePrefillMultimodalWorker(Napi::Env env,
@@ -759,7 +770,7 @@ public:
         _results[i] = { r.cells, static_cast<int64_t>(r.advance), "" };
       } catch (const std::exception& e) {
         const auto* de = dynamic_cast<const lloyal::decode::DecodeError*>(&e);
-        _results[i] = { 0, 0, e.what(), de ? de->rc : 0 };
+        _results[i] = { 0, 0, e.what(), de ? de->rc : 0, de ? de->partial : false };
       }
     }
   }
@@ -773,7 +784,10 @@ public:
       r.Set("positionAdvance", Napi::Number::New(env, static_cast<double>(_results[i].positionAdvance)));
       if (!_results[i].error.empty()) {
         r.Set("error", Napi::String::New(env, _results[i].error));
-        if (_results[i].rc != 0) r.Set("rc", Napi::Number::New(env, _results[i].rc));
+        if (_results[i].rc != 0) {
+          r.Set("rc", Napi::Number::New(env, _results[i].rc));
+          r.Set("partial", Napi::Boolean::New(env, _results[i].partial));
+        }
       }
       out.Set(static_cast<uint32_t>(i), r);
     }

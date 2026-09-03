@@ -295,11 +295,14 @@ private:
 
   /**
    * Multimodal prefill: per-branch sep tokens + templated prompt (with
-   * media markers) + image bytes. mtmd tokenizes the prompt, the worker
-   * walks TEXT/IMAGE chunks in order (token rail / embedding rail).
+   * media markers) + image bytes. The walk itself is liblloyal's:
+   * `MtmdSource` yields TEXT/IMAGE segments in order and
+   * `BranchStore::decode_segments` places them (token rail / embedding rail).
    * Args: (handles: number[], sepTokens: number[][], prompts: string[],
    *        bitmaps: Buffer[][])
-   * Returns: Promise<{tokensDecoded, positionAdvance}[]>
+   * Returns: Promise<{tokensDecoded, positionAdvance, error?, rc?, partial?}[]>
+   *   — per-entry outcomes; a failed entry carries `error`, and when the
+   *   failure came from llama_decode, its `rc` and `partial` (see DecodeError).
    */
   Napi::Value _storePrefillMultimodal(const Napi::CallbackInfo& info);
   Napi::Value _cellsMultimodal(const Napi::CallbackInfo& info);

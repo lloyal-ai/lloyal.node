@@ -2304,7 +2304,10 @@ async function testMultimodal(): Promise<void> {
   const mm = ctx as unknown as {
     _storePrefillMultimodal(
       handles: number[], seps: number[][], prompts: string[], bitmaps: Buffer[][],
-    ): Promise<Array<{ tokensDecoded: number; positionAdvance: number }>>;
+    ): Promise<Array<{
+      tokensDecoded: number; positionAdvance: number;
+      error?: string; rc?: number; partial?: boolean;
+    }>>;
     _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
     _storeKvPressure(): { cellsUsed: number };
     supportsVision(): boolean;
