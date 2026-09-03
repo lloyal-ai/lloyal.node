@@ -2,8 +2,12 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": ".",
-    "noEmit": true,
-    "skipLibCheck": true
+    "outDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "skipLibCheck": true,
+    "noEmitOnError": false
   },
   "include": ["test/**/*.ts"],
   "exclude": ["node_modules", "dist", "build", "test/sdk-agents.ts", "test/sdk-primitives.ts"]
