@@ -14,10 +14,21 @@ on:
         description: 'Skip GPU tests (alpha cuts — CPU/Metal matrix still gates)'
         type: boolean
         default: false
+      dl_source_run_id:
+        description: >-
+          Resume the DL chain for a version whose archives ALREADY uploaded: the
+          id of the run whose build-dl-flavor succeeded and whose chain failed
+          after it. Runs only the L4 DL gate and the signed-manifest publish,
+          against that run's archives and manifest. The pack is deterministic
+          and the channel paths are write-once, so this is the one way to
+          finish such a version. Empty for a normal release.
+        type: string
+        default: ''
 
 jobs:
   build-and-test:
     name: Build & Test ${{ matrix.package }}
+    if: inputs.dl_source_run_id == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -362,6 +373,7 @@ jobs:
     #     ubuntu-24.04 runners building inside an ubuntu:22.04 container,
     #     so the glibc floor survives the runner-image move.
     runs-on: ubuntu-22.04
+    if: inputs.dl_source_run_id == ''
     outputs:
       uploaded: ${{ steps.upload.outputs.uploaded }}
       version: ${{ steps.pack.outputs.version }}
@@ -569,10 +581,71 @@ jobs:
   # assertion → the full model-matrix inference suites. Strictly additive
   # to the rig's two existing consumers: new script, new JOB_NAME, zero
   # edits to run-gpu-tests.sh or existing job definitions.
+  # Resume: the archives and manifest of an EARLIER run of this same version,
+  # whose DL chain failed after its upload. The write-once paths refuse a second
+  # upload and the pack is deterministic, so the uploaded bytes ARE the pack;
+  # what is missing is the L4 gate and the signing act, which run below exactly
+  # as in a normal release, fed from this job instead of build-dl-flavor. The
+  # manifest artifact carries the file names and hashes; the URLs derive from
+  # the version, which must be the version this checkout declares.
+  dl-source:
+    name: DL resume source (archives from an earlier run)
+    if: github.event_name == 'workflow_dispatch' && inputs.dl_source_run_id != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.src.outputs.version }}
+      archive_url: ${{ steps.src.outputs.archive_url }}
+      archive_sha256: ${{ steps.src.outputs.archive_sha256 }}
+      runtime_url: ${{ steps.src.outputs.runtime_url }}
+      runtime_sha256: ${{ steps.src.outputs.runtime_sha256 }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download the source run's manifest artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ inputs.dl_source_run_id }}" -R "${{ github.repository }}" -n dl-manifest -D dl-manifest
+
+      - name: Resolve the archives the manifest names; refuse a version mismatch or a published manifest
+        id: src
+        run: |
+          set -o pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          M=dl-manifest/manifest.json
+          MV=$(jq -r .version "$M")
+          test "$MV" = "$VERSION" || { echo "::error::manifest is for $MV but this checkout is $VERSION"; exit 1; }
+          BASE="https://apps.lloyal.ai/v1/binaries/lloyal.node/$VERSION"
+          A=$(jq -r .archive.file "$M"); R=$(jq -r .runtimeArchive.file "$M")
+          for f in "$A" "$R"; do
+            curl -sfI "$BASE/$f" > /dev/null || { echo "::error::$BASE/$f is not on the channel — nothing to resume"; exit 1; }
+          done
+          if curl -sfI "$BASE/linux-x64-dl.manifest.json" > /dev/null; then
+            echo "::error::a signed manifest is already published for $VERSION"; exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "archive_url=$BASE/$A"
+            echo "archive_sha256=$(jq -r .archive.sha256 "$M")"
+            echo "runtime_url=$BASE/$R"
+            echo "runtime_sha256=$(jq -r .runtimeArchive.sha256 "$M")"
+          } >> "$GITHUB_OUTPUT"
+
+      # publish-dl downloads `dl-manifest` from THIS run, whichever job made it.
+      - name: Carry the manifest as this run's artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-manifest
+          path: dl-manifest/manifest.json
+          retention-days: 1
+
   gpu-tests-dl:
     name: GPU Tests DL (L4, path-2 consumer)
-    needs: build-dl-flavor
-    if: needs.build-dl-flavor.outputs.uploaded == 'true'
+    needs: [build-dl-flavor, dl-source]
+    if: ${{ !cancelled() && (needs.build-dl-flavor.outputs.uploaded == 'true' || needs.dl-source.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -636,15 +709,15 @@ jobs:
           GCP_REGION: ${{ secrets.GCP_REGION }}
           GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
           JOB_NAME: lloyal-gpu-test-dl
-          EXTRA_ENV_VARS: "LLOYAL_PACK_URL=${{ needs.build-dl-flavor.outputs.archive_url }},LLOYAL_PACK_SHA256=${{ needs.build-dl-flavor.outputs.archive_sha256 }},LLOYAL_RUNTIME_URL=${{ needs.build-dl-flavor.outputs.runtime_url }},LLOYAL_RUNTIME_SHA256=${{ needs.build-dl-flavor.outputs.runtime_sha256 }}"
+          EXTRA_ENV_VARS: "LLOYAL_PACK_URL=${{ needs.build-dl-flavor.outputs.archive_url || needs.dl-source.outputs.archive_url }},LLOYAL_PACK_SHA256=${{ needs.build-dl-flavor.outputs.archive_sha256 || needs.dl-source.outputs.archive_sha256 }},LLOYAL_RUNTIME_URL=${{ needs.build-dl-flavor.outputs.runtime_url || needs.dl-source.outputs.runtime_url }},LLOYAL_RUNTIME_SHA256=${{ needs.build-dl-flavor.outputs.runtime_sha256 || needs.dl-source.outputs.runtime_sha256 }}"
 
   # The publish act: sign + create-once the manifest — until this runs,
   # the uploaded archives are unverifiable ⇒ effectively unpublished. Any
   # red job upstream ⇒ no signed manifest for this version; npm unaffected.
   publish-dl:
     name: Publish DL manifest (signed)
-    needs: [build-dl-flavor, gpu-tests-dl]
-    if: needs.build-dl-flavor.outputs.uploaded == 'true'
+    needs: [build-dl-flavor, dl-source, gpu-tests-dl]
+    if: ${{ !cancelled() && needs.gpu-tests-dl.result == 'success' && (needs.build-dl-flavor.outputs.uploaded == 'true' || needs.dl-source.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       # Explicit path: correctness here otherwise rests on two chained
@@ -666,7 +739,7 @@ jobs:
           # would feed empty input to the trailing jq, which exits 0, and
           # the SIGNING act would report success without publishing.
           set -o pipefail
-          VERSION="${{ needs.build-dl-flavor.outputs.version }}"
+          VERSION="${{ needs.build-dl-flavor.outputs.version || needs.dl-source.outputs.version }}"
           jq -n --arg v "$VERSION" --slurpfile m dl-manifest/manifest.json \
             '{version: $v, platform: "linux-x64-dl", manifest: $m[0]}' \
           | curl -sfS -X POST https://api.lloyal.ai/v1/binaries/publish \
