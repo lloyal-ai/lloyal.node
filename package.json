@@ -1,7 +1,7 @@
 {
   "name": "@lloyal-labs/lloyal.node",
-  "version": "3.1.1",
-  "description": "Node.js client for liblloyal+llama.cpp",
+  "version": "3.2.0-alpha.3",
+  "description": "The Node runtime for the HDK — built on liblloyal and llama.cpp",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "gypfile": false,
@@ -20,7 +20,7 @@
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
     "test": "npm run test:integration",
-    "test:unit": "npx tsx test/backend-pack-unit.ts",
+    "test:unit": "npx tsx test/backend-pack-unit.ts && npx tsx test/peers-unit.ts",
     "test:canary": "npx tsx test/stderr-canary.ts",
     "test:integration": "npx tsx test/integration.ts",
     "test:examples": "npx tsx test/examples.ts",
@@ -52,34 +52,36 @@
     "node-addon-api": "^8.5.0"
   },
   "peerDependencies": {
-    "@lloyal-labs/lloyal-agents": ">=3.0.0",
-    "@lloyal-labs/sdk": ">=3.0.0"
+    "@lloyal-labs/lloyal-agents": ">=3.0.0 || >=6.0.0-0 <7.0.0",
+    "@lloyal-labs/sdk": ">=3.0.0 || >=4.0.0-0 <5.0.0"
   },
   "devDependencies": {
     "@lloyal-labs/lloyal-agents": "^3.0.0",
     "@lloyal-labs/sdk": "^3.0.0",
     "@types/node": "^25.3.0",
+    "@types/semver": "^7.8.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
+    "semver": "^7.8.5",
     "tsx": "^4.21.0",
     "typedoc": "^0.28.16",
     "typedoc-rhineai-theme": "^1.2.0",
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@lloyal-labs/lloyal.node-darwin-arm64": "3.1.1",
-    "@lloyal-labs/lloyal.node-darwin-x64": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-cuda": "3.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "3.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64": "3.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "3.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64": "3.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-cuda": "3.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "3.1.1"
+    "@lloyal-labs/lloyal.node-darwin-arm64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-darwin-x64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-arm64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-x64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-win32-arm64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-win32-x64": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-win32-x64-cuda": "3.2.0-alpha.3",
+    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "3.2.0-alpha.3"
   },
   "engines": {
     "node": ">=24.0.0"

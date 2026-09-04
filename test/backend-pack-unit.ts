@@ -18,7 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 
-import { sha256Hex, verifyPlatformSignature } from '../src/verify';
+import { sha256Hex, verifyPlatformSignature } from '../dist/verify.js';
 import {
   backendPackCacheDir,
   detectCudaRuntime,
@@ -29,7 +29,7 @@ import {
   resolveBackendPackDirSync,
   type BackendPackManifest,
   type CommandRunner,
-} from '../src/backend-pack';
+} from '../dist/backend-pack.js';
 
 let passed = 0;
 async function test(name: string, fn: () => void | Promise<void>): Promise<void> {

@@ -25,7 +25,7 @@ const SRC = path.join(__dirname, '..', 'src');
 /** file (relative to src/) → exact number of writer call sites. */
 const ALLOWLIST = {
   'BackendManager.cpp': 2, // once-guarded backend-init provenance + fatal dladdr failure
-  'SessionContext.cpp': 13, // initializeContext (4) + CreateContext (9), all boot-scoped
+  'SessionContext.cpp': 15, // initializeContext (4) + initializeMultimodal (1) + CreateContext (10), all boot-scoped
 };
 
 // std::cerr / std::cout streams, fprintf(stderr|stdout, and bare printf —

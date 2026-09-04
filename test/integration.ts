@@ -740,6 +740,26 @@ async function testTokenizer(ctx: SessionContext): Promise<void> {
   const eogText: string = ctx.tokenToText(eog);
   assert(eogText.length > 0, `EOS text: "${eogText}"`);
 
+  // tokenToBytes — the byte-level twin of tokenToText. A BPE piece can end
+  // mid-character: decoded one at a time the pieces tear into U+FFFD, while
+  // their bytes concatenate back to the text. (SentencePiece models keep the
+  // prefix space on the first piece that detokenize() strips.)
+  // Typed structurally, as the multimodal block does for `_storePrefill*`:
+  // the published sdk's SessionContext (the `^3` devDependency CI installs)
+  // predates this method, and the linked workspace hides that locally.
+  const bytes = ctx as unknown as { tokenToBytes(token: number): Uint8Array };
+  const multibyte = '日本語 🎉 𠜎𠜱 👨‍👩‍👧‍👦';
+  const mbTokens: number[] = await ctx.tokenize(multibyte, false);
+  const pieces: Uint8Array[] = mbTokens.map((t: number) => bytes.tokenToBytes(t));
+  assert(pieces.every((p: Uint8Array) => Buffer.isBuffer(p)),
+    `tokenToBytes returns a Buffer per token (${pieces.length} pieces)`);
+  const torn: number = pieces.filter((p: Uint8Array) => Buffer.from(p).toString('utf8').includes('\uFFFD')).length;
+  assert(torn > 0, `${torn} of ${pieces.length} pieces end mid-character`);
+  const joined: string = Buffer.concat(pieces).toString('utf8');
+  const detok: string = await ctx.detokenize(mbTokens);
+  assert(joined === detok || joined === ' ' + detok,
+    `bytes concatenate to detokenize(): ${JSON.stringify(joined)}`);
+
   // tokenize with addSpecial
   const withSpecial: number[] = await ctx.tokenize('Hello world', true);
   const noSpecial: number[] = await ctx.tokenize('Hello world', false);
@@ -2237,6 +2257,482 @@ async function testRerankConcurrent(): Promise<void> {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MULTIMODAL (mtmd) TESTS — the embedding rail
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Gated on a VL model + mmproj pair being present. Tier selection:
+//   env LLAMA_VL_MODEL + LLAMA_VL_MMPROJ (explicit), else
+//   Qwen3.5-4B + its mmproj (local dev — M-RoPE, content assertions), else
+//   SmolVLM-256M + its mmproj (CI tier — plain positions, mechanics only).
+
+const VL_PAIRS: Array<{ model: string; mmproj: string; mrope: boolean; strict: boolean }> = [
+  {
+    model: path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf'),
+    mmproj: path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'),
+    mrope: true,
+    strict: true,
+  },
+  {
+    model: path.join(__dirname, '../models/SmolVLM-256M-Instruct-Q8_0.gguf'),
+    mmproj: path.join(__dirname, '../models/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf'),
+    mrope: false,
+    strict: false,
+  },
+];
+
+function pickVlPair(): { model: string; mmproj: string; mrope: boolean; strict: boolean } | null {
+  if (process.env.LLAMA_VL_MODEL && process.env.LLAMA_VL_MMPROJ) {
+    const model = path.resolve(process.env.LLAMA_VL_MODEL);
+    return {
+      model,
+      mmproj: path.resolve(process.env.LLAMA_VL_MMPROJ),
+      mrope: /qwen/i.test(model),
+      strict: /qwen3\.5-4b|qwen3\.8/i.test(model),
+    };
+  }
+  for (const p of VL_PAIRS) {
+    if (fs.existsSync(p.model) && fs.existsSync(p.mmproj)) return p;
+  }
+  return null;
+}
+
+const MEDIA_MARKER = '<__media__>';
+
+async function testMultimodal(): Promise<void> {
+  const vl = pickVlPair();
+  if (!vl) {
+    console.log('\n--- Multimodal: SKIPPED (no VL model + mmproj pair in models/) ---');
+    return;
+  }
+  console.log(`\n--- Multimodal (${path.basename(vl.model)}, mrope=${vl.mrope}) ---`);
+
+  const IMG: Buffer = fs.readFileSync(path.join(__dirname, 'fixtures/red-square-blue-circle.png'));
+
+  // q4_0 KV (assertion 1) + small nBatch so any real image sub-chunks
+  // (assertion 3 — decode::embd's internal loop is the MAIN path).
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: vl.model,
+    mmprojPath: vl.mmproj,
+    nCtx: 8192,
+    nBatch: 256,
+    nSeqMax: 8,
+    typeK: 'q4_0',
+    typeV: 'q4_0',
+    nThreads: 4,
+  } as never);
+  const mm = ctx as unknown as {
+    _storePrefillMultimodal(
+      handles: number[], seps: number[][], prompts: string[], bitmaps: Buffer[][],
+    ): Promise<Array<{
+      tokensDecoded: number; positionAdvance: number;
+      error?: string; rc?: number; partial?: boolean;
+    }>>;
+    _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
+    _storeKvPressure(): { cellsUsed: number };
+    supportsVision(): boolean;
+    supportsAudio(): boolean;
+  };
+
+  try {
+    // Probes
+    assert(mm.supportsVision() === true, 'supportsVision() → true with mmproj loaded');
+    assert(mm.supportsAudio() === false, 'supportsAudio() → false (vision-only mmproj)');
+
+    // Assertion 2a — marker survives the SYSTEM-ONLY template route (the
+    // spine-header path; on Qwen3.5 this exercises the sentinel-retry).
+    const { prompt: sysPrompt } = await ctx.formatChat(
+      JSON.stringify([{
+        role: 'system',
+        content: [
+          { type: 'text', text: 'You can see the attached reference image.' },
+          { type: 'media_marker', text: MEDIA_MARKER },
+        ],
+      }]),
+      { addGenerationPrompt: false } as never,
+    );
+    assert(sysPrompt.includes(MEDIA_MARKER),
+      'marker verbatim through system-only route (media_marker content part)');
+
+    // The main user-turn prompt (generation prompt on — we produce after)
+    const { prompt: userPrompt } = await ctx.formatChat(JSON.stringify([
+      { role: 'system', content: 'You are a vision assistant. Answer briefly.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What shapes and colors are in this image?' },
+          { type: 'media_marker', text: MEDIA_MARKER },
+        ],
+      },
+    ]), { enableThinking: false } as never);
+    assert(userPrompt.includes(MEDIA_MARKER), 'marker verbatim through user-turn route');
+
+    // Assertion 1 + 4 — multimodal prefill on q4_0 KV; cells vs position
+    const root = Branch.create(ctx, 0, { temperature: 0 });
+    const cells0: number = mm._storeKvPressure().cellsUsed;
+    const res = await mm._storePrefillMultimodal([root.handle], [[]], [userPrompt], [[IMG]]);
+    const { tokensDecoded, positionAdvance } = res[0];
+    assert(tokensDecoded > 0, `prefill decoded ${tokensDecoded} tokens`);
+    assert(root.position === positionAdvance,
+      `branch position (${root.position}) == positionAdvance (${positionAdvance})`);
+    const cells1: number = mm._storeKvPressure().cellsUsed;
+    assert(cells1 - cells0 === tokensDecoded,
+      `cells grew by tokensDecoded (${cells1 - cells0} == ${tokensDecoded})`);
+    if (vl.mrope) {
+      assert(positionAdvance < tokensDecoded,
+        `M-RoPE decouple: positionAdvance (${positionAdvance}) < tokensDecoded (${tokensDecoded})`);
+    } else {
+      assert(positionAdvance === tokensDecoded,
+        `plain positions: positionAdvance == tokensDecoded (${tokensDecoded})`);
+    }
+    // Assertion 3 — with nBatch 256, a real image (>=256 rows on these
+    // models) exercised decode::embd's sub-chunk loop; reaching here with a
+    // coherent KV is the observable (a broken view/pos repack would throw or
+    // corrupt the grounded answer below).
+
+    // Grounded answer on the image
+    const gen: number[] = [];
+    for (let i = 0; i < 48; i++) {
+      const { token, isStop } = await root.produce();
+      if (isStop) break;
+      await root.commit(token);
+      gen.push(token);
+    }
+    assert(gen.length > 0, `generated ${gen.length} tokens after image prefill`);
+    const answer: string = await ctx.detokenize(gen);
+    if (vl.strict) {
+      assert(/red|square|blue|circle/i.test(answer),
+        `grounded answer names the content: "${answer.trim()}"`);
+    } else {
+      ok(`answer (mechanics tier): "${answer.trim()}"`);
+    }
+    const cellsAfterGen: number = mm._storeKvPressure().cellsUsed;
+
+    // Assertion 5 — spine-share: fork ×2 AFTER the image; forks add no cells
+    const childA = await root.fork();
+    const childB = await root.fork();
+    assert(mm._storeKvPressure().cellsUsed === cellsAfterGen,
+      'fork ×2 adds zero cells (image KV shared, not copied)');
+
+    const sep: number[] = ctx.getTurnSeparator();
+    const { prompt: qPrompt } = await ctx.formatChat(JSON.stringify([
+      { role: 'system', content: '' },
+      { role: 'user', content: 'In one word, what color is the square?' },
+    ]), { enableThinking: false } as never);
+    const qToks: number[] = await ctx.tokenize(qPrompt, false);
+    const childToks: number[] = [...sep, ...qToks];
+
+    let aCells = 0;
+    for (const child of [childA, childB]) {
+      const before: number = mm._storeKvPressure().cellsUsed;
+      await child.prefill(childToks);
+      const cgen: number[] = [];
+      for (let i = 0; i < 8; i++) {
+        const { token, isStop } = await child.produce();
+        if (isStop) break;
+        await child.commit(token);
+        cgen.push(token);
+      }
+      assert(cgen.length > 0, 'forked child answers over the shared image');
+      if (vl.strict && child === childA) {
+        const ctext: string = await ctx.detokenize(cgen);
+        assert(/red/i.test(ctext), `child sees the image (square color): "${ctext.trim()}"`);
+      }
+      if (child === childA) aCells = mm._storeKvPressure().cellsUsed - before;
+    }
+
+    // Assertion 4b — releasing a fork recovers exactly its OWN cells (text
+    // suffix only, never the shared image): the release-slack fix.
+    const beforeRelease: number = mm._storeKvPressure().cellsUsed;
+    await childA.prune();
+    const released: number = beforeRelease - mm._storeKvPressure().cellsUsed;
+    assert(released === aCells,
+      `release recovered exactly the fork's own cells (${released} == ${aCells})`);
+    await childB.prune();
+
+    // Assertion 6 — prefill ending AT the marker (no trailing template
+    // text): logits must be available for an immediate produce().
+    const term = Branch.create(ctx, 0, { temperature: 0 });
+    const termRes = await mm._storePrefillMultimodal(
+      [term.handle], [[]], [`Describe: ${MEDIA_MARKER}`], [[IMG]]);
+    assert(termRes[0].tokensDecoded > 0, 'marker-terminal prefill decoded');
+    const t1 = await term.produce();
+    assert(Number.isInteger(t1.token), 'produce() works immediately after marker-terminal prefill');
+    await term.prune();
+
+    // Assertion 7 — duplicate handle in one store call throws (fail loud)
+    let dupThrew = false;
+    try {
+      await mm._storePrefill([root.handle, root.handle], [[qToks[0]], [qToks[0]]]);
+    } catch { dupThrew = true; }
+    assert(dupThrew, 'duplicate handle in one _storePrefill rejects');
+
+    // The multimodal cohort coerces handles with Uint32Value: 5 and 5.5 name
+    // the SAME branch, and its duplicate guard must see that too.
+    let fracDupThrew = false;
+    try {
+      await mm._storePrefillMultimodal(
+        [root.handle, root.handle + 0.5], [[], []], [userPrompt, userPrompt], [[IMG], [IMG]]);
+    } catch { fracDupThrew = true; }
+    assert(fracDupThrew, 'fractional duplicate handle in one _storePrefillMultimodal rejects');
+
+    // Marker/bitmap count mismatch is reported PER ENTRY, not by rejecting the
+    // whole call. A cohort carries N independent branches: rejecting would lose
+    // which of them landed, and six agents settling images must not lose five
+    // because one page was corrupt. `MtmdSource` still refuses in its
+    // CONSTRUCTOR — before any decode, branch untouched — so the entry is
+    // rejected just as hard; only the reporting channel changed.
+    let mismatchErr = '';
+    {
+      const b = Branch.create(ctx, 0, { temperature: 0 });
+      try {
+        const r = await mm._storePrefillMultimodal(
+          [b.handle], [[]], [`x ${MEDIA_MARKER}`], [[IMG, IMG]]);
+        mismatchErr = r[0].error ?? '';
+        assert(r[0].tokensDecoded === 0,
+          'a refused entry decodes nothing (its branch is untouched)');
+      } finally { await b.prune(); }
+    }
+    assert(/marker count/i.test(mismatchErr),
+      `marker/bitmap mismatch reported per entry: "${mismatchErr}"`);
+
+    // Assertion 8 — frames (the video-carrying contract): several marker'd
+    // frames + timestamp text in ONE prefill.
+    const frames = Branch.create(ctx, 0, { temperature: 0 });
+    const framesPrompt =
+      `Video frames. t=0s: ${MEDIA_MARKER} t=1s: ${MEDIA_MARKER} t=2s: ${MEDIA_MARKER} ` +
+      `What color is the square across the frames? Answer in one word:`;
+    const fRes = await mm._storePrefillMultimodal(
+      [frames.handle], [[]], [framesPrompt], [[IMG, IMG, IMG]]);
+    assert(fRes[0].tokensDecoded > 0 && fRes[0].positionAdvance > 0,
+      `frames prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+    const fgen: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const { token, isStop } = await frames.produce();
+      if (isStop) break;
+      await frames.commit(token);
+      fgen.push(token);
+    }
+    assert(fgen.length > 0, 'answer over multi-frame prefill');
+    if (vl.strict) {
+      const ftext: string = await ctx.detokenize(fgen);
+      assert(/red/i.test(ftext), `temporal answer grounded: "${ftext.trim()}"`);
+    }
+    await frames.prune();
+
+    // Assertion 9 — batched fan-out over the shared image, through the PUBLIC
+    // BranchStore surface. The spine-share above proves forks are free and
+    // drives its children ONE AT A TIME; this drives N children TOGETHER, each
+    // asking a different question, at one dispatch per tick. That is the
+    // README's "N branches, 1 GPU call" over a prefix encoded exactly once —
+    // and it exercises the JS→N-API marshalling of handle/token arrays that
+    // the kernel-level test cannot reach.
+    const store = new BranchStore(ctx);
+    // Short SENTENCES, not single words: a one-word answer emits its token and
+    // stops, so the loop below would do a single dispatch and prove nothing
+    // about sustained batching. Several tokens each keeps all four branches
+    // live across multiple ticks, which is the property under test.
+    const asks: Array<{ q: string; expect: RegExp }> = [
+      { q: 'Describe the red object in a short sentence.', expect: /square/i },
+      { q: 'Describe the blue object in a short sentence.', expect: /circle/i },
+      { q: 'In a short sentence, what color is the square?', expect: /red/i },
+      { q: 'In a short sentence, what color is the circle?', expect: /blue/i },
+    ];
+
+    const cellsBeforeFan: number = mm._storeKvPressure().cellsUsed;
+    const kids: InstanceType<typeof Branch>[] = [];
+    for (let i = 0; i < asks.length; i++) kids.push(await root.fork());
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan,
+      `fan-out: fork ×${asks.length} over the image adds zero cells`);
+
+    // Every child's question in ONE variable-length scatter.
+    const suffixes: number[][] = [];
+    for (const a of asks) {
+      const { prompt: p } = await ctx.formatChat(JSON.stringify([
+        { role: 'system', content: '' },
+        { role: 'user', content: a.q },
+      ]), { enableThinking: false } as never);
+      suffixes.push([...sep, ...(await ctx.tokenize(p, false))]);
+    }
+    const suffixTotal: number = suffixes.reduce((n, s) => n + s.length, 0);
+    await store.prefill(kids.map((b, i) => [b, suffixes[i]] as [typeof b, number[]]));
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan + suffixTotal,
+      `fan-out: costs only the text suffixes (${suffixTotal}), never the image again`);
+
+    // One store.commit() per tick carries every live child.
+    const fanToks: number[][] = asks.map(() => []);
+    const widths: number[] = [];   // branches carried by each dispatch
+    for (let step = 0; step < 16; step++) {
+      const entries: Array<[InstanceType<typeof Branch>, number]> = [];
+      for (let i = 0; i < kids.length; i++) {
+        if (fanToks[i].length && fanToks[i][fanToks[i].length - 1] === -1) continue;
+        const { token, isStop } = await kids[i].produce();
+        if (isStop) { fanToks[i].push(-1); continue; }
+        fanToks[i].push(token);
+        entries.push([kids[i], token]);
+      }
+      if (!entries.length) break;
+      await store.commit(entries);
+      widths.push(entries.length);
+    }
+    // Sustained batching is several dispatches that each carry SEVERAL
+    // branches. Counting non-empty ticks would pass when three children stop
+    // at tick one and a lone survivor runs on — serial decoding, not batching.
+    const batched: number = widths.filter((w) => w > 1).length;
+    assert(batched > 1,
+      `fan-out: dispatch widths ${widths.join(',')} — ${batched} carried several branches`);
+
+    for (let i = 0; i < asks.length; i++) {
+      const toks: number[] = fanToks[i].filter((t) => t !== -1);
+      assert(toks.length > 0, `fan-out: child ${i} produced an answer`);
+      const text: string = await ctx.detokenize(toks);
+      if (vl.strict) {
+        assert(asks[i].expect.test(text),
+          `fan-out: "${asks[i].q}" → "${text.trim()}"`);
+      } else {
+        ok(`fan-out child ${i} (mechanics tier): "${text.trim()}"`);
+      }
+    }
+
+    for (const k of kids) await k.prune();
+    assert(mm._storeKvPressure().cellsUsed === cellsBeforeFan,
+      'fan-out: children release their own cells, image prefix intact');
+
+    await root.prune();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// ============================================================================
+// A failed decode says what landed — the JavaScript side of the kernel's
+// DecodeError. The kernel's own suite proves the producers; this proves the
+// last hop: `rc` and `partial` arrive on the rejection (token rail) and on
+// the per-entry result (media rail), and the books a caller reads agree.
+// Runs on the default model and, when present, on the production default
+// (Qwen3.5-4B: a Gated DeltaNet hybrid, the carrier that cannot be rewound —
+// the reason the contract is prune-and-replay in the first place).
+// ============================================================================
+async function testDecodeFailure(): Promise<void> {
+  console.log('\n--- Decode failure: partial ---');
+  const failureOf = (err: unknown): { rc?: number; partial?: boolean; message?: string } =>
+    err as { rc?: number; partial?: boolean; message?: string };
+  const pressure = (c: SessionContext): { cellsUsed: number } =>
+    (c as unknown as { _storeKvPressure(): { cellsUsed: number } })._storeKvPressure();
+  const filler = (n: number, base: number, vocab: number): number[] =>
+    Array.from({ length: n }, (_, j) => (base + j) % vocab);
+
+  const models: string[] = [MODEL_PATH];
+  const gdn = path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf');
+  if (path.resolve(gdn) !== path.resolve(MODEL_PATH) && fs.existsSync(gdn)) models.push(gdn);
+
+  for (const modelPath of models) {
+    console.log(`  model: ${path.basename(modelPath)}`);
+
+    // A later scatter chunk finds no KV slot: rc 1, partial true, the landed
+    // children moved, the refused one did not and still works.
+    {
+      const ctx: SessionContext = await addon.createContext({ modelPath, nCtx: 256, nBatch: 128, nSeqMax: 4, nThreads: 4 });
+      try {
+        const vocab = ctx.vocabSize;
+        const prompt = await ctx.tokenize('Hello');
+        assert(prompt.length > 0 && prompt.length < 40, 'scatter: a short prefix');
+        const store = new BranchStore(ctx);
+        const root = Branch.create(ctx, 0, { temperature: 0 });
+        await root.prefill(prompt);
+        const p = root.position;
+        const cells0 = pressure(ctx).cellsUsed;
+        const kids = [await root.fork(), await root.fork(), await root.fork()];
+        // 100 tokens each under nBatch 128: three chunks. 256 cells hold p+200, not p+300.
+        let caught: ReturnType<typeof failureOf> | null = null;
+        try {
+          await store.prefill([
+            [kids[0], filler(100, 1000, vocab)],
+            [kids[1], filler(100, 2000, vocab)],
+            [kids[2], filler(100, 3000, vocab)],
+          ]);
+        } catch (err) { caught = failureOf(err); }
+        assert(caught !== null, 'scatter: the third chunk is refused');
+        assert(caught!.rc === 1, `scatter: rc 1 on the rejection (got ${caught!.rc})`);
+        assert(caught!.partial === true, `scatter: partial:true on the rejection (got ${caught!.partial})`);
+        assert(kids[0].position === p + 100 && kids[1].position === p + 100, 'scatter: landed children moved');
+        assert(kids[2].position === p, 'scatter: the refused child did not move');
+        assert(pressure(ctx).cellsUsed === cells0 + 200, 'scatter: landed cells charged, refused cells not');
+        await store.prefill([[kids[2], filler(10, 4000, vocab)]]);
+        assert(kids[2].position === p + 10, 'scatter: the intact child still prefills');
+        await root.pruneSubtree();
+        assert(pressure(ctx).cellsUsed === 0, 'scatter: the pool is whole after prune');
+        ok('scatter: rc 1 + partial:true in JS; landed 2/3, intact child prefilled, pool reclaimed');
+      } finally {
+        ctx.dispose();
+      }
+    }
+
+    // A chunked prefill that dies mid-way: poisoned, says so, prune reclaims it.
+    {
+      const ctx: SessionContext = await addon.createContext({ modelPath, nCtx: 256, nBatch: 64, nSeqMax: 2, nThreads: 4 });
+      try {
+        const vocab = ctx.vocabSize;
+        const b = Branch.create(ctx, 0, { temperature: 0 });
+        let caught: ReturnType<typeof failureOf> | null = null;
+        try { await b.prefill(filler(300, 1000, vocab)); } catch (err) { caught = failureOf(err); }
+        assert(caught !== null && caught.rc === 1 && caught.partial === true,
+          `prefill: rc 1 + partial:true (got rc=${caught?.rc} partial=${caught?.partial})`);
+        assert(b.position === 0, 'prefill: the books did not move');
+        assert(pressure(ctx).cellsUsed === 0, 'prefill: nothing charged');
+        await b.prune();
+        const fresh = Branch.create(ctx, 0, { temperature: 0 });
+        await fresh.prefill(filler(10, 5000, vocab));
+        assert(fresh.position === 10 && pressure(ctx).cellsUsed === 10, 'prefill: prune reclaimed the orphans — a fresh branch prefills');
+        await fresh.prune();
+        ok('prefill: poisoned reported as partial:true, reclaimed by prune');
+      } finally {
+        ctx.dispose();
+      }
+    }
+  }
+
+  // The media rail reports PER ENTRY: an image whose cells outrun the pool
+  // comes back with error + rc 1 + partial:true, its siblings untouched.
+  const vl = pickVlPair();
+  const bigImage = path.join(__dirname, '../liblloyal/tests/fixtures/cat.jpg');
+  if (!vl || !fs.existsSync(bigImage)) {
+    console.log('  [SKIP] media: no VL pair or no large fixture');
+    return;
+  }
+  {
+    const ctx: SessionContext = await addon.createContext({
+      modelPath: vl.model, mmprojPath: vl.mmproj, nCtx: 256, nBatch: 16, nSeqMax: 2, nThreads: 4,
+    } as never);
+    try {
+      const mm = ctx as unknown as {
+        _storePrefillMultimodal(handles: number[], seps: number[][], prompts: string[], bitmaps: Buffer[][]):
+          Promise<Array<{ tokensDecoded: number; positionAdvance: number; error?: string; rc?: number; partial?: boolean }>>;
+        _cellsMultimodal(sep: number[], prompt: string, bitmaps: Buffer[]): Promise<number>;
+      };
+      const IMG: Buffer = fs.readFileSync(bigImage);
+      const { prompt } = await ctx.formatChat(JSON.stringify([
+        { role: 'user', content: [{ type: 'text', text: 'Describe this image.' }, { type: 'media_marker', text: MEDIA_MARKER }] },
+      ]));
+      const cells = await mm._cellsMultimodal([], prompt, [IMG]);
+      if (cells <= 256) {
+        console.log(`  [SKIP] media: the image costs ${cells} cells and fits in 256`);
+      } else {
+        const b = Branch.create(ctx, 0, { temperature: 0 });
+        const [r] = await mm._storePrefillMultimodal([b.handle], [[]], [prompt], [[IMG]]);
+        assert(typeof r.error === 'string', 'media: the entry failed');
+        assert(r.rc === 1 && r.partial === true,
+          `media: entry carries rc 1 + partial:true (got rc=${r.rc} partial=${r.partial}: ${r.error})`);
+        await b.prune();
+        assert(pressure(ctx).cellsUsed === 0, 'media: prune reclaimed the poisoned branch');
+        ok(`media: ${cells} cells against a 256-cell pool → per-entry rc 1 + partial:true, reclaimed`);
+      }
+    } finally {
+      ctx.dispose();
+    }
+  }
+}
+
 async function main(): Promise<void> {
   let mainCtx: SessionContext | null = null;
 
@@ -2278,6 +2774,8 @@ async function main(): Promise<void> {
     await testSetSamplerParams();
     await testSetGrammar();
     await testBranchMetrics();
+    await testMultimodal();
+    await testDecodeFailure();
     await testRerank();
     await testRerankLargeCorpus();
     await testRerankConcurrent();

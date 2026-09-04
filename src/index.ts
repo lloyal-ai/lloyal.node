@@ -81,6 +81,80 @@ const tryLoadPackage = (
 };
 
 /**
+ * One native addon image per thread — a second one is refused, loudly.
+ *
+ * Node identifies a module by its REALPATH, so a symlinked package resolves
+ * its own dependencies from its own tree rather than the host project's. A
+ * locally linked `@lloyal-labs/rig` therefore reaches a DIFFERENT copy of
+ * `@lloyal-labs/lloyal.node` than the project does, and both get dlopen'd
+ * into one process.
+ *
+ * Each image carries its own copy of every C++ static — its own BranchStore,
+ * its own slot deque, its own freelist. A branch handle minted against one
+ * image and resolved against the other reads a garbage slot index, and the
+ * process dies with SIGSEGV or SIGBUS inside `allocate_slot`, code that has
+ * nothing to do with the mistake. This guard turns that into one startup
+ * error naming both packages.
+ *
+ * Identity is the test, not the path: Node caches a native addon by resolved
+ * filename, so two module instances requiring the SAME file share one exports
+ * object and are correct. `globalThis` is per-thread, so a worker thread that
+ * loads its own image is unaffected.
+ */
+const IMAGE_CLAIM = Symbol.for("@lloyal-labs/lloyal.node:image");
+
+type ImageClaim = { binding: NativeBinding; owner: string };
+
+/**
+ * Addon images already in this thread's require cache that are NOT ours.
+ *
+ * The symbol claim below only catches a sibling that also carries this guard.
+ * A copy old enough to predate it claims nothing, so scan the cache directly:
+ * a native addon is cached by resolved filename, and the entry whose exports
+ * ARE our binding is our own. Anything else named lloyal.node is a second
+ * image. This sees a foreign copy that loaded BEFORE us at any version; one
+ * that loads after us is caught only once it carries this guard too.
+ */
+const foreignImages = (binding: NativeBinding): string[] => {
+  const cache = (require as unknown as {
+    cache?: Record<string, { exports?: unknown } | undefined>;
+  }).cache;
+  if (!cache) return [];
+  return Object.keys(cache).filter(
+    (file) =>
+      path.basename(file) === "lloyal.node" &&
+      cache[file]?.exports !== binding,
+  );
+};
+
+const claimImage = (binding: NativeBinding): NativeBinding => {
+  const globals = globalThis as unknown as Record<
+    symbol,
+    ImageClaim | undefined
+  >;
+  const held = globals[IMAGE_CLAIM];
+  const foreign = held ? [] : foreignImages(binding);
+
+  if (!held && foreign.length === 0) {
+    globals[IMAGE_CLAIM] = { binding, owner: __dirname };
+    return binding;
+  }
+  if (held?.binding === binding) return binding;
+
+  throw new Error(
+    `[lloyal.node] Two different native addon images in one process.\n` +
+      `  already loaded: ${held?.owner ?? foreign.join(", ")}\n` +
+      `  now loading   : ${__dirname}\n` +
+      `Each image has its own BranchStore and freelist, so a branch handle ` +
+      `that crosses between them faults in allocate_slot. This is almost ` +
+      `always a local dev link: a symlinked @lloyal-labs package resolves ` +
+      `lloyal.node from its own node_modules instead of the project's. Point ` +
+      `every copy at one build, or set LLOYAL_BACKEND_DIR to the directory ` +
+      `containing lloyal.node.`,
+  );
+};
+
+/**
  * Load native binary for a specific GPU variant
  *
  * lloyal.node ships as a family of platform-specific npm packages, each
@@ -120,9 +194,12 @@ const tryLoadPackage = (
  * failure throws and never falls through — a corrupt pack must not
  * silently degrade to the npm CPU package.
  *
- * @param variant GPU variant: 'cuda', 'vulkan', or undefined for CPU
+ * @param variant GPU variant — `'cuda'`, `'vulkan'` or `'default'`; `undefined`
+ *        resolves from `LLOYAL_GPU` and the platform (see {@link GpuVariant})
  * @returns Native binary module with createContext method
- * @throws Error if no binary available for the current platform
+ * @throws Error if no binary is available for the current platform, or if a
+ * DIFFERENT addon image is already loaded in this thread — see {@link
+ * claimImage} for why a second image is fatal rather than merely wasteful.
  *
  * @example
  * ```typescript
@@ -138,7 +215,11 @@ const tryLoadPackage = (
  *
  * @category Core
  */
-export const loadBinary = (variant?: GpuVariant): NativeBinding => {
+export const loadBinary = (variant?: GpuVariant): NativeBinding =>
+  claimImage(resolveBinary(variant));
+
+/** The resolution chain documented on {@link loadBinary}. */
+const resolveBinary = (variant?: GpuVariant): NativeBinding => {
   const resolvedVariant = variant ?? process.env.LLOYAL_GPU;
   const noFallback = process.env.LLOYAL_NO_FALLBACK === "1";
   const useLocal = process.env.LLOYAL_LOCAL === "1";

@@ -4,21 +4,23 @@
 [![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
 [![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
 [![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
-[![llama.cpp](https://img.shields.io/badge/llama.cpp-b8795-green.svg)](https://github.com/ggml-org/llama.cpp/releases/tag/b8795)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-pinned-green.svg)](./liblloyal/.llama-cpp-version)
 
-**Native backend for the lloyal inference platform.**
+**The Node runtime for the HDK — built on liblloyal and llama.cpp**
 
-Prebuilt llama.cpp binaries for 13 platform/GPU combinations, exposing a `SessionContext` that powers the [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) inference primitives (Branch, BranchStore, Session, Rerank) and [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) multi-agent framework. Built on [liblloyal](https://github.com/lloyal-ai/liblloyal), a header-only C++20 inference kernel for llama.cpp.
+The HDK's packages are backend-agnostic TypeScript: `Branch` and `BranchStore` in the SDK, agents and pools above them. They describe what to do with inference state; they cannot decode a token on their own. On Node, this package is what they run on.
 
-All SDK and agent exports are re-exported from this package for convenience — `import { Branch, useAgent, agentPool } from "@lloyal-labs/lloyal.node"` works out of the box.
+`createContext()` returns the `SessionContext` every HDK primitive drives — forking a branch, batching N branches into one dispatch, prefilling text or image rows into a branch's KV. Underneath it is [liblloyal](https://github.com/lloyal-ai/liblloyal), the header-only C++20 kernel that enables Git-like tree ops for live inference state, on llama.cpp for the model execution.
+
+It ships **prebuilt for 13 platform/GPU targets**. Nothing compiles on install, and the variant matching your hardware is chosen when the process starts — so the same artifact ships to a laptop and a CUDA box.
+
+The rest of the HDK is re-exported, so `import { Branch, useAgent } from "@lloyal-labs/lloyal.node"` needs no second package.
 
 ## Install
 
 ```bash
 npm install @lloyal-labs/lloyal.node
 ```
-
-Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, not install time.
 
 | Platform | Arch  | Acceleration        |
 | -------- | ----- | ------------------- |
@@ -29,7 +31,7 @@ Prebuilt binaries for 13 platform/GPU combinations. GPU selection at runtime, no
 | Windows  | x64   | CPU / CUDA / Vulkan |
 | Windows  | arm64 | CPU / Vulkan        |
 
-## Quick Start
+## Quick start
 
 ```javascript
 import { createContext } from "@lloyal-labs/lloyal.node";
@@ -41,162 +43,230 @@ const store = new BranchStore(ctx);
 const root = Branch.create(ctx, 0, { temperature: 0.8 });
 await root.prefill(await ctx.tokenize("Explain quantum entanglement"));
 
-// Fork and generate — all branches in lockstep, 1 GPU call per step
+// Fork three ways; every live branch advances in one GPU call per step
 const branches = await Promise.all([root.fork(), root.fork(), root.fork()]);
 for (;;) {
   const live = branches.filter((b) => !b.disposed);
   if (!live.length) break;
-  const produced = live.map((b) => ({ b, ...b.produce() }));
+
+  const produced = live.map((b) => ({ b, ...b.produceSync() }));
   for (const p of produced.filter((p) => p.isStop)) await p.b.prune();
+
   const items = produced
     .filter((p) => !p.isStop)
-    .map((p) => {
-      p.b.accept(p.token);
-      return [p.b, p.token];
-    });
-  await store.commit(items);
+    .map((p) => [p.b, p.token]);
+  if (items.length) await store.commit(items);   // accept + decode: N branches, 1 llama_decode()
 }
 ```
 
-Or for single-branch generation, Branch is an async iterable:
+`produceSync()` samples without awaiting so the whole cohort can be collected and committed together — that batching is the point. `await branch.produce()` is the single-branch form.
+
+For one branch, `Branch` is an async iterable:
 
 ```javascript
-for await (const { token, text } of branch) {
-  process.stdout.write(text);
-}
+for await (const { token, text } of branch) process.stdout.write(text);
 ```
 
-See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) for the full Branch API, continuous tree batching, KV tenancy, and topology documentation.
+See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) for the Branch API, continuous tree batching, KV tenancy and topology.
 
-### Without the SDK
+## What this package is
 
-`createContext` returns a `SessionContext` — the native interface to llama.cpp. You can use it directly without the SDK's Branch/BranchStore layer:
+lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
+
+**What it owns:**
+
+- `createContext(options)` — load a GGUF, get a `SessionContext`. `mmprojPath` loads a multimodal projector beside it.
+- `_storePrefillMultimodal(...)` — image + text into a branch's KV, plus `supportsVision()` / `supportsAudio()`
+- `loadBinary(variant?)` and the [binary resolution order](#which-binary-loads)
+- The prebuilt binaries and the [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu)
+
+**What it re-exports**, so one install is enough — these are [HDK](https://github.com/lloyal-ai/hdk) packages, documented there:
+
+- from `@lloyal-labs/sdk`: `Branch`, `BranchStore`, `Session`, `Rerank`, `buildUserDelta`, `buildToolResultDelta`, and the sampling, chat and rerank types
+- from `@lloyal-labs/lloyal-agents`: `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`
+
+Not re-exported — import from the package itself: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
+
+## The native surface
+
+`createContext` returns a `SessionContext` — llama.cpp as this package exposes it. The SDK's `Branch`/`BranchStore` wrap these; you can use them directly.
 
 ```javascript
-import { createContext } from "@lloyal-labs/lloyal.node";
-
 const ctx = await createContext({ modelPath: "./model.gguf", nSeqMax: 4 });
 
-// Chat templates — model-agnostic formatting + tool calling
-const { prompt, grammar, format } = await ctx.formatChat(messages, {
-  addGenerationPrompt: true,
-  tools: [{ type: "function", function: { name: "search", parameters: schema } }],
-});
+// Chat templates — model-agnostic formatting and tool calling.
+// NOTE: messages go in as a JSON STRING, not an object.
+const { prompt, grammar, format } = await ctx.formatChat(
+  JSON.stringify([{ role: "user", content: "hello" }]),
+  { addGenerationPrompt: true,
+    tools: [{ type: "function", function: { name: "search", parameters: schema } }] },
+);
 const { content, toolCalls } = await ctx.parseChatOutput(output, format);
 
-// Branch primitives — what the SDK's Branch class wraps
+// Branch primitives — what Branch wraps
 const handle = ctx._branchCreate(0, samplerParams);
 await ctx._branchPrefill(handle, tokens);
 const token = ctx._branchSample(handle);
-const text = ctx.tokenToText(token);
-const isStop = ctx.isStopToken(token);
 ctx._branchAccept(handle, token);
-const logits = ctx._branchGetLogits(handle);     // Float32Array(vocabSize)
-const entropy = ctx._branchModelEntropy(handle);
+const logits = ctx._branchGetLogits(handle);      // Float32Array(vocabSize)
 const child = ctx._branchFork(handle);
 
-// Store primitives — what the SDK's BranchStore wraps
-await ctx._storeCommit([handle1, handle2], [tok1, tok2]);  // N branches, 1 GPU call
+// Store primitives — what BranchStore wraps
+await ctx._storeCommit([handle1, handle2], [tok1, tok2]);   // N branches, 1 GPU call
 await ctx._storePrefill([handle], [tokens]);
 await ctx._storeRetainOnly(winner);
-const available = ctx._storeAvailable();
 
-// KV cache — snapshot, copy, persist
-await ctx.kvSeqCopy(0, 1);                      // share prefix across sequences
-await ctx.kvCacheSave();                         // snapshot for rollback
-await ctx.kvCacheLoad();                         // restore checkpoint
-await ctx.kvCacheWriteFile("cache.bin");         // persist to disk
-
-// Embeddings
+// KV, embeddings, grammar
+await ctx.kvSeqCopy(0, 1);
 const embeddings = await ctx.encode("query text");
-const dim = ctx.getEmbeddingDimension();
-
-// Grammar + tokenizer
 const grammar = await ctx.jsonSchemaToGrammar(schema);
-const tokens = await ctx.tokenize("Hello world");
-const sep = await ctx.getTurnSeparator();
 ```
 
-## What This Package Provides
+## Multimodal
 
-**Native-only** (not in SDK):
+An image is decoded, projected into the model's native input embeddings, and admitted through `llama_batch.embd` beside the token stream. After that it is ordinary KV: fork the branch and every child attends the image with no re-encode.
 
-- `createContext(options)` — load a GGUF model, return a `SessionContext`
-- `loadBinary(options?)` — explicit GPU variant selection with automatic fallback
-- Prebuilt binaries for 13 platform/GPU combinations
+```javascript
+const ctx = await createContext({
+  modelPath: "./Qwen3.5-4B-Q4_K_M.gguf",
+  mmprojPath: "./mmproj-F16.gguf",
+  nSeqMax: 8,
+});
+ctx.supportsVision();   // true
 
-**Re-exported from [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk):**
+// One <__media__> marker per image, as a media_marker content part
+const { prompt } = await ctx.formatChat(JSON.stringify([
+  { role: "user", content: [
+    { type: "text", text: "What is in this image?" },
+    { type: "media_marker", text: "<__media__>" },
+  ]},
+]));
 
-- `Branch`, `BranchStore`, `Session`, `Rerank`
-- Per-token metrics: `modelEntropy()`, `modelSurprisal()`, `samplingPerplexity`
-- Chat formatting: `formatChat()`, `parseChatOutput()`
-- Grammar: `jsonSchemaToGrammar()`, `setGrammar()`
+const handle = ctx._branchCreate(0, { temperature: 0 });
+const bytes = fs.readFileSync("./photo.jpg");   // jpg/png/bmp/gif
+const [{ tokensDecoded, positionAdvance }] =
+  await ctx._storePrefillMultimodal([handle], [[]], [prompt], [[bytes]]);
+```
 
-**Re-exported from [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents):**
+`positionAdvance < tokensDecoded` under M-RoPE — an image costs more KV cells than it advances position, and the kernel tracks the gap so pressure accounting stays exact. Several markers with several images in one prefill also works; video frames with timestamps are exactly that.
 
-- `useAgent`, `agentPool`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`
-- Structured concurrency DAG via Effection generators
-- In-loop orchestration: agents as branches of a single running process
-- App protocol surfaces (`AppRegistryCtx`, `AppConfigStoreCtx`, `App`, `AppManifest`) when paired with [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig)'s `defineApp` / `createAppRegistry`
+> **Types.** `createContext` is typed as `ContextOptions` from `@lloyal-labs/sdk`, so `mmprojPath` / `imageMinTokens` / `imageMaxTokens` and the `supportsVision()` / `_storePrefillMultimodal()` members only typecheck once an SDK carrying multimodal `ContextOptions` is installed. The runtime accepts them regardless.
 
-## GPU Variant Selection
+A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is rejected explicitly.
+
+## Which binary loads
+
+Resolution is ordered and mostly invisible — but when the wrong binary loads, this is the order that decided it.
+
+| # | Source | If it fails |
+| --- | --- | --- |
+| 1 | `LLOYAL_LOCAL=1` → `build/Release` | **throws** — never falls back to a published binary |
+| 2 | `LLOYAL_BACKEND_DIR` → that [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws; asserts the devices you asked for |
+| 3 | a cached [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu) | throws if present-but-invalid — **no** fallthrough to npm |
+| 4 | requested variant — `loadBinary()` argument or `LLOYAL_GPU` | warns and continues, unless `LLOYAL_NO_FALLBACK=1` |
+| 5 | local `build/Release` | continues — fresher than an installed package during development |
+| 6 | default CPU package for the platform | throws, naming everything it tried |
+
+
+## GPU variant selection
 
 ```javascript
 import { loadBinary, createContext } from "@lloyal-labs/lloyal.node";
 
-// Automatic — uses Metal on macOS, CPU elsewhere
+// Automatic — Metal on macOS arm64, CPU elsewhere
 const ctx = await createContext({ modelPath: "./model.gguf" });
 
-// Explicit CUDA
-const binding = loadBinary({ gpuVariant: "cuda" });
-const ctx = await binding.createContext({ modelPath: "./model.gguf" });
-// Falls back to CPU with a warning if CUDA runtime not available
+// Explicit: loadBinary takes the variant directly
+const binding = loadBinary("cuda");           // "default" | "cuda" | "vulkan"
+const ctx2 = await binding.createContext({ modelPath: "./model.gguf" });
+// Falls back to CPU with a warning unless LLOYAL_NO_FALLBACK=1
 ```
+
+## The backend pack — frontier GPUs, and every CPU
+
+The npm packages are one build per platform/GPU pair. The backend pack is the other shape: **one artifact carrying many backends as separately loadable modules** (`GGML_BACKEND_DL`), chosen at load time. It is a full `lloyal.node` addon plus its backends, not a set of loose libraries.
+
+That buys two things.
+
+**Frontier GPUs.** Blackwell is newer than most published builds, so an **sm_100** device would otherwise fall back to JIT or to CPU. The pack ships real SASS for it, and a per-arch `cuobjdump` gate at publish time refuses to build one where any declared arch is missing its SASS or PTX — the claim cannot silently rot.
+
+**Every CPU microarchitecture.** Built with `GGML_CPU_ALL_VARIANTS`, gated at **≥8** `libggml-cpu-<variant>.so` modules, so the best instruction set for the host is picked at load rather than baked in. This is not only a GPU feature.
+
+```javascript
+import { probeBackendPack, ensureBackendPack } from "@lloyal-labs/lloyal.node";
+
+const offer = await probeBackendPack();        // inspects only — never downloads
+if (offer.recommended) await ensureBackendPack();
+```
+
+**Nothing is fetched without consent.** `loadBinary()` will *use* a verified cache if one exists, but never creates one — a pack arrives only through an explicit `ensureBackendPack()` or a provisioner. On load it also calls `listDevices()` and **throws if a GPU was requested and none registered**, so a pack that quietly came up CPU-only fails loudly instead of being slow.
+
+Three gates run before a pack is offered at all:
+
+| Gate | Question |
+| --- | --- |
+| device | is the GPU covered by real SASS, or by a JIT-able PTX floor? |
+| driver | native SASS needs no JIT; otherwise, can the driver JIT the pack's toolkit PTX? |
+| runtime | does the installed CUDA runtime meet the manifest's minimum, or is the companion runtime needed too? |
+
+| GPU | Outcome |
+| --- | --- |
+| **B200** (sm_100, Blackwell) | native SASS → **recommended**; an older CUDA runtime pulls the companion archive with it |
+| H100 (sm_90) | PTX only — offered where the driver can JIT |
+| L4 (sm_89) | never offered; the npm package already ships native for it |
+| no NVIDIA GPU | never offered |
+
+The companion runtime is its own archive — `cudart`, `cublas`, `cublasLt`, `nvJitLink` — so a host with an older CUDA can still run the pack without touching its system install.
+
+Then download → verify (sha256 plus the platform signature on the manifest) → extract → cache. A present-but-invalid cache **throws** rather than falling through to npm, which is why it sits above the variant lookup in the table above.
+
+> **Two channels, not one.** The 13 prebuilt npm packages cover macOS, Linux **and Windows** — `win32-x64-cuda` is one of them, so Windows CUDA ships that way and needs nothing from this section.
+>
+> The backend pack is a separate, opt-in channel published only for **linux-x64**. `platformTag()` returns `null` anywhere else, so a pack is never even looked for, and `LLOYAL_BACKEND_DL=1` refuses to build one. linux-arm64 is the named follow-on.
 
 ## Examples
 
 | Example                           | Pattern                                           |
 | --------------------------------- | ------------------------------------------------- |
-| [`entropy/`](./examples/entropy/) | `modelEntropy()` mid-generation as control signal |
 | [`chat/`](./examples/chat/)       | Interactive streaming chat                        |
-| [`embed/`](./examples/embed/)     | Text embeddings extraction                        |
+| [`embed/`](./examples/embed/)     | Text embedding extraction                         |
+| [`entropy/`](./examples/entropy/) | `modelEntropy()` mid-generation as a control signal |
 
 ```bash
-npx tsx examples/best-of-n/best-of-n.ts
 npx tsx examples/chat/chat.ts ./model.gguf
 ```
 
-## CI Testing
+## CI
 
-Integration tests run real inference across architectures:
+Integration tests run real inference across architectures, so a template regression surfaces as a wrong answer rather than a clean pass:
 
-| Architecture | Test Model   | Template |
-| ------------ | ------------ | -------- |
-| Llama        | Llama 3.2 1B | llama3   |
-| Phi          | Phi 3.5 Mini | phi3     |
-| Qwen         | Qwen 3 1.7B  | chatml   |
-| Gemma        | Gemma 3 1B   | gemma    |
-| SmolLM       | SmolLM2 1.7B | chatml   |
-| Ministral    | Ministral 3B | mistral  |
+| Model        | Template   |
+| ------------ | ---------- |
+| SmolLM2 1.7B | chatml *(default)* |
+| Llama 3.2    | llama3     |
+| Phi 3.5      | phi3       |
+| Qwen3        | chatml     |
+| Gemma 3      | gemma      |
+| GLM-Edge     | glm-edge   |
 
-See [distribution.md](docs/distribution.md) for details.
+Multimodal runs two tiers: SmolVLM-256M for plain positions in CI, Qwen3.5-4B + mmproj for M-RoPE locally and on the GPU rig. See [distribution.md](docs/distribution.md).
 
 ## Ecosystem
 
-| Package                                                                                    | Description                                                                  |
-| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk)              | Backend-agnostic inference primitives (Branch, BranchStore, Session, Rerank) |
-| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime + App protocol primitives                                |
-| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig)              | App protocol helpers, retrieval providers, framework tools (Plan/Delegate/Report) |
-| [`harness.dev`](https://www.npmjs.com/package/harness.dev)                                 | CLI — scaffold harnesses + Apps; publish/install signed Apps via the channel |
-| [liblloyal](https://github.com/lloyal-ai/liblloyal)                                        | Header-only C++20 inference kernel for llama.cpp                             |
-| **lloyal.node**                                                                            | This package — native backend + prebuilt binaries                            |
-| [nitro-llama](https://github.com/lloyal-ai/nitro-llama)                                    | React Native backend via Nitro Modules                                       |
-| [tsampler](https://github.com/lloyal-ai/tsampler)                                          | Reference sampler implementation                                             |
+| Package | Description |
+| --- | --- |
+| [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) | Backend-agnostic inference primitives |
+| [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime; owns the Ability protocol contracts and the `GrantStore` / `authGuard` surface that gates `protected` tools |
+| [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | Builds Abilities on those contracts — `defineAbility`, `createAbilityRegistry`, retrieval and framework tools, and `createGrantStore`, the reference in-memory grant store |
+| [`harness.dev`](https://www.npmjs.com/package/harness.dev) | CLI — scaffold harnesses and Abilities, publish/install signed Abilities |
+| [liblloyal](https://github.com/lloyal-ai/liblloyal) | The C++20 kernel |
+| **lloyal.node** | This package — native backend + prebuilt binaries |
+| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native backend via Nitro Modules |
+| [tsampler](https://github.com/lloyal-ai/tsampler) | Reference sampler implementation |
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and release process.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and the release process.
 
 ## License
 

@@ -130,6 +130,26 @@ if(MSVC)
     endif()
 endif()
 
+# =============================================================================
+# mtmd (multimodal: clip/projector encode + media tokenization)
+# =============================================================================
+# tools/mtmd is not built by llama.cpp under add_subdirectory (LLAMA_BUILD_TOOLS
+# is OFF for non-standalone builds), so add the library directly.
+# - EXCLUDE_FROM_ALL: mtmd's CMakeLists also declares CLI targets
+#   (llama-mtmd-cli etc.); only the linked `mtmd` library gets built.
+# - LLAMA_INSTALL_VERSION is a normal variable scoped inside llama.cpp's
+#   directory — empty here, and mtmd's set_target_properties(VERSION ...)
+#   would receive "". Provide it before the add.
+# - MTMD_VIDEO is a compile definition only (video decoding shells out to an
+#   ffmpeg binary at runtime); keep it OFF for a deterministic surface.
+set(LLAMA_INSTALL_VERSION 0.0.0)
+set(MTMD_VIDEO OFF CACHE BOOL "mtmd video support (runtime ffmpeg)" FORCE)
+add_subdirectory(${LLAMA_CPP_DIR}/tools/mtmd mtmd EXCLUDE_FROM_ALL)
+if(MSVC AND TARGET mtmd)
+    # Same u8"" literal workaround as the llama.cpp targets above.
+    target_compile_options(mtmd PRIVATE /Zc:char8_t-)
+endif()
+
 # Build liblloyal (INTERFACE library, links llama transitively)
 # This also sets up the llama/llama.h include structure automatically
 add_subdirectory(${LIBLLOYAL_DIR} liblloyal)
@@ -202,6 +222,7 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     liblloyal::liblloyal
     ${LLAMA_COMMON_TARGET}
+    mtmd
     md4c
     ${CMAKE_JS_LIB}
 )
@@ -288,7 +309,7 @@ if(BUILD_SHARED_LIBS)
     # libggml-cuda alone). Symlinks are intentionally avoided: they require admin /
     # Developer Mode on Windows (see liblloyal/CMakeLists.txt). This block is
     # Linux/macOS only (Windows links statically; SONAMEs don't apply to DLLs).
-    foreach(_lib IN ITEMS llama ${LLAMA_COMMON_TARGET} ggml ggml-base ggml-cpu ggml-metal ggml-cuda ggml-vulkan ggml-blas)
+    foreach(_lib IN ITEMS llama ${LLAMA_COMMON_TARGET} mtmd ggml ggml-base ggml-cpu ggml-metal ggml-cuda ggml-vulkan ggml-blas)
         if(TARGET ${_lib})
             get_target_property(_lloyal_lib_type ${_lib} TYPE)
             if(_lloyal_lib_type STREQUAL "SHARED_LIBRARY")
