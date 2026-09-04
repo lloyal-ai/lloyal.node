@@ -740,6 +740,22 @@ async function testTokenizer(ctx: SessionContext): Promise<void> {
   const eogText: string = ctx.tokenToText(eog);
   assert(eogText.length > 0, `EOS text: "${eogText}"`);
 
+  // tokenToBytes — the byte-level twin of tokenToText. A BPE piece can end
+  // mid-character: decoded one at a time the pieces tear into U+FFFD, while
+  // their bytes concatenate back to the text. (SentencePiece models keep the
+  // prefix space on the first piece that detokenize() strips.)
+  const multibyte = '日本語 🎉 𠜎𠜱 👨‍👩‍👧‍👦';
+  const mbTokens: number[] = await ctx.tokenize(multibyte, false);
+  const pieces: Uint8Array[] = mbTokens.map((t: number) => ctx.tokenToBytes(t));
+  assert(pieces.every((p: Uint8Array) => Buffer.isBuffer(p)),
+    `tokenToBytes returns a Buffer per token (${pieces.length} pieces)`);
+  const torn: number = pieces.filter((p: Uint8Array) => Buffer.from(p).toString('utf8').includes('\uFFFD')).length;
+  assert(torn > 0, `${torn} of ${pieces.length} pieces end mid-character`);
+  const joined: string = Buffer.concat(pieces).toString('utf8');
+  const detok: string = await ctx.detokenize(mbTokens);
+  assert(joined === detok || joined === ' ' + detok,
+    `bytes concatenate to detokenize(): ${JSON.stringify(joined)}`);
+
   // tokenize with addSpecial
   const withSpecial: number[] = await ctx.tokenize('Hello world', true);
   const noSpecial: number[] = await ctx.tokenize('Hello world', false);
@@ -2541,7 +2557,7 @@ async function testMultimodal(): Promise<void> {
 
     // One store.commit() per tick carries every live child.
     const fanToks: number[][] = asks.map(() => []);
-    let ticks = 0;
+    const widths: number[] = [];   // branches carried by each dispatch
     for (let step = 0; step < 16; step++) {
       const entries: Array<[InstanceType<typeof Branch>, number]> = [];
       for (let i = 0; i < kids.length; i++) {
@@ -2553,13 +2569,14 @@ async function testMultimodal(): Promise<void> {
       }
       if (!entries.length) break;
       await store.commit(entries);
-      ticks++;
+      widths.push(entries.length);
     }
-    // >1 is the point: several consecutive ticks each carrying every live
-    // branch in ONE llama_decode is continuous tree batching. A single
-    // dispatch would satisfy "it batched" without showing it sustains.
-    assert(ticks > 1,
-      `fan-out: ${ticks} batched dispatches, each carrying up to ${kids.length} branches`);
+    // Sustained batching is several dispatches that each carry SEVERAL
+    // branches. Counting non-empty ticks would pass when three children stop
+    // at tick one and a lone survivor runs on — serial decoding, not batching.
+    const batched: number = widths.filter((w) => w > 1).length;
+    assert(batched > 1,
+      `fan-out: dispatch widths ${widths.join(',')} — ${batched} carried several branches`);
 
     for (let i = 0; i < asks.length; i++) {
       const toks: number[] = fanToks[i].filter((t) => t !== -1);

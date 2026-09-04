@@ -54,8 +54,8 @@ for (;;) {
 
   const items = produced
     .filter((p) => !p.isStop)
-    .map((p) => { p.b.accept(p.token); return [p.b, p.token]; });
-  if (items.length) await store.commit(items);   // N branches, 1 llama_decode()
+    .map((p) => [p.b, p.token]);
+  if (items.length) await store.commit(items);   // accept + decode: N branches, 1 llama_decode()
 }
 ```
 
@@ -82,7 +82,7 @@ lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C+
 
 **What it re-exports**, so one install is enough — these are [HDK](https://github.com/lloyal-ai/hdk) packages, documented there:
 
-- from `@lloyal-labs/sdk`: `Branch`, `BranchStore`, `Session`, `Rerank`, `formatChat`, `parseChatOutput`, `jsonSchemaToGrammar`, per-token metrics
+- from `@lloyal-labs/sdk`: `Branch`, `BranchStore`, `Session`, `Rerank`, `buildUserDelta`, `buildToolResultDelta`, and the sampling, chat and rerank types
 - from `@lloyal-labs/lloyal-agents`: `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `diverge`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`
 
 Not re-exported — import from the package itself: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
