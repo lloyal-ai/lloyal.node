@@ -744,9 +744,13 @@ async function testTokenizer(ctx: SessionContext): Promise<void> {
   // mid-character: decoded one at a time the pieces tear into U+FFFD, while
   // their bytes concatenate back to the text. (SentencePiece models keep the
   // prefix space on the first piece that detokenize() strips.)
+  // Typed structurally, as the multimodal block does for `_storePrefill*`:
+  // the published sdk's SessionContext (the `^3` devDependency CI installs)
+  // predates this method, and the linked workspace hides that locally.
+  const bytes = ctx as unknown as { tokenToBytes(token: number): Uint8Array };
   const multibyte = '日本語 🎉 𠜎𠜱 👨‍👩‍👧‍👦';
   const mbTokens: number[] = await ctx.tokenize(multibyte, false);
-  const pieces: Uint8Array[] = mbTokens.map((t: number) => ctx.tokenToBytes(t));
+  const pieces: Uint8Array[] = mbTokens.map((t: number) => bytes.tokenToBytes(t));
   assert(pieces.every((p: Uint8Array) => Buffer.isBuffer(p)),
     `tokenToBytes returns a Buffer per token (${pieces.length} pieces)`);
   const torn: number = pieces.filter((p: Uint8Array) => Buffer.from(p).toString('utf8').includes('\uFFFD')).length;
