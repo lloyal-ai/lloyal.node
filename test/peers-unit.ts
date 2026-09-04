@@ -12,9 +12,12 @@
  */
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { satisfies } from 'semver';
 
-const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+// CommonJS on purpose: tsconfig.test.json compiles the tests as CommonJS, so
+// `__dirname`, not `import.meta.url` — the compile gate, not tsx, is the judge.
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
   peerDependencies: Record<string, string>;
 };
 const peers = pkg.peerDependencies;

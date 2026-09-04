@@ -59,6 +59,7 @@
     "@lloyal-labs/lloyal-agents": "^3.0.0",
     "@lloyal-labs/sdk": "^3.0.0",
     "@types/node": "^25.3.0",
+    "@types/semver": "^7.8.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
     "semver": "^7.8.5",
