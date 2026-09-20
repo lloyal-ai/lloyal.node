@@ -953,6 +953,18 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(typeof result.reasoningFormat === 'number', 'formatChat returns reasoningFormat');
   assert(Array.isArray(result.grammarTriggers), 'formatChat returns grammarTriggers array');
   assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
+  // Thinking as the TEMPLATE declares it, so a caller reading a raw stream never guesses one model's tags.
+  // Structurally typed until the installed SDK carries these fields — the same idiom `tokenToBytes` uses above.
+  const thinking = result as unknown as { supportsThinking: boolean; thinkingStartTag: string; thinkingEndTag: string };
+  assert(typeof thinking.supportsThinking === 'boolean', 'formatChat returns supportsThinking');
+  assert(typeof thinking.thinkingStartTag === 'string', 'formatChat returns thinkingStartTag');
+  assert(typeof thinking.thinkingEndTag === 'string', 'formatChat returns thinkingEndTag');
+  assert(thinking.supportsThinking === (thinking.thinkingEndTag.length > 0),
+    'a template that supports thinking names its tags, and one that does not leaves them empty');
+  if (thinking.supportsThinking) {
+    // The pairing chat_out needs: reasoning is parsed as reasoning by default, never left inline in content.
+    assert(result.reasoningFormat !== 0, 'a thinking template formats with reasoning extraction on by default');
+  }
   ok('formatChat with options returns extended result');
 
   // Backward compat: string second argument still works

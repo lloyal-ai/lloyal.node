@@ -1358,6 +1358,12 @@ static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::Fo
   result.Set("reasoningFormat", Napi::Number::New(env, static_cast<double>(r.reasoning_format)));
   result.Set("parser", Napi::String::New(env, r.parser));
 
+  // Thinking, as the template declares it — so a caller reading a raw stream never has to guess one model's
+  // tags (`</think>` for Qwen, `[/THINK]` for Magistral, a channel marker for gpt-oss).
+  result.Set("supportsThinking", Napi::Boolean::New(env, r.supports_thinking));
+  result.Set("thinkingStartTag", Napi::String::New(env, r.thinking_start_tag));
+  result.Set("thinkingEndTag", Napi::String::New(env, r.thinking_end_tag));
+
   Napi::Array triggers = Napi::Array::New(env, r.grammar_triggers.size());
   for (size_t i = 0; i < r.grammar_triggers.size(); i++) {
     Napi::Object trigger = Napi::Object::New(env);
