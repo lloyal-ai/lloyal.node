@@ -11,6 +11,11 @@
 #include <string>
 #include <vector>
 
+// Forward declaration at GLOBAL scope — mtmd_context is llama.cpp/tools/mtmd's
+// opaque C type. Declaring it here (not inside the namespace below) keeps the
+// member/param types referring to ::mtmd_context, matching <mtmd.h>.
+struct mtmd_context;
+
 namespace liblloyal_node {
 
 /**
@@ -75,6 +80,14 @@ public:
     int32_t nBatch = lloyal::defaults::N_BATCH_INIT
   );
 
+  /**
+   * Attach the mtmd (multimodal) context loaded from an mmproj file.
+   * Called by CreateContext when options.mmprojPath is set. Ownership
+   * transfers to this SessionContext (freed before the model in both
+   * the destructor and dispose()).
+   */
+  void initializeMultimodal(struct mtmd_context* mtmd);
+
 private:
   // ===== CORE PRIMITIVES =====
 
@@ -105,6 +118,7 @@ private:
    * Returns: string
    */
   Napi::Value tokenToText(const Napi::CallbackInfo& info);
+  Napi::Value tokenToBytes(const Napi::CallbackInfo& info);
 
   /**
    * Check if token is a stop token (EOS)
@@ -278,6 +292,25 @@ private:
 
   Napi::Value _storeCommit(const Napi::CallbackInfo& info);
   Napi::Value _storePrefill(const Napi::CallbackInfo& info);
+
+  /**
+   * Multimodal prefill: per-branch sep tokens + templated prompt (with
+   * media markers) + image bytes. The walk itself is liblloyal's:
+   * `MtmdSource` yields TEXT/IMAGE segments in order and
+   * `BranchStore::decode_segments` places them (token rail / embedding rail).
+   * Args: (handles: number[], sepTokens: number[][], prompts: string[],
+   *        bitmaps: Buffer[][])
+   * Returns: Promise<{tokensDecoded, positionAdvance, error?, rc?, partial?}[]>
+   *   — per-entry outcomes; a failed entry carries `error`, and when the
+   *   failure came from llama_decode, its `rc` and `partial` (see DecodeError).
+   */
+  Napi::Value _storePrefillMultimodal(const Napi::CallbackInfo& info);
+  Napi::Value _cellsMultimodal(const Napi::CallbackInfo& info);
+
+  /** True when the loaded mmproj has a vision encoder (no mmproj → false). */
+  Napi::Value supportsVision(const Napi::CallbackInfo& info);
+  /** True when the loaded mmproj has an audio encoder (no mmproj → false). */
+  Napi::Value supportsAudio(const Napi::CallbackInfo& info);
   Napi::Value _storeMergeLogits(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
@@ -292,6 +325,10 @@ private:
 
   std::shared_ptr<llama_model> _model;
   llama_context* _context = nullptr;
+  /// mtmd multimodal context (owned; nullptr when no mmproj was loaded).
+  /// Freed BEFORE _model in ~SessionContext and dispose() — mtmd holds a
+  /// reference to the model.
+  struct mtmd_context* _mtmdContext = nullptr;
   bool _disposed = false;
   int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
 
