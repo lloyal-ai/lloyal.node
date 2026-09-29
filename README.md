@@ -71,7 +71,7 @@ See [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk
 
 ## What this package is
 
-lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why [nitro-llama](https://github.com/lloyal-ai/nitro-llama) can serve React Native from the same kernel.
+lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C++20 kernel — to Node, and ships it prebuilt. It is the seam: everything above it is backend-agnostic TypeScript, everything below is native. That is why nitro-llama can serve React Native from the same kernel.
 
 **What it owns:**
 
@@ -258,10 +258,10 @@ Multimodal runs two tiers: SmolVLM-256M for plain positions in CI, Qwen3.5-4B + 
 | [`@lloyal-labs/sdk`](https://github.com/lloyal-ai/hdk/tree/main/packages/sdk) | Backend-agnostic inference primitives |
 | [`@lloyal-labs/lloyal-agents`](https://github.com/lloyal-ai/hdk/tree/main/packages/agents) | Multi-agent runtime; owns the Ability protocol contracts and the `GrantStore` / `authGuard` surface that gates `protected` tools |
 | [`@lloyal-labs/rig`](https://github.com/lloyal-ai/hdk/tree/main/packages/rig) | Builds Abilities on those contracts — `defineAbility`, `createAbilityRegistry`, retrieval and framework tools, and `createGrantStore`, the reference in-memory grant store |
-| [`harness.dev`](https://www.npmjs.com/package/harness.dev) | CLI — scaffold harnesses and Abilities, publish/install signed Abilities |
+| [`lloyal-ai`](https://www.npmjs.com/package/lloyal-ai) | CLI (`npx lloyal-ai new`) — scaffold harnesses and Abilities, publish/install signed Abilities |
 | [liblloyal](https://github.com/lloyal-ai/liblloyal) | The C++20 kernel |
 | **lloyal.node** | This package — native backend + prebuilt binaries |
-| [nitro-llama](https://github.com/lloyal-ai/nitro-llama) | React Native backend via Nitro Modules |
+| nitro-llama | React Native backend via Nitro Modules |
 | [tsampler](https://github.com/lloyal-ai/tsampler) | Reference sampler implementation |
 
 ## Contributing
