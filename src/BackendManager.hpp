@@ -2,6 +2,7 @@
 
 #include <llama/llama.h>
 #include "log.h"
+#include <cstdlib>
 #include <mutex>
 
 namespace liblloyal_node {
@@ -46,7 +47,11 @@ private:
     resolveBackends();
 #endif
     llama_backend_init();
-    common_log_set_verbosity_thold(LOG_DEFAULT_LLAMA);
+    // Verbosity threshold is env-overridable (LLOYAL_LLAMA_VERBOSITY) so llama.cpp's
+    // per-context KV / compute-buffer allocation lines can be surfaced on demand;
+    // defaults to the shipped level when the env var is unset.
+    const char* verbEnv = std::getenv("LLOYAL_LLAMA_VERBOSITY");
+    common_log_set_verbosity_thold(verbEnv ? std::atoi(verbEnv) : LOG_DEFAULT_LLAMA);
     llama_log_set(common_log_default_callback, nullptr);
   }
 
