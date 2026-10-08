@@ -33,7 +33,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { DL_CUDA_ARCHS, GGML_MIRRORED_ARCHS } = require('./dl-archs');
-const { copyNativeLegalFiles, copyCudaLegalFiles } = require('./package-legal');
+const { validateNativeLegalFiles, copyNativeLegalFiles, copyCudaLegalFiles } = require('./package-legal');
 
 const ROOT = path.join(__dirname, '..');
 const BUILD_DIR = path.join(ROOT, 'build', 'Release');
@@ -104,6 +104,8 @@ function tarZst(dir, outFile, mtimeEpoch) {
 }
 
 // ── Preconditions ────────────────────────────────────────────────────
+
+validateNativeLegalFiles(ROOT);
 
 if (process.platform !== 'linux') fail('pack assembly runs on linux only (the flavor target)');
 if (!which('zstd')) fail('zstd not found — `apt-get install zstd` (CI installs it)');

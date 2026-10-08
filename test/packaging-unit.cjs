@@ -27,7 +27,8 @@ function fixture(t) {
   write(root, 'package.json', fs.readFileSync(path.join(ROOT, 'package.json')));
   for (const file of ROOT_LEGAL_FILES) write(root, file, fs.readFileSync(path.join(ROOT, file)));
   // Deliberately distinct: a root-license substitution must fail the assertions.
-  write(root, 'liblloyal/LICENSE', 'liblloyal fixture license\n');
+  write(root, 'liblloyal/LICENSE', fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8')
+    .replace('Copyright 2026 Lloyal Labs', 'Copyright 2026 liblloyal fixture'));
   write(root, 'liblloyal/NOTICE', 'liblloyal fixture notice\n');
   write(root, 'llama.cpp/LICENSE', 'llama.cpp fixture MIT license\n');
   write(root, 'llama.cpp/NOTICE', 'llama.cpp fixture notice\n');
@@ -55,6 +56,16 @@ function sameFile(root, destination, file) {
   assert.deepEqual(fs.readFileSync(path.join(destination, file)), fs.readFileSync(path.join(root, file)), file);
 }
 
+function mitFutureLicenses(root) {
+  for (const file of ['LICENSE', 'liblloyal/LICENSE']) {
+    const license = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(license, /^# Functional Source License, Version 1\.1, MIT Future License\n/, file);
+    assert.match(license, /\nFSL-1\.1-MIT\n/, file);
+    assert.match(license, /MIT license that is effective on the second anniversary/, file);
+    assert.match(license, /Permission is hereby granted, free of charge/, file);
+  }
+}
+
 test('main npm payload includes the grant, FAQ, license and notices', () => {
   const files = packedFiles(ROOT);
   for (const file of ROOT_LEGAL_FILES) assert.ok(files.includes(file), `npm payload missing ${file}`);
@@ -78,6 +89,7 @@ test('platform packages preserve legal documents and ship only selected binaries
       assert.ok(files.includes(file), `${name}: npm payload missing ${file}`);
       sameFile(root, destination, file);
     }
+    mitFutureLicenses(destination);
     assert.ok(files.includes('bin/lloyal.node'));
     assert.ok(files.includes(`bin/${library}`));
     assert.equal(files.filter((file) => file.startsWith('bin/')).length, 2);
@@ -89,6 +101,31 @@ test('packaging fails when a required legal document is missing', (t) => {
   const root = fixture(t);
   fs.unlinkSync(path.join(root, 'GRANT.md'));
   assert.throws(() => run(root, 'create-platform-package.js', ['linux-x64', 'ubuntu-22.04', 'x64']), /Missing legal document:.*GRANT\.md/);
+  assert.equal(fs.existsSync(path.join(root, 'packages')), false);
+});
+
+test('stale root or kernel licensing fails before any payload is written', (t) => {
+  for (const file of ['LICENSE', 'liblloyal/LICENSE']) {
+    for (const [current, stale] of [
+      ['MIT Future License', 'Apache 2.0 Future License'],
+      ['FSL-1.1-MIT', 'FSL-1.1-Apache-2.0'],
+    ]) {
+      const root = fixture(t);
+      const source = fs.readFileSync(path.join(root, file), 'utf8');
+      write(root, file, source.replace(current, stale));
+      const thirdPartyLicense = fs.readFileSync(path.join(root, 'llama.cpp/LICENSE'));
+      const { copyNativeLegalFiles } = require(path.join(root, 'scripts/package-legal'));
+      const destination = path.join(root, 'legal-copy');
+      const expected = /Expected FSL-1\.1-MIT in (?:liblloyal\/)?LICENSE/;
+      assert.throws(() => copyNativeLegalFiles(root, destination), expected);
+      assert.equal(fs.existsSync(destination), false);
+      assert.throws(() => run(root, 'create-platform-package.js', ['linux-x64', 'ubuntu-22.04', 'x64']), expected);
+      assert.equal(fs.existsSync(path.join(root, 'packages')), false);
+      assert.throws(() => run(root, 'create-dl-pack.js'), expected);
+      assert.equal(fs.existsSync(path.join(root, 'packs')), false);
+      assert.deepEqual(fs.readFileSync(path.join(root, 'llama.cpp/LICENSE')), thirdPartyLicense);
+    }
+  }
 });
 
 test('R2 backend and CUDA archives retain legal documents, binaries and deterministic digests', { skip: process.platform !== 'linux' }, (t) => {
@@ -121,6 +158,7 @@ test('R2 backend and CUDA archives retain legal documents, binaries and determin
     execFileSync('tar', ['--zstd', '-xf', source, '-C', extracted]);
   }
   for (const file of LEGAL_FILES) sameFile(root, extracted, file);
+  mitFutureLicenses(extracted);
   for (const file of ['lloyal.node', 'libllama.so.0', 'libggml-cuda.so']) {
     assert.deepEqual(fs.readFileSync(path.join(extracted, file)), fs.readFileSync(path.join(root, 'build/Release', file)));
   }

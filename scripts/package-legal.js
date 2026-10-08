@@ -10,15 +10,33 @@ const NATIVE_LEGAL_FILES = [
   'llama.cpp/LICENSE',
 ];
 
-function copyFile(source, destination) {
+function requireLegalFile(source) {
   if (!fs.existsSync(source)) {
     throw new Error(`Missing legal document: ${source}. Ensure the source checkout and toolkit are complete before packaging.`);
   }
+}
+
+function validateNativeLegalFiles(root) {
+  for (const file of NATIVE_LEGAL_FILES) requireLegalFile(path.join(root, file));
+  // Check our sources, including the pinned kernel, before creating any payload.
+  // Third-party licenses are preserved verbatim and are not subject to this gate.
+  for (const file of ['LICENSE', 'liblloyal/LICENSE']) {
+    const license = fs.readFileSync(path.join(root, file), 'utf8');
+    if (!/^# Functional Source License, Version 1\.1, MIT Future License\r?\n/.test(license)
+        || !/\r?\nFSL-1\.1-MIT\r?\n/.test(license)) {
+      throw new Error(`Expected FSL-1.1-MIT in ${file}. Check the root license and pinned liblloyal revision before packaging.`);
+    }
+  }
+}
+
+function copyFile(source, destination) {
+  requireLegalFile(source);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.copyFileSync(source, destination);
 }
 
 function copyNativeLegalFiles(root, destination) {
+  validateNativeLegalFiles(root);
   for (const file of NATIVE_LEGAL_FILES) {
     copyFile(path.join(root, file), path.join(destination, file));
   }
@@ -35,4 +53,4 @@ function copyCudaLegalFiles(cudaPath, destination) {
   copyFile(path.join(cudaPath, 'EULA.txt'), path.join(destination, 'third-party/cuda/EULA.txt'));
 }
 
-module.exports = { ROOT_LEGAL_FILES, NATIVE_LEGAL_FILES, copyNativeLegalFiles, copyCudaLegalFiles };
+module.exports = { ROOT_LEGAL_FILES, NATIVE_LEGAL_FILES, validateNativeLegalFiles, copyNativeLegalFiles, copyCudaLegalFiles };

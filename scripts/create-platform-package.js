@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { NATIVE_LEGAL_FILES, copyNativeLegalFiles } = require('./package-legal');
+const { NATIVE_LEGAL_FILES, validateNativeLegalFiles, copyNativeLegalFiles } = require('./package-legal');
 
 const [packageName, osRunner, arch] = process.argv.slice(2);
 
@@ -35,6 +35,8 @@ const OS_MAP = {
 const osName = OS_MAP[osRunner] || process.platform;
 
 console.log(`\n=== Creating platform package: @lloyal-labs/lloyal.node-${packageName} ===\n`);
+
+validateNativeLegalFiles(ROOT);
 
 // Create directories
 fs.mkdirSync(BIN_DIR, { recursive: true });
