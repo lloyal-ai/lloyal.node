@@ -33,6 +33,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { DL_CUDA_ARCHS, GGML_MIRRORED_ARCHS } = require('./dl-archs');
+const { copyNativeLegalFiles, copyCudaLegalFiles } = require('./package-legal');
 
 const ROOT = path.join(__dirname, '..');
 const BUILD_DIR = path.join(ROOT, 'build', 'Release');
@@ -185,11 +186,17 @@ for (const so of sos) {
   fs.copyFileSync(path.join(BUILD_DIR, so), path.join(stageDir, so));
 }
 console.log(`[create-dl-pack] pack payload: lloyal.node + ${sos.length} shared objects`);
+copyNativeLegalFiles(ROOT, stageDir);
 
 const files = {};
-for (const f of fs.readdirSync(stageDir).sort()) {
-  files[f] = sha256File(path.join(stageDir, f));
+function hashFiles(dir, prefix = '') {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+    const relativePath = prefix + entry.name;
+    if (entry.isDirectory()) hashFiles(path.join(dir, entry.name), `${relativePath}/`);
+    else files[relativePath] = sha256File(path.join(dir, entry.name));
+  }
 }
+hashFiles(stageDir);
 
 const archiveFile = `${PLATFORM_TAG}.tar.zst`;
 tarZst(stageDir, path.join(PACKS_DIR, archiveFile), mtimeEpoch);
@@ -217,6 +224,7 @@ for (const f of fs.readdirSync(cudaLib)) {
 }
 if (runtimeCount < 4) fail(`companion runtime: expected cudart/cublas/cublasLt/nvJitLink under ${cudaLib}, found ${runtimeCount} files`);
 console.log(`[create-dl-pack] companion runtime payload: ${runtimeCount} libs (CUDA ${requiredCudaRuntime})`);
+copyCudaLegalFiles(cudaPath, runtimeStage);
 
 const runtimeFile = `runtime-cuda${requiredCudaRuntime}.tar.zst`;
 tarZst(runtimeStage, path.join(PACKS_DIR, runtimeFile), mtimeEpoch);
