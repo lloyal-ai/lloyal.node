@@ -3,7 +3,7 @@
 [![Build & Test](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/tests.yml)
 [![GPU Tests](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml/badge.svg)](https://github.com/lloyal-ai/lloyal.node/actions/workflows/gpu-test.yml)
 [![npm](https://img.shields.io/npm/v/@lloyal-labs/lloyal.node.svg)](https://www.npmjs.com/package/@lloyal-labs/lloyal.node)
-[![License](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-FSL--1.1--MIT-blue.svg)](LICENSE)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-pinned-green.svg)](./liblloyal/.llama-cpp-version)
 
 **The Node runtime for the HDK — built on liblloyal and llama.cpp**
@@ -272,10 +272,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and the release p
 
 You can build and sell commercial products using lloyal.node.
 
-lloyal.node 3.0 is source-available under FSL-1.1-Apache-2.0 and converts
-to Apache 2.0 two years after each release. The restriction is narrow: you
-cannot offer a competing HDK runtime, managed HDK service, or alternative
-ability distribution channel.
+lloyal.node is source-available under FSL-1.1-MIT and becomes additionally
+available under MIT two years after each version is first made available.
+The [Developer Grant](./GRANT.md) permits commercial applications and Abilities;
+the restrictions cover competing developer frameworks or runtime services and
+general Ability distribution channels offered to third-party developers.
+
+Earlier versions distributed under FSL-1.1-Apache-2.0 retain their original
+terms and Apache 2.0 future-license commitments.
 
 See [`LICENSE-FAQ.md`](./LICENSE-FAQ.md) for permissions and restrictions. See [`LICENSE`](./LICENSE) for the legal
 text and [`NOTICE`](./NOTICE) for attribution including the bundled

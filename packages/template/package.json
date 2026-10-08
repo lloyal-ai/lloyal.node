@@ -10,12 +10,20 @@
     "ARCH"
   ],
   "files": [
-    "bin/"
+    "bin/",
+    "LICENSE",
+    "NOTICE",
+    "GRANT.md",
+    "LICENSE-FAQ.md",
+    "liblloyal/LICENSE",
+    "liblloyal/NOTICE",
+    "llama.cpp/LICENSE",
+    "llama.cpp/NOTICE"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lloyal-ai/lloyal.node.git"
   },
   "author": "lloyal.ai",
-  "license": "Apache-2.0"
+  "license": "SEE LICENSE IN LICENSE"
 }

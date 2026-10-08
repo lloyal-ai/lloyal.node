@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { NATIVE_LEGAL_FILES, validateNativeLegalFiles, copyNativeLegalFiles } = require('./package-legal');
 
 const [packageName, osRunner, arch] = process.argv.slice(2);
 
@@ -34,6 +35,8 @@ const OS_MAP = {
 const osName = OS_MAP[osRunner] || process.platform;
 
 console.log(`\n=== Creating platform package: @lloyal-labs/lloyal.node-${packageName} ===\n`);
+
+validateNativeLegalFiles(ROOT);
 
 // Create directories
 fs.mkdirSync(BIN_DIR, { recursive: true });
@@ -109,6 +112,7 @@ if (osName === 'darwin') {
 // Create package.json from template
 console.log('\nGenerating package.json...');
 const mainPackageJson = require(path.join(ROOT, 'package.json'));
+copyNativeLegalFiles(ROOT, PKG_DIR);
 
 // Platform package exports the binary directly (no index.js wrapper)
 // This enables runtime dynamic require with automatic fallback:
@@ -120,13 +124,13 @@ const pkgJson = {
   main: 'bin/lloyal.node',
   os: [osName],
   cpu: [arch],
-  files: ['bin/'],
+  files: ['bin/', ...NATIVE_LEGAL_FILES, 'llama.cpp/NOTICE'],
   repository: {
     type: 'git',
     url: 'git+https://github.com/lloyal-ai/lloyal.node.git'
   },
   author: 'lloyal.ai',
-  license: 'Apache-2.0'
+  license: mainPackageJson.license
 };
 
 fs.writeFileSync(
