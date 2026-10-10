@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Download test models from test/matrix.json
 # Usage:
@@ -13,7 +13,7 @@ MODELS_DIR="$PROJECT_ROOT/models"
 
 # Check for --all flag
 DOWNLOAD_ALL=false
-if [ "$1" = "--all" ]; then
+if [ "${1:-}" = "--all" ]; then
   DOWNLOAD_ALL=true
 fi
 
@@ -32,17 +32,31 @@ fi
 
 mkdir -p "$MODELS_DIR"
 
+verify_checksum() {
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$1" | cut -d ' ' -f 1)
+  else
+    actual=$(shasum -a 256 "$1" | cut -d ' ' -f 1)
+  fi
+  [ "$actual" = "$2" ]
+}
+
 download_model() {
   local name="$1"
   local file="$2"
   local url="$3"
   local dest="$MODELS_DIR/$file"
+  local checksum="${4:-}"
+  mkdir -p "$(dirname "$dest")"
 
-  if [ -f "$dest" ]; then
+  if [ -f "$dest" ] && { [ -z "$checksum" ] || verify_checksum "$dest" "$checksum"; }; then
     echo "  ✓ $name already exists"
   else
     echo "  → Downloading $name..."
-    curl -L -o "$dest" "$url"
+    curl --fail --location --retry 3 -o "$dest.part" "$url"
+    if [ -n "$checksum" ]; then verify_checksum "$dest.part" "$checksum"; fi
+    mv "$dest.part" "$dest"
     echo "  ✓ Downloaded $name"
   fi
 }
@@ -98,7 +112,17 @@ jq -c '.sidecars[]' "$MATRIX_FILE" | while read -r model; do
   name=$(echo "$model" | jq -r '.name')
   file=$(echo "$model" | jq -r '.file')
   url=$(echo "$model" | jq -r '.url')
-  download_model "$name" "$file" "$url"
+  manifest=$(echo "$model" | jq -r '.checksumManifest // empty')
+  checksum_file=$(echo "$model" | jq -r '.checksumFile // empty')
+  checksum=""
+  if [ -n "$manifest" ]; then
+    checksum=$(awk -v file="$checksum_file" '$2 == file { print $1 }' "$PROJECT_ROOT/$manifest")
+    if [ "${#checksum}" != 64 ]; then
+      echo "Missing checksum for $checksum_file in $manifest" >&2
+      exit 1
+    fi
+  fi
+  download_model "$name" "$file" "$url" "$checksum"
 done
 echo ""
 
