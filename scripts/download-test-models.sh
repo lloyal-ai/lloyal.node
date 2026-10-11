@@ -5,7 +5,9 @@ set -euo pipefail
 # Usage:
 #   ./scripts/download-test-models.sh              # Default models only (the text suite)
 #   ./scripts/download-test-models.sh --services   # Plus each service's model and projector (image, audio)
-#   ./scripts/download-test-models.sh --all        # Every model in the matrix, services included
+#   ./scripts/download-test-models.sh --all        # Every chat and embedding model in the matrix
+#   The service pairs are never implied: a GPU container that runs the text suite over every chat
+#   model must not also hold four gigabytes of projectors in a filesystem that is memory.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -16,7 +18,7 @@ DOWNLOAD_ALL=false
 DOWNLOAD_SERVICES=false
 for arg in "$@"; do
   case "$arg" in
-    --all) DOWNLOAD_ALL=true; DOWNLOAD_SERVICES=true ;;
+    --all) DOWNLOAD_ALL=true ;;
     --services) DOWNLOAD_SERVICES=true ;;
     *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
