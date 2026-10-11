@@ -1073,6 +1073,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchSetSamplerParams", &SessionContext::_branchSetSamplerParams),
     InstanceMethod("_branchSetGrammar", &SessionContext::_branchSetGrammar),
     InstanceMethod("_branchSetGrammarLazy", &SessionContext::_branchSetGrammarLazy),
+    InstanceMethod("_branchSetGrammarOrder", &SessionContext::_branchSetGrammarOrder),
     InstanceMethod("_branchModelEntropy", &SessionContext::_branchModelEntropy),
     InstanceMethod("_branchModelSurprisal", &SessionContext::_branchModelSurprisal),
     InstanceMethod("_branchGetSamplingPerplexity", &SessionContext::_branchGetSamplingPerplexity),
@@ -2555,6 +2556,20 @@ Napi::Value SessionContext::_branchSetGrammar(const Napi::CallbackInfo& info) {
     grammar_str.empty() ? "" : grammar_str.c_str(),
     _branchStore
   );
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchSetGrammarOrder(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[1].IsBoolean()) {
+    throw Napi::Error::New(env, "_branchSetGrammarOrder requires (handle, sampleFirst: boolean)");
+  }
+
+  auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  lloyal::branch::set_grammar_order(handle, info[1].As<Napi::Boolean>().Value(), _branchStore);
 
   return env.Undefined();
 }
