@@ -14,7 +14,7 @@ The HDK's packages are backend-agnostic TypeScript: `Branch` and `BranchStore` i
 
 It ships **prebuilt for 13 platform/GPU targets**. Nothing compiles on install, and the variant matching your hardware is chosen when the process starts — so the same artifact ships to a laptop and a CUDA box.
 
-The rest of the HDK is re-exported, so `import { Branch, useAgent } from "@lloyal-labs/lloyal.node"` needs no second package.
+The SDK is re-exported, so `import { Branch } from "@lloyal-labs/lloyal.node"` needs no second package; the agent runtime is `@lloyal-labs/lloyal-agents`, imported from itself.
 
 ## Install
 
@@ -80,12 +80,11 @@ lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C+
 - `loadBinary(variant?)` and the [binary resolution order](#which-binary-loads)
 - The prebuilt binaries and the [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu)
 
-**What it re-exports**, so one install is enough — these are [HDK](https://github.com/lloyal-ai/hdk) packages, documented there:
+**What it re-exports**, so one install is enough — an [HDK](https://github.com/lloyal-ai/hdk) package, documented there:
 
 - from `@lloyal-labs/sdk`: `Branch`, `BranchStore`, `Session`, `Rerank`, `buildUserDelta`, `buildToolResultDelta`, and the sampling, chat and rerank types
-- from `@lloyal-labs/lloyal-agents`: `Tool`, `Agent`, `agent`, `agentPool`, `useAgent`, `useAgentPool`, `withSpine`, `reduce`, `createToolkit`, `initAgents`, `DefaultAgentPolicy`, `renderTemplate`
 
-Not re-exported — import from the package itself: the Ability protocol (`AbilityRegistryCtx`, `AbilityConfigStoreCtx`, `AbilityManifest`, `GrantStoreCtx`) from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
+Not re-exported — import from the package itself: the agent runtime from `@lloyal-labs/lloyal-agents`, and `defineAbility` / `createAbilityRegistry` / `createGrantStore` from `@lloyal-labs/rig`.
 
 ## The native surface
 
@@ -249,7 +248,7 @@ Integration tests run real inference across architectures, so a template regress
 | Gemma 3      | gemma      |
 | GLM-Edge     | glm-edge   |
 
-Multimodal runs two tiers: SmolVLM-256M for plain positions in CI, Qwen3.5-4B + mmproj for M-RoPE locally and on the GPU rig. See [distribution.md](docs/distribution.md).
+Multimodal tests run Qwen3.5-4B with its projector for images and Qwen3-ASR-0.6B with its projector for audio, locally and on the GPU rig; `test/matrix.json` names the checksummed pairs. See [distribution.md](docs/distribution.md).
 
 ## Ecosystem
 

@@ -295,11 +295,11 @@ private:
 
   /**
    * Multimodal prefill: per-branch sep tokens + templated prompt (with
-   * media markers) + image bytes. The walk itself is liblloyal's:
-   * `MtmdSource` yields TEXT/IMAGE segments in order and
+   * media markers) + typed media bytes. The walk itself is liblloyal's:
+   * `MtmdSource` yields TEXT/IMAGE/AUDIO segments in order and
    * `BranchStore::decode_segments` places them (token rail / embedding rail).
    * Args: (handles: number[], sepTokens: number[][], prompts: string[],
-   *        bitmaps: Buffer[][])
+   *        inputs: (Buffer | {kind, bytes})[][], audioLimits?: {maxBytes, maxSamples}[])
    * Returns: Promise<{tokensDecoded, positionAdvance, error?, rc?, partial?}[]>
    *   — per-entry outcomes; a failed entry carries `error`, and when the
    *   failure came from llama_decode, its `rc` and `partial` (see DecodeError).
@@ -311,6 +311,8 @@ private:
   Napi::Value supportsVision(const Napi::CallbackInfo& info);
   /** True when the loaded mmproj has an audio encoder (no mmproj → false). */
   Napi::Value supportsAudio(const Napi::CallbackInfo& info);
+  /** Audio encoder sample rate, or zero when no audio encoder is loaded. */
+  Napi::Value audioSampleRate(const Napi::CallbackInfo& info);
   Napi::Value _storeMergeLogits(const Napi::CallbackInfo& info);
   Napi::Value _storeRetainOnly(const Napi::CallbackInfo& info);
   Napi::Value _storeAvailable(const Napi::CallbackInfo& info);
