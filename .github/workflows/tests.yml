@@ -27,7 +27,7 @@ jobs:
           key: test-models-v2-${{ hashFiles('test/matrix.json', 'liblloyal/tests/fixtures/*-models.sha256') }}
 
       - name: Download test models
-        run: bash scripts/download-test-models.sh
+        run: bash scripts/download-test-models.sh --services
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

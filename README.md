@@ -14,7 +14,7 @@ The HDK's packages are backend-agnostic TypeScript: `Branch` and `BranchStore` i
 
 It ships **prebuilt for 13 platform/GPU targets**. Nothing compiles on install, and the variant matching your hardware is chosen when the process starts — so the same artifact ships to a laptop and a CUDA box.
 
-The rest of the HDK is re-exported, so `import { Branch, useAgent } from "@lloyal-labs/lloyal.node"` needs no second package.
+The SDK is re-exported, so `import { Branch } from "@lloyal-labs/lloyal.node"` needs no second package; the agent runtime is `@lloyal-labs/lloyal-agents`, imported from itself.
 
 ## Install
 

@@ -230,7 +230,7 @@ jobs:
 
       - name: Download test models
         if: matrix.cross_compile != true
-        run: bash scripts/download-test-models.sh
+        run: bash scripts/download-test-models.sh   # the text suite's models; no service pairs
 
       - name: Install platform package locally
         if: matrix.cross_compile != true
@@ -297,7 +297,9 @@ jobs:
           LLOYAL_NO_FALLBACK: '1'
 
       # Integration tests on GitHub runners (no GPU hardware)
-      # GPU tests (CUDA/Vulkan) run separately via gpu-test.yml on Cloud Run with NVIDIA L4
+      # GPU tests (CUDA/Vulkan) run separately via gpu-test.yml on Cloud Run with NVIDIA L4.
+      # The matrix validates the text suite per platform; the image and audio lanes run in tests.yml
+      # on every PR, with the budgets they need.
       - name: Run integration tests (Windows)
         if: runner.os == 'Windows' && matrix.gpu == 'cpu' && matrix.cross_compile != true
         shell: pwsh
@@ -311,7 +313,7 @@ jobs:
             }
           }
           if ($env:CUDA_PATH) { $env:PATH = "$env:CUDA_PATH\bin;$env:PATH" }
-          npm run test:integration
+          npm run test:integration -- --suite=text
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}
@@ -325,7 +327,7 @@ jobs:
         run: |
           PKG_BIN="$PWD/node_modules/@lloyal-labs/lloyal.node-${{ matrix.package }}/bin"
           export LD_LIBRARY_PATH="${PKG_BIN}:${LD_LIBRARY_PATH:-}"
-          npm run test:integration
+          npm run test:integration -- --suite=text
         timeout-minutes: 5
         env:
           LLOYAL_GPU: ${{ matrix.gpu }}

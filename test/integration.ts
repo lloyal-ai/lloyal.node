@@ -2319,6 +2319,7 @@ async function testMultimodal(): Promise<void> {
       tokensDecoded: number; positionAdvance: number;
       error?: string; rc?: number; partial?: boolean;
     }>>;
+    _cellsMultimodal(sep: number[], prompt: string, bitmaps: Buffer[]): Promise<number>;
     _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
     _storeKvPressure(): { cellsUsed: number };
     supportsVision(): boolean;
@@ -2369,6 +2370,16 @@ async function testMultimodal(): Promise<void> {
     const cells1: number = mm._storeKvPressure().cellsUsed;
     assert(cells1 - cells0 === tokensDecoded,
       `cells grew by tokensDecoded (${cells1 - cells0} == ${tokensDecoded})`);
+    // The typed input carries the same bytes under its kind, and costs and lands exactly as the bare buffer does.
+    const typed = { kind: 'image', bytes: IMG } as unknown as Buffer;
+    const bareCells = await mm._cellsMultimodal([], userPrompt, [IMG]);
+    const typedCells = await mm._cellsMultimodal([], userPrompt, [typed]);
+    assert(typedCells === bareCells, `typed image measures as the bare buffer does (${typedCells} == ${bareCells})`);
+    const typedBranch = Branch.create(ctx, 0, { temperature: 0 });
+    const [typedRes] = await mm._storePrefillMultimodal([typedBranch.handle], [[]], [userPrompt], [[typed]]);
+    assert(typedRes.error === undefined && typedRes.tokensDecoded === tokensDecoded,
+      `typed image prefills as the bare buffer does (${typedRes.tokensDecoded} == ${tokensDecoded}${typedRes.error ? ': ' + typedRes.error : ''})`);
+    await typedBranch.prune();
     if (vl.mrope) {
       assert(positionAdvance < tokensDecoded,
         `M-RoPE decouple: positionAdvance (${positionAdvance}) < tokensDecoded (${tokensDecoded})`);
