@@ -54,11 +54,9 @@
     "node-addon-api": "^8.5.0"
   },
   "peerDependencies": {
-    "@lloyal-labs/lloyal-agents": ">=3.0.0 || >=6.0.0-0 <7.0.0",
     "@lloyal-labs/sdk": ">=3.0.0 || >=4.0.0-0 <5.0.0"
   },
   "devDependencies": {
-    "@lloyal-labs/lloyal-agents": "^3.0.0",
     "@lloyal-labs/sdk": "^3.0.0",
     "@types/node": "^25.3.0",
     "@types/semver": "^7.8.0",

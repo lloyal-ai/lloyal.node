@@ -48,24 +48,15 @@
       "default": true
     }
   ],
-  "sidecars": [
-    {
-      "name": "slim-ner-tool",
-      "file": "slim-ner-tool.gguf",
-      "url": "https://huggingface.co/llmware/slim-ner-tool/resolve/main/slim-ner-tool.gguf",
-      "usedBy": [
-        "entities"
-      ]
-    },
+  "services": [
     {
       "name": "Qwen3.5-4B Qwen3.5-4B-Q4_K_M.gguf",
       "file": "Qwen3.5-4B-Q4_K_M.gguf",
       "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
       "checksumManifest": "liblloyal/tests/fixtures/vision-models.sha256",
       "checksumFile": "Qwen3.5-4B-Q4_K_M.gguf",
-      "usedBy": [
-        "multimodal"
-      ]
+      "service": "vision",
+      "role": "model"
     },
     {
       "name": "Qwen3.5-4B mmproj-F16.gguf",
@@ -73,9 +64,8 @@
       "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf",
       "checksumManifest": "liblloyal/tests/fixtures/vision-models.sha256",
       "checksumFile": "mmproj-F16.gguf",
-      "usedBy": [
-        "multimodal"
-      ]
+      "service": "vision",
+      "role": "projector"
     },
     {
       "name": "Qwen3-ASR Qwen3-ASR-0.6B-Q8_0.gguf",
@@ -83,9 +73,8 @@
       "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/Qwen3-ASR-0.6B-Q8_0.gguf",
       "checksumManifest": "liblloyal/tests/fixtures/asr-models.sha256",
       "checksumFile": "Qwen3-ASR-0.6B-Q8_0.gguf",
-      "usedBy": [
-        "multimodal"
-      ]
+      "service": "transcription",
+      "role": "model"
     },
     {
       "name": "Qwen3-ASR mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
@@ -93,9 +82,8 @@
       "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
       "checksumManifest": "liblloyal/tests/fixtures/asr-models.sha256",
       "checksumFile": "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
-      "usedBy": [
-        "multimodal"
-      ]
+      "service": "transcription",
+      "role": "projector"
     }
   ]
 }

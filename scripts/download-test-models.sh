@@ -106,9 +106,9 @@ else
 fi
 echo ""
 
-# Download sidecar models
-echo "Sidecar Models:"
-jq -c '.sidecars[]' "$MATRIX_FILE" | while read -r model; do
+# Download service models: a model and its projector per service, checksummed.
+echo "Service Models:"
+jq -c '.services[]' "$MATRIX_FILE" | while read -r model; do
   name=$(echo "$model" | jq -r '.name')
   file=$(echo "$model" | jq -r '.file')
   url=$(echo "$model" | jq -r '.url')

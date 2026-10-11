@@ -10,5 +10,7 @@
     "noEmitOnError": false
   },
   "include": ["test/**/*.ts"],
-  "exclude": ["node_modules", "dist", "build", "test/sdk-agents.ts", "test/sdk-primitives.ts"]
+  // audio-integration.ts is typed by the SDK that declares audio, which ships from hdk after this
+  // addon. It runs under tsx (npm run test:audio) and rejoins this gate when that SDK is a devDependency.
+  "exclude": ["node_modules", "dist", "build", "test/audio-integration.ts"]
 }

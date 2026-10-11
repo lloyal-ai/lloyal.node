@@ -225,9 +225,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/
-          # v2: + SmolVLM-256M pair (multimodal CI tier). actions/cache never
-          # re-saves on a hit — bump the key when matrix.json gains files.
-          key: test-models-v2
+          # actions/cache never re-saves on a hit, so the key follows the matrix.
+          key: test-models-v2-${{ hashFiles('test/matrix.json', 'liblloyal/tests/fixtures/*-models.sha256') }}
 
       - name: Download test models
         if: matrix.cross_compile != true
