@@ -223,6 +223,28 @@ ws ::= [ \\t\\n]*`;
     const result: string = output.join('');
     assert(/^\{\s*\}\s*$/.test(result), `Branch+grammar → "${result}"`);
 
+    // Sample first: the chain picks from the raw candidates and the grammar checks that one token, masking
+    // the whole vocabulary only when the pick is refused. Greedy after "Output: " wants prose, which this
+    // grammar refuses, so the refused-pick fallback is what produces the brace — and the output must still
+    // be exactly what the grammar admits.
+    await ctx.kvCacheClear();
+    const promptSF: number[] = await ctx.tokenize("Output: ");
+    const sampleFirst = Branch.create(ctx, 0, { temperature: 0 }, undefined, grammar);
+    (ctx as unknown as { _branchSetGrammarOrder(handle: number, sampleFirst: boolean): void })._branchSetGrammarOrder(sampleFirst.handle, true);
+    await sampleFirst.prefill(promptSF);
+    const outSF: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const p: Produced = await sampleFirst.produce();
+      if (p.isStop) break;
+      await sampleFirst.commit(p.token);
+      outSF.push(p.text);
+    }
+    const resultSF: string = outSF.join('');
+    assert(/^\{\s*\}\s*$/.test(resultSF), `Branch+grammar, sample first → "${resultSF}"`);
+    // Attaching a grammar resets the order to mask first; the setter is the only way back.
+    sampleFirst.setGrammar(grammar);
+    await sampleFirst.prune();
+
     // Grammar is cloned on fork — independent parser states
     await ctx.kvCacheClear();
     const prompt2: number[] = await ctx.tokenize("Output: ");
