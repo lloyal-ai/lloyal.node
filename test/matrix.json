@@ -9,7 +9,7 @@
       "template": "chatml",
       "default": true
     },
-{
+    {
       "name": "Llama-3.2",
       "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
       "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -48,24 +48,42 @@
       "default": true
     }
   ],
-  "sidecars": [
+  "services": [
     {
-      "name": "slim-ner-tool",
-      "file": "slim-ner-tool.gguf",
-      "url": "https://huggingface.co/llmware/slim-ner-tool/resolve/main/slim-ner-tool.gguf",
-      "usedBy": ["entities"]
+      "name": "Qwen3.5-4B Qwen3.5-4B-Q4_K_M.gguf",
+      "file": "Qwen3.5-4B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/vision-models.sha256",
+      "checksumFile": "Qwen3.5-4B-Q4_K_M.gguf",
+      "service": "vision",
+      "role": "model"
     },
     {
-      "name": "SmolVLM-256M",
-      "file": "SmolVLM-256M-Instruct-Q8_0.gguf",
-      "url": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/main/SmolVLM-256M-Instruct-Q8_0.gguf",
-      "usedBy": ["multimodal"]
+      "name": "Qwen3.5-4B mmproj-F16.gguf",
+      "file": "mmproj-Qwen3.5-4B-F16.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/vision-models.sha256",
+      "checksumFile": "mmproj-F16.gguf",
+      "service": "vision",
+      "role": "projector"
     },
     {
-      "name": "SmolVLM-256M-mmproj",
-      "file": "mmproj-SmolVLM-256M-Instruct-Q8_0.gguf",
-      "url": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf",
-      "usedBy": ["multimodal"]
+      "name": "Qwen3-ASR Qwen3-ASR-0.6B-Q8_0.gguf",
+      "file": "audio/qwen3-asr/Qwen3-ASR-0.6B-Q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/Qwen3-ASR-0.6B-Q8_0.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/asr-models.sha256",
+      "checksumFile": "Qwen3-ASR-0.6B-Q8_0.gguf",
+      "service": "transcription",
+      "role": "model"
+    },
+    {
+      "name": "Qwen3-ASR mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+      "file": "audio/qwen3-asr/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/asr-models.sha256",
+      "checksumFile": "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+      "service": "transcription",
+      "role": "projector"
     }
   ]
 }

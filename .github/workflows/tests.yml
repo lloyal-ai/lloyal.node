@@ -24,10 +24,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/
-          key: test-models-v1-${{ hashFiles('test/matrix.json') }}
+          key: test-models-v2-${{ hashFiles('test/matrix.json', 'liblloyal/tests/fixtures/*-models.sha256') }}
 
       - name: Download test models
-        run: bash scripts/download-test-models.sh
+        run: bash scripts/download-test-models.sh --services
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -96,19 +96,36 @@ jobs:
         run: |
           node -e "const fs = require('fs'); const files = fs.readdirSync('build/Release'); console.log('Build outputs:', files); if (!files.some(f => f.endsWith('.node'))) throw new Error('No .node file built!');"
 
+      - name: Add native DLL directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"${{ github.workspace }}\build\Release" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+
       - name: Run integration tests (Windows)
         if: runner.os == 'Windows'
         run: |
           $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
-          npm run test:integration
+          npm run test:integration -- --suite=text
         timeout-minutes: 10
         env:
           LLOYAL_LOCAL: '1'
 
       - name: Run integration tests (Unix)
         if: runner.os != 'Windows'
-        run: npm run test:integration
+        run: npm run test:integration -- --suite=text
         timeout-minutes: 10
+        env:
+          LLOYAL_LOCAL: '1'
+
+      - name: Audio addon integration (Qwen3-ASR)
+        run: npm run test:audio
+        timeout-minutes: 10
+        env:
+          LLOYAL_LOCAL: '1'
+
+      - name: Image addon integration (Qwen3.5-4B)
+        run: npm run test:images
+        timeout-minutes: 45
         env:
           LLOYAL_LOCAL: '1'
 

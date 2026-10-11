@@ -20,6 +20,9 @@ import * as fs from 'node:fs';
 import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
+const SUITE = process.argv.find(arg => arg.startsWith('--suite='))?.split('=')[1] ?? 'all';
+if (!['all', 'text', 'image'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
+
 const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
   ? path.resolve(process.env.LLAMA_TEST_MODEL)
   : path.join(__dirname, '../models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
@@ -34,14 +37,15 @@ const RERANK_MODEL_PATH: string | null = process.env.LLAMA_RERANK_MODEL ||
 
 const CTX_SIZE: number = parseInt(process.env.LLAMA_CTX_SIZE || '2048', 10);
 
-if (!fs.existsSync(MODEL_PATH)) {
+if (SUITE !== 'image' && !fs.existsSync(MODEL_PATH)) {
   console.error('Test model not found:', MODEL_PATH);
   process.exit(1);
 }
 
 console.log('=== lloyal.node Integration Tests ===\n');
-console.log(`Model: ${path.basename(MODEL_PATH)}`);
-console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(1)} MB\n`);
+console.log(`Suite: ${SUITE}`);
+if (SUITE !== 'image') console.log(`Model: ${path.basename(MODEL_PATH)}`);
+if (SUITE !== 'image') console.log(`Size: ${(fs.statSync(MODEL_PATH).size / 1024 / 1024).toFixed(1)} MB\n`);
 
 let addon: NativeBinding;
 try {
@@ -2273,40 +2277,15 @@ async function testRerankConcurrent(): Promise<void> {
 // MULTIMODAL (mtmd) TESTS — the embedding rail
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Gated on a VL model + mmproj pair being present. Tier selection:
-//   env LLAMA_VL_MODEL + LLAMA_VL_MMPROJ (explicit), else
-//   Qwen3.5-4B + its mmproj (local dev — M-RoPE, content assertions), else
-//   SmolVLM-256M + its mmproj (CI tier — plain positions, mechanics only).
-
-const VL_PAIRS: Array<{ model: string; mmproj: string; mrope: boolean; strict: boolean }> = [
-  {
-    model: path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf'),
-    mmproj: path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'),
-    mrope: true,
-    strict: true,
-  },
-  {
-    model: path.join(__dirname, '../models/SmolVLM-256M-Instruct-Q8_0.gguf'),
-    mmproj: path.join(__dirname, '../models/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf'),
-    mrope: false,
-    strict: false,
-  },
-];
-
+// Image tests use the production Qwen model and matching projector.
 function pickVlPair(): { model: string; mmproj: string; mrope: boolean; strict: boolean } | null {
-  if (process.env.LLAMA_VL_MODEL && process.env.LLAMA_VL_MMPROJ) {
-    const model = path.resolve(process.env.LLAMA_VL_MODEL);
-    return {
-      model,
-      mmproj: path.resolve(process.env.LLAMA_VL_MMPROJ),
-      mrope: /qwen/i.test(model),
-      strict: /qwen3\.5-4b|qwen3\.8/i.test(model),
-    };
+  const model = path.resolve(process.env.LLAMA_VL_MODEL ?? path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf'));
+  const mmproj = path.resolve(process.env.LLAMA_VL_MMPROJ ?? path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'));
+  if (!fs.existsSync(model) || !fs.existsSync(mmproj)) {
+    if (SUITE === 'image') throw new Error('Image suite requires Qwen3.5-4B and its projector');
+    return null;
   }
-  for (const p of VL_PAIRS) {
-    if (fs.existsSync(p.model) && fs.existsSync(p.mmproj)) return p;
-  }
-  return null;
+  return { model, mmproj, mrope: true, strict: true };
 }
 
 const MEDIA_MARKER = '<__media__>';
@@ -2340,6 +2319,7 @@ async function testMultimodal(): Promise<void> {
       tokensDecoded: number; positionAdvance: number;
       error?: string; rc?: number; partial?: boolean;
     }>>;
+    _cellsMultimodal(sep: number[], prompt: string, bitmaps: Buffer[]): Promise<number>;
     _storePrefill(handles: number[], tokenArrays: number[][]): Promise<void>;
     _storeKvPressure(): { cellsUsed: number };
     supportsVision(): boolean;
@@ -2390,6 +2370,16 @@ async function testMultimodal(): Promise<void> {
     const cells1: number = mm._storeKvPressure().cellsUsed;
     assert(cells1 - cells0 === tokensDecoded,
       `cells grew by tokensDecoded (${cells1 - cells0} == ${tokensDecoded})`);
+    // The typed input carries the same bytes under its kind, and costs and lands exactly as the bare buffer does.
+    const typed = { kind: 'image', bytes: IMG } as unknown as Buffer;
+    const bareCells = await mm._cellsMultimodal([], userPrompt, [IMG]);
+    const typedCells = await mm._cellsMultimodal([], userPrompt, [typed]);
+    assert(typedCells === bareCells, `typed image measures as the bare buffer does (${typedCells} == ${bareCells})`);
+    const typedBranch = Branch.create(ctx, 0, { temperature: 0 });
+    const [typedRes] = await mm._storePrefillMultimodal([typedBranch.handle], [[]], [userPrompt], [[typed]]);
+    assert(typedRes.error === undefined && typedRes.tokensDecoded === tokensDecoded,
+      `typed image prefills as the bare buffer does (${typedRes.tokensDecoded} == ${tokensDecoded}${typedRes.error ? ': ' + typedRes.error : ''})`);
+    await typedBranch.prune();
     if (vl.mrope) {
       assert(positionAdvance < tokensDecoded,
         `M-RoPE decouple: positionAdvance (${positionAdvance}) < tokensDecoded (${tokensDecoded})`);
@@ -2704,11 +2694,16 @@ async function testDecodeFailure(): Promise<void> {
     }
   }
 
+}
+
+async function testImageDecodeFailure(): Promise<void> {
+  const pressure = (ctx: SessionContext) => ctx._storeKvPressure();
   // The media rail reports PER ENTRY: an image whose cells outrun the pool
   // comes back with error + rc 1 + partial:true, its siblings untouched.
   const vl = pickVlPair();
   const bigImage = path.join(__dirname, '../liblloyal/tests/fixtures/cat.jpg');
   if (!vl || !fs.existsSync(bigImage)) {
+    if (SUITE === 'image') throw new Error('Image failure suite requires model pair and cat.jpg fixture');
     console.log('  [SKIP] media: no VL pair or no large fixture');
     return;
   }
@@ -2749,49 +2744,56 @@ async function main(): Promise<void> {
   let mainCtx: SessionContext | null = null;
 
   try {
-    // Create main context for reusable tests
-    mainCtx = await addon.createContext({
-      modelPath: MODEL_PATH,
-      nCtx: CTX_SIZE,
-      nThreads: 4
-    });
-    ok(`createContext(nCtx=${CTX_SIZE}) → vocabSize=${mainCtx.vocabSize}`);
+    if (SUITE === 'image') {
+      await testMultimodal();
+      await testImageDecodeFailure();
+    } else {
+      // Create main context for reusable tests
+      mainCtx = await addon.createContext({
+        modelPath: MODEL_PATH,
+        nCtx: CTX_SIZE,
+        nThreads: 4
+      });
+      ok(`createContext(nCtx=${CTX_SIZE}) → vocabSize=${mainCtx.vocabSize}`);
 
-    // Run test suites
-    await testCoreAPI(mainCtx);
-    await testKVCache(mainCtx);
-    await testMetrics(mainCtx);
-    await testTokenizer(mainCtx);
-    await testChatInOut(mainCtx);
-    await testFormatEdgeCases(mainCtx);
+      // Run test suites
+      await testCoreAPI(mainCtx);
+      await testKVCache(mainCtx);
+      await testMetrics(mainCtx);
+      await testTokenizer(mainCtx);
+      await testChatInOut(mainCtx);
+      await testFormatEdgeCases(mainCtx);
 
-    // Tests that create their own contexts
-    await testMultiSequence();
-    await testGrammar();
-    await testBranchPrefill();
-    await testWarmMultiTurnRecall();
-    await testWarmSemanticRecall();
-    await testBranchSteer();
-    await testNBatchAblation();
-    await testDeterminism();
-    await testBranchPrefillAndLogits();
-    await testBranchStore();
-    await testPplSanity();
-    await testCommitRollback();
-    await testAsyncRejection();
-    await testEmptyInputEdgeCases();
-    await testJsonSchemaToGrammar();
-    await testDisposedDuringAsync();
-    await testAsyncIterator();
-    await testSetSamplerParams();
-    await testSetGrammar();
-    await testBranchMetrics();
-    await testMultimodal();
-    await testDecodeFailure();
-    await testRerank();
-    await testRerankLargeCorpus();
-    await testRerankConcurrent();
-    await testEmbeddings();
+      // Tests that create their own contexts
+      await testMultiSequence();
+      await testGrammar();
+      await testBranchPrefill();
+      await testWarmMultiTurnRecall();
+      await testWarmSemanticRecall();
+      await testBranchSteer();
+      await testNBatchAblation();
+      await testDeterminism();
+      await testBranchPrefillAndLogits();
+      await testBranchStore();
+      await testPplSanity();
+      await testCommitRollback();
+      await testAsyncRejection();
+      await testEmptyInputEdgeCases();
+      await testJsonSchemaToGrammar();
+      await testDisposedDuringAsync();
+      await testAsyncIterator();
+      await testSetSamplerParams();
+      await testSetGrammar();
+      await testBranchMetrics();
+      if (SUITE === 'all') await testMultimodal();
+      await testDecodeFailure();
+      if (SUITE === 'all') await testImageDecodeFailure();
+      await testRerank();
+      await testRerankLargeCorpus();
+      await testRerankConcurrent();
+      await testEmbeddings();
+
+    }
 
     // Summary
     console.log('\n═══════════════════════════════════════');

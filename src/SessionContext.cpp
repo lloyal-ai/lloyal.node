@@ -14,6 +14,8 @@
 #include <lloyal/metrics.hpp>
 #include <mtmd.h>
 #include <lloyal/mtmd.hpp>
+#include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -703,10 +705,110 @@ private:
   std::vector<std::vector<llama_token>> _tokenStorage;
 };
 
+struct OwnedMedia {
+  struct Input {
+    lloyal::MediaInput::Kind kind;
+    std::vector<uint8_t> bytes;
+  };
+  std::vector<Input> inputs;
+  lloyal::AudioLimits limits;
+  std::string error;
+
+  std::vector<lloyal::MediaInput> views() const {
+    std::vector<lloyal::MediaInput> result;
+    result.reserve(inputs.size());
+    for (const auto& input : inputs) result.push_back({input.kind, input.bytes});
+    return result;
+  }
+};
+
+static size_t audioLimit(Napi::Object limits, const char* name) {
+  const auto value = limits.Get(name);
+  const double maximum = std::min(9007199254740991.0,
+      static_cast<double>(std::numeric_limits<size_t>::max()));
+  const double number = value.IsNumber() ? value.As<Napi::Number>().DoubleValue() : 0;
+  if (!std::isfinite(number) || number <= 0 || std::floor(number) != number || number > maximum) {
+    throw Napi::TypeError::New(limits.Env(),
+        std::string("audio limit ") + name + " must be a positive safe integer");
+  }
+  return static_cast<size_t>(number);
+}
+
+static std::span<const uint8_t> mediaBytes(Napi::Value value) {
+  const bool isU8 = value.IsTypedArray() &&
+      value.As<Napi::TypedArray>().TypedArrayType() == napi_uint8_array;
+  if (!isU8) {
+    throw Napi::TypeError::New(value.Env(), "media bytes must be Buffer/Uint8Array");
+  }
+  auto bytes = value.As<Napi::Uint8Array>();
+  return {bytes.Data(), bytes.ElementLength()};
+}
+
+// Borrow JS views only during marshalling. Check the aggregate byte budget
+// before allocating worker copies; native admission still validates the WAV
+// and decoded sample budget before the audio decoder can allocate samples.
+static OwnedMedia copyMedia(Napi::Array values, Napi::Value budget) {
+  OwnedMedia result;
+  if (!budget.IsUndefined()) {
+    if (!budget.IsObject() || budget.IsNull()) {
+      throw Napi::TypeError::New(values.Env(), "audio limits must be an object");
+    }
+    auto object = budget.As<Napi::Object>();
+    result.limits = {audioLimit(object, "maxBytes"), audioLimit(object, "maxSamples")};
+  }
+  struct BorrowedInput {
+    lloyal::MediaInput::Kind kind;
+    Napi::Value bytes;
+  };
+  std::vector<BorrowedInput> borrowed;
+  borrowed.reserve(values.Length());
+  for (uint32_t i = 0; i < values.Length(); ++i) {
+    auto value = values.Get(i);
+    auto kind = lloyal::MediaInput::Kind::Image;
+    if (value.IsObject() && !value.IsBuffer() && !value.IsTypedArray()) {
+      auto input = value.As<Napi::Object>();
+      const auto tag = input.Get("kind");
+      if (!tag.IsString()) throw Napi::TypeError::New(values.Env(), "media kind must be image or audio");
+      const auto name = tag.As<Napi::String>().Utf8Value();
+      if (name != "image" && name != "audio") {
+        throw Napi::TypeError::New(values.Env(), "media kind must be image or audio");
+      }
+      kind = name == "audio" ? lloyal::MediaInput::Kind::Audio : lloyal::MediaInput::Kind::Image;
+      value = input.Get("bytes");
+    }
+    borrowed.push_back({kind, value});
+  }
+  // Resolve object getters before borrowing byte pointers: a getter can detach
+  // another input's ArrayBuffer. No JS runs while these views are copied.
+  std::vector<lloyal::MediaInput> views;
+  views.reserve(borrowed.size());
+  size_t bytesLeft = result.limits.max_bytes;
+  for (const auto& input : borrowed) {
+    const auto bytes = mediaBytes(input.bytes);
+    if (input.kind == lloyal::MediaInput::Kind::Audio) {
+      if (!result.limits.max_bytes || !result.limits.max_samples) {
+        result.error = "audio limits must be positive";
+        return result;
+      }
+      if (bytes.size() > bytesLeft) {
+        result.error = "audio byte limit exceeded";
+        return result;
+      }
+      bytesLeft -= bytes.size();
+    }
+    views.push_back({input.kind, bytes});
+  }
+  result.inputs.reserve(views.size());
+  for (const auto& input : views) {
+    result.inputs.push_back({input.kind, {input.bytes.begin(), input.bytes.end()}});
+  }
+  return result;
+}
+
 /**
  * AsyncWorker for multimodal prefill — a marshaller, like its siblings.
  *
- * Owns everything it touches off-thread (prompt strings, copied image bytes,
+ * Owns everything it touches off-thread (prompt strings, copied media bytes,
  * sep tokens) and hands each branch to the kernel as one call. The pipeline
  * itself lives where it belongs: `lloyal::MtmdSource` (mtmd.hpp) produces the
  * segment stream, `BranchStore::decode_segments` places it — rails, positions,
@@ -717,6 +819,7 @@ private:
  * multimodal token counts (mtmd owns tokenization) and the trace + pressure
  * layers need them.
  */
+
 class StorePrefillMultimodalWorker : public Napi::AsyncWorker {
 public:
   struct BranchResult {
@@ -745,11 +848,11 @@ public:
                                std::vector<lloyal::branch::BranchHandle> handles,
                                std::vector<std::vector<llama_token>> sepStorage,
                                std::vector<std::string> prompts,
-                               std::vector<std::vector<std::vector<uint8_t>>> bitmapBytes)
+                               std::vector<OwnedMedia> media)
     : AsyncWorker(env), _deferred(env), _store(store), _mtmd(mtmd),
       _nEmbdInp(nEmbdInp), _handles(std::move(handles)),
       _sepStorage(std::move(sepStorage)), _prompts(std::move(prompts)),
-      _bitmapBytes(std::move(bitmapBytes)) {}
+      _media(std::move(media)) {}
 
   // Per-entry isolation, deliberately: a corrupt image in one agent's tool
   // result must not cost its siblings their prefills. Failing the whole call
@@ -764,9 +867,11 @@ public:
 
     for (size_t i = 0; i < _handles.size(); ++i) {
       try {
+        if (!_media[i].error.empty()) throw std::runtime_error(_media[i].error);
+        const auto inputs = _media[i].views();
         lloyal::MtmdSource source(
-            _mtmd, _prompts[i], _bitmapBytes[i],
-            std::span<const llama_token>(_sepStorage[i]), _nEmbdInp);
+            _mtmd, _prompts[i], inputs,
+            std::span<const llama_token>(_sepStorage[i]), _nEmbdInp, _media[i].limits);
         const auto r = _store.decode_segments(_handles[i], source);
         _results[i] = { r.cells, static_cast<int64_t>(r.advance), "" };
       } catch (const std::exception& e) {
@@ -805,7 +910,7 @@ private:
   std::vector<lloyal::branch::BranchHandle> _handles;
   std::vector<std::vector<llama_token>> _sepStorage;
   std::vector<std::string> _prompts;
-  std::vector<std::vector<std::vector<uint8_t>>> _bitmapBytes;
+  std::vector<OwnedMedia> _media;
   std::vector<BranchResult> _results;
 };
 
@@ -981,6 +1086,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_cellsMultimodal", &SessionContext::_cellsMultimodal),
     InstanceMethod("supportsVision", &SessionContext::supportsVision),
     InstanceMethod("supportsAudio", &SessionContext::supportsAudio),
+    InstanceMethod("audioSampleRate", &SessionContext::audioSampleRate),
     InstanceMethod("_storeMergeLogits", &SessionContext::_storeMergeLogits),
     InstanceMethod("_storeRetainOnly", &SessionContext::_storeRetainOnly),
     InstanceMethod("_storeAvailable", &SessionContext::_storeAvailable),
@@ -2704,12 +2810,12 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
  * Admission needs a number before the branch is touched: `decode_segments` is
  * not atomic, so a caller that discovers the overflow midway has poisoned the
  * branch, while one that refuses up front has spent nothing. Text can be
- * measured by tokenizing it; an image cannot, because the caller holds bytes
- * and the row count depends on the projector's geometry.
+ * measured by tokenizing it; media requires the projector's tokenization to
+ * determine its row count.
  *
  * Constructing the source is the measurement: `MtmdSource` counts cells after
- * `mtmd_tokenize` and BEFORE any clip encode, so this pays bitmap decode plus
- * tokenization — not the vision-tower pass, which stays in the prefill.
+ * `mtmd_tokenize` and before encoder inference, so this pays media decode and
+ * preprocessing. The encoder pass stays in the prefill.
  */
 class CellsMultimodalWorker : public Napi::AsyncWorker {
 public:
@@ -2718,16 +2824,18 @@ public:
                         int32_t nEmbdInp,
                         std::vector<llama_token> sep,
                         std::string prompt,
-                        std::vector<std::vector<uint8_t>> bitmapBytes)
+                        OwnedMedia media)
     : AsyncWorker(env), _deferred(env), _mtmd(mtmd), _nEmbdInp(nEmbdInp),
       _sep(std::move(sep)), _prompt(std::move(prompt)),
-      _bitmapBytes(std::move(bitmapBytes)) {}
+      _media(std::move(media)) {}
 
   void Execute() override {
     try {
+      if (!_media.error.empty()) throw std::runtime_error(_media.error);
+      const auto inputs = _media.views();
       lloyal::MtmdSource source(
-          _mtmd, _prompt, _bitmapBytes,
-          std::span<const llama_token>(_sep), _nEmbdInp);
+          _mtmd, _prompt, inputs,
+          std::span<const llama_token>(_sep), _nEmbdInp, _media.limits);
       _cells = static_cast<int64_t>(source.cells());
     } catch (const std::exception& e) { SetError(e.what()); }
   }
@@ -2744,7 +2852,7 @@ private:
   int32_t _nEmbdInp;
   std::vector<llama_token> _sep;
   std::string _prompt;
-  std::vector<std::vector<uint8_t>> _bitmapBytes;
+  OwnedMedia _media;
   int64_t _cells = 0;
 };
 
@@ -2759,18 +2867,22 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
   if (info.Length() < 4 || !info[0].IsArray() || !info[1].IsArray() ||
       !info[2].IsArray() || !info[3].IsArray()) {
     throw Napi::Error::New(env,
-      "_storePrefillMultimodal requires (handles[], sepTokens[][], prompts[], bitmaps[][])");
+      "_storePrefillMultimodal requires (handles[], sepTokens[][], prompts[], inputs[][], audioLimits?[])");
   }
 
   Napi::Array jsHandles = info[0].As<Napi::Array>();
   Napi::Array jsSeps = info[1].As<Napi::Array>();
   Napi::Array jsPrompts = info[2].As<Napi::Array>();
-  Napi::Array jsBitmaps = info[3].As<Napi::Array>();
+  Napi::Array jsInputs = info[3].As<Napi::Array>();
   const uint32_t n = jsHandles.Length();
 
-  if (jsSeps.Length() != n || jsPrompts.Length() != n || jsBitmaps.Length() != n) {
+  if (jsSeps.Length() != n || jsPrompts.Length() != n || jsInputs.Length() != n) {
     throw Napi::Error::New(env,
       "_storePrefillMultimodal: all argument arrays must have the same length");
+  }
+  if (info.Length() > 4 && !info[4].IsUndefined() &&
+      (!info[4].IsArray() || info[4].As<Napi::Array>().Length() != n)) {
+    throw Napi::TypeError::New(env, "audio limits must have one entry per branch");
   }
   if (n == 0) {
     auto deferred = Napi::Promise::Deferred::New(env);
@@ -2783,7 +2895,7 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
   std::vector<lloyal::branch::BranchHandle> handles(n);
   std::vector<std::vector<llama_token>> sepStorage(n);
   std::vector<std::string> prompts(n);
-  std::vector<std::vector<std::vector<uint8_t>>> bitmapBytes(n);
+  std::vector<OwnedMedia> media(n);
 
   for (uint32_t i = 0; i < n; i++) {
     handles[i] = static_cast<lloyal::branch::BranchHandle>(
@@ -2798,28 +2910,9 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
 
     prompts[i] = jsPrompts.Get(i).As<Napi::String>().Utf8Value();
 
-    Napi::Array jsImgs = jsBitmaps.Get(i).As<Napi::Array>();
-    bitmapBytes[i].resize(jsImgs.Length());
-    for (uint32_t j = 0; j < jsImgs.Length(); j++) {
-      Napi::Value v = jsImgs.Get(j);
-      // Uint8Array specifically, not any TypedArray: an Int32Array would
-      // pass a bare IsTypedArray() check and then be reinterpreted as raw
-      // bytes, silently feeding the decoder the wrong buffer.
-      const bool isU8 = v.IsTypedArray() &&
-          v.As<Napi::TypedArray>().TypedArrayType() == napi_uint8_array;
-      if (!v.IsBuffer() && !isU8) {
-        throw Napi::Error::New(env,
-          "_storePrefillMultimodal: bitmaps must be Buffer/Uint8Array");
-      }
-      if (v.IsBuffer()) {
-        auto buf = v.As<Napi::Buffer<uint8_t>>();
-        bitmapBytes[i][j].assign(buf.Data(), buf.Data() + buf.Length());
-      } else {
-        auto ta = v.As<Napi::TypedArray>();
-        auto* base = static_cast<uint8_t*>(ta.ArrayBuffer().Data()) + ta.ByteOffset();
-        bitmapBytes[i][j].assign(base, base + ta.ByteLength());
-      }
-    }
+    const auto budget = info.Length() > 4 && info[4].IsArray()
+        ? info[4].As<Napi::Array>().Get(i) : env.Undefined();
+    media[i] = copyMedia(jsInputs.Get(i).As<Napi::Array>(), budget);
   }
 
   // A handle may appear at most once per call — the kernel's rule, applied
@@ -2837,7 +2930,7 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
   auto* worker = new StorePrefillMultimodalWorker(
       env, _branchStore, _mtmdContext, nEmbdInp,
       std::move(handles), std::move(sepStorage), std::move(prompts),
-      std::move(bitmapBytes));
+      std::move(media));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2852,7 +2945,7 @@ Napi::Value SessionContext::_cellsMultimodal(const Napi::CallbackInfo& info) {
   }
   if (info.Length() < 3 || !info[0].IsArray() || !info[1].IsString() || !info[2].IsArray()) {
     throw Napi::Error::New(env,
-      "_cellsMultimodal requires (sepTokens[], prompt, bitmaps[])");
+      "_cellsMultimodal requires (sepTokens[], prompt, inputs[], audioLimits?)");
   }
 
   // One delta at a time: admission is a per-delta question, and SETTLE already
@@ -2865,34 +2958,14 @@ Napi::Value SessionContext::_cellsMultimodal(const Napi::CallbackInfo& info) {
 
   std::string prompt = info[1].As<Napi::String>().Utf8Value();
 
-  // Marshal on the JS thread — the worker owns copies (Buffers must never be
-  // touched off-thread).
-  Napi::Array jsImgs = info[2].As<Napi::Array>();
-  std::vector<std::vector<uint8_t>> bitmapBytes(jsImgs.Length());
-  for (uint32_t j = 0; j < jsImgs.Length(); j++) {
-    Napi::Value v = jsImgs.Get(j);
-    // Uint8Array specifically, not any TypedArray: an Int32Array would pass a
-    // bare IsTypedArray() check and then be reinterpreted as raw bytes.
-    const bool isU8 = v.IsTypedArray() &&
-        v.As<Napi::TypedArray>().TypedArrayType() == napi_uint8_array;
-    if (!v.IsBuffer() && !isU8) {
-      throw Napi::Error::New(env, "_cellsMultimodal: bitmaps must be Buffer/Uint8Array");
-    }
-    if (v.IsBuffer()) {
-      auto buf = v.As<Napi::Buffer<uint8_t>>();
-      bitmapBytes[j].assign(buf.Data(), buf.Data() + buf.Length());
-    } else {
-      auto ta = v.As<Napi::TypedArray>();
-      auto* base = static_cast<uint8_t*>(ta.ArrayBuffer().Data()) + ta.ByteOffset();
-      bitmapBytes[j].assign(base, base + ta.ByteLength());
-    }
-  }
+  auto media = copyMedia(info[2].As<Napi::Array>(),
+      info.Length() > 3 ? info[3] : env.Undefined());
 
   const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
 
   auto* worker = new CellsMultimodalWorker(
       env, _mtmdContext, nEmbdInp,
-      std::move(sep), std::move(prompt), std::move(bitmapBytes));
+      std::move(sep), std::move(prompt), std::move(media));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2909,6 +2982,13 @@ Napi::Value SessionContext::supportsAudio(const Napi::CallbackInfo& info) {
   ensureNotDisposed();
   return Napi::Boolean::New(env,
     _mtmdContext != nullptr && mtmd_support_audio(_mtmdContext));
+}
+
+Napi::Value SessionContext::audioSampleRate(const Napi::CallbackInfo& info) {
+  ensureNotDisposed();
+  return Napi::Number::New(info.Env(),
+      _mtmdContext && mtmd_support_audio(_mtmdContext)
+          ? mtmd_get_audio_sample_rate(_mtmdContext) : 0);
 }
 
 Napi::Value SessionContext::_storeMergeLogits(const Napi::CallbackInfo& info) {

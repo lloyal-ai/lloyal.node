@@ -458,42 +458,6 @@ export type {
   KvCacheType,
 } from "@lloyal-labs/sdk";
 
-// ── Re-export from @lloyal-labs/lloyal-agents ────────────────────
-export {
-  Ctx,
-  Store,
-  Events,
-  Tool,
-  Agent,
-  agent,
-  agentPool,
-  useAgent,
-  useAgentPool,
-  reduce,
-  createToolkit,
-  initAgents,
-  withSpine,
-  DefaultAgentPolicy,
-  renderTemplate,
-} from "@lloyal-labs/lloyal-agents";
-
-export type {
-  Toolkit,
-  AgentHandle,
-  SpineOptions,
-  JsonSchema,
-  ToolSchema,
-  ToolContext,
-  AgentTaskSpec,
-  AgentPoolOptions,
-  AgentResult,
-  AgentPoolResult,
-  AgentEvent,
-  UseAgentOpts,
-  CreateAgentPoolOpts,
-  SpawnSpec,
-} from "@lloyal-labs/lloyal-agents";
-
 // ── Backend pack (BACKEND_DL flavor acquisition) ─────────────────
 export {
   ensureBackendPack,

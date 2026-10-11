@@ -85,8 +85,11 @@ jobs:
       id-token: write
 
     steps:
+      # The GPU image carries liblloyal's checksum manifests and fixtures, so the submodule must be here.
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Checkout infrastructure scripts
         uses: actions/checkout@v4
