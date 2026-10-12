@@ -481,7 +481,7 @@ private:
 // Forward declarations — defined after parseFormatChatArgs
 static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::FormatResult& r,
                                         const std::string& parserKey);
-static std::string parserKeyFor(const lloyal::chat_in::FormatInputs& inputs);
+static std::string parserCanonicalFor(const lloyal::chat_in::FormatInputs& inputs);
 
 /**
  * AsyncWorker for formatChat operation
@@ -491,7 +491,7 @@ public:
   FormatChatWorker(Napi::Env env, SessionContext& owner, std::shared_ptr<llama_model> model,
                    const lloyal::chat_in::FormatInputs& inputs)
     : AsyncWorker(env), _deferred(env), _owner(owner), _model(model), _inputs(inputs),
-      _parserKey(parserKeyFor(inputs)) {}
+      _canonical(parserCanonicalFor(inputs)), _ownerRef(Napi::Persistent(owner.Value())) {}
 
   void Execute() override {
     try {
@@ -511,13 +511,21 @@ public:
   }
 
   // The parser is registered here, on the main thread, where the context's
-  // registry lives; Execute() only formatted.
+  // registry lives; Execute() only formatted. A context disposed while the
+  // format ran has no registry to take it: the promise rejects rather than
+  // handing back a key nothing can resolve.
   void OnOK() override {
-    _owner.rememberParser(_parserKey, _result.parser);
-    _deferred.Resolve(marshalFormatResult(Env(), _result, _parserKey));
+    _ownerRef.Reset();
+    if (_owner.disposed()) {
+      _deferred.Reject(Napi::Error::New(Env(), "formatChat: context disposed before the format completed").Value());
+      return;
+    }
+    const std::string key = _owner.rememberParser(_canonical, _result.parser);
+    _deferred.Resolve(marshalFormatResult(Env(), _result, key));
   }
 
   void OnError(const Napi::Error& err) override {
+    _ownerRef.Reset();
     _deferred.Reject(err.Value());
   }
 
@@ -529,7 +537,9 @@ private:
   std::shared_ptr<llama_model> _model;
   lloyal::chat_in::FormatInputs _inputs;
   lloyal::chat_in::FormatResult _result;
-  std::string _parserKey;
+  std::string _canonical;
+  /** Keeps the JS context alive until the promise settles; the registry is its. */
+  Napi::ObjectReference _ownerRef;
 };
 
 // ===== BRANCH / STORE / DECODE ASYNC WORKERS =====
@@ -1107,7 +1117,9 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
 
     // ===== PROPERTIES =====
     InstanceAccessor("vocabSize", &SessionContext::getVocabSize, nullptr),
-    InstanceAccessor("memorySize", &SessionContext::getMemorySize, nullptr)
+    InstanceAccessor("memorySize", &SessionContext::getMemorySize, nullptr),
+    // The decode workspace the next batch needs: a scheduler's floor for the cache.
+    InstanceAccessor("nBatch", &SessionContext::getNBatch, nullptr)
   });
 
   exports.Set("SessionContext", func);
@@ -1464,7 +1476,7 @@ static lloyal::chat_in::FormatInputs parseFormatChatArgs(const Napi::CallbackInf
 // terminal grammar, each spawn) resolve to one cached parser. The hash only
 // has to be stable within this process: the key is valid on the context that
 // produced it, nowhere else.
-static std::string parserKeyFor(const lloyal::chat_in::FormatInputs& inputs) {
+static std::string parserCanonicalFor(const lloyal::chat_in::FormatInputs& inputs) {
   std::string canonical;
   const auto field = [&canonical](const std::string& value) {
     canonical += std::to_string(value.size());
@@ -1481,6 +1493,10 @@ static std::string parserKeyFor(const lloyal::chat_in::FormatInputs& inputs) {
   field(inputs.json_schema);
   field(inputs.grammar);
   field(inputs.add_generation_prompt ? "1" : "0");
+  return canonical;
+}
+
+std::string SessionContext::parserKeyOf(const std::string& canonical) {
   char hex[2 * sizeof(size_t) + 1];
   std::snprintf(hex, sizeof(hex), "%0*zx", static_cast<int>(2 * sizeof(size_t)),
                 std::hash<std::string>{}(canonical));
@@ -1563,8 +1579,7 @@ Napi::Value SessionContext::formatChatSync(const Napi::CallbackInfo& info) {
   if (result.prompt.empty()) {
     throw Napi::Error::New(env, "Chat template formatting failed");
   }
-  const std::string key = parserKeyFor(inputs);
-  rememberParser(key, result.parser);
+  const std::string key = rememberParser(parserCanonicalFor(inputs), result.parser);
   return marshalFormatResult(env, result, key);
 }
 
@@ -1617,6 +1632,12 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
+}
+
+Napi::Value SessionContext::getNBatch(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+  return Napi::Number::New(env, static_cast<double>(_nBatch));
 }
 
 Napi::Value SessionContext::getVocabSize(const Napi::CallbackInfo& info) {
@@ -1810,7 +1831,7 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
       throw Napi::Error::New(env,
         "parseChatOutput: unknown parser key; pass the parser from formatChat on this context");
     }
-    parser = &it->second;
+    parser = &it->second.parser;
   }
 
   // Synchronous — parsing is fast, no I/O

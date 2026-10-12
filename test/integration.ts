@@ -1048,7 +1048,33 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
     unknownKeyThrew = true;
   }
   assert(unknownKeyThrew, 'a parser key this context never produced is refused');
-  ok('parser key: stable per inputs, resolved natively, unknown refused');
+  // The key resolves the parser formatChat built for THIS tool set: a get_weather call in the template's own
+  // envelope parses to the call through it, and parses to no call through the key of a format without tools.
+  const call = { name: 'get_weather', arguments: { location: 'Paris' } };
+  const envelopes = [
+    `<tool_call>\n${JSON.stringify(call)}\n</tool_call>`,
+    JSON.stringify(call),
+    JSON.stringify({ name: 'get_weather', parameters: { location: 'Paris' } }),
+    '<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>',
+    '<tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>',
+  ];
+  const through = (parser: string) => envelopes.map((e) =>
+    ctx.parseChatOutput(e, toolResult.format, { parser, isPartial: false, generationPrompt: toolResult.generationPrompt }));
+  // A template that renders the tools changes the prompt; one that ignores them (SmolLM2) has no tool grammar to tell apart.
+  const toolAware = toolResult.prompt !== result.prompt;
+  if (toolAware) {
+    const withTools = through(toolResult.parser);
+    const named = withTools.filter((r) => r.toolCalls.length === 1 && r.toolCalls[0].name === 'get_weather');
+    assert(named.length > 0, 'an envelope parses to the get_weather call through the tool set\'s key');
+    const without = through(result.parser);
+    assert(without.every((r) => r.toolCalls.length === 0), 'the same envelopes parse to no call through the no-tools key');
+    ok('parser key: stable per inputs, resolved natively, unknown refused, the right grammar behind it');
+  } else {
+    // This model's template renders no tool syntax, so there is no tool grammar to tell apart; the key's
+    // identity is covered above and the grammar check runs on a tool-aware template (Qwen3.5, Llama 3.x).
+    ok('parser key: stable per inputs, resolved natively, unknown refused (this template renders no tools; grammar check skipped)');
+  }
+  assert(Number.isInteger(ctx.nBatch) && ctx.nBatch > 0, 'the context reports its batch size');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
