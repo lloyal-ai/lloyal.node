@@ -2846,17 +2846,19 @@ async function main(): Promise<void> {
     console.log(`PASSED: ${passed}`);
     console.log(`FAILED: ${failed}`);
 
+    // The exit code is set, never forced: process.exit() would skip the dispose
+    // below, and Metal refuses to tear down with a live context.
     if (failed === 0) {
       console.log('\nAll tests passed!');
-      process.exit(0);
+      process.exitCode = 0;
     } else {
       console.log(`\n${failed} test(s) failed`);
-      process.exit(1);
+      process.exitCode = 1;
     }
   } catch (err) {
     console.error('\nFatal error:', (err as Error).message);
     console.error((err as Error).stack);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     if (mainCtx) mainCtx.dispose();
   }
