@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Forward declaration at GLOBAL scope — mtmd_context is llama.cpp/tools/mtmd's
@@ -341,6 +342,21 @@ private:
   // ===== TURN SEPARATOR CACHE =====
   std::vector<llama_token> _turnSeparatorCache;
   bool _turnSeparatorCached = false;
+
+  // ===== CHAT PARSERS =====
+  // The PEG parser a format produced, by the key of the inputs that shape it
+  // (everything but the messages). The arena has no string form, so it never
+  // crosses into JS: formatChat hands back the key, parseChatOutput resolves
+  // it here. One entry per distinct tool set and option set, cleared with the
+  // context.
+  std::unordered_map<std::string, common_peg_arena> _parsers;
+
+public:
+  void rememberParser(const std::string& key, const common_peg_arena& parser) {
+    _parsers.insert_or_assign(key, parser);
+  }
+
+private:
 
   // ===== INLINE HELPERS =====
   // Pattern matches HybridSessionContext.hpp:170-176

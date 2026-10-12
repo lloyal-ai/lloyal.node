@@ -430,7 +430,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
 
     // Turn 1 (COLD): introduce name
     const msgs1: Array<{ role: string; content: string }> = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
-    const { prompt, format, reasoningFormat } = await ctx.formatChat(JSON.stringify(msgs1), {});
+    const { prompt, format, parser } = await ctx.formatChat(JSON.stringify(msgs1), {});
     const promptToks: number[] = await ctx.tokenize(prompt);
     const branch = Branch.create(ctx, 0, { temperature: 0 });
     await branch.prefill(promptToks);
@@ -438,7 +438,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
     // Helper: parse output and check content (not reasoning) for a term
     function checkRecall(rawText: string, term: string): boolean {
       const { content } = ctx.parseChatOutput(rawText, format, {
-        reasoningFormat,
+        parser,
         isPartial: false,
         generationPrompt: ''
       });
@@ -981,11 +981,11 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
   // Thinking as the TEMPLATE declares it, so a caller reading a raw stream never guesses one model's tags.
   // Structurally typed until the installed SDK carries these fields — the same idiom `tokenToBytes` uses above.
-  const thinking = result as unknown as { supportsThinking: boolean; thinkingStartTag: string; thinkingEndTag: string };
+  const thinking = result as unknown as { supportsThinking: boolean; thinkingStartTag: string; thinkingEndTags: string[] };
   assert(typeof thinking.supportsThinking === 'boolean', 'formatChat returns supportsThinking');
   assert(typeof thinking.thinkingStartTag === 'string', 'formatChat returns thinkingStartTag');
-  assert(typeof thinking.thinkingEndTag === 'string', 'formatChat returns thinkingEndTag');
-  assert(thinking.supportsThinking === (thinking.thinkingEndTag.length > 0),
+  assert(Array.isArray(thinking.thinkingEndTags), 'formatChat returns thinkingEndTags');
+  assert(thinking.supportsThinking === (thinking.thinkingEndTags.length > 0),
     'a template that supports thinking names its tags, and one that does not leaves them empty');
   if (thinking.supportsThinking) {
     // The pairing chat_out needs: reasoning is parsed as reasoning by default, never left inline in content.
@@ -1023,14 +1023,32 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(Array.isArray(parsed.toolCalls), 'parseChatOutput returns toolCalls array');
   ok('parseChatOutput basic');
 
-  // parseChatOutput with options
+  // parseChatOutput with the parser formatChat built for this tool set
   const parsedWithOpts = ctx.parseChatOutput('Some output', toolResult.format, {
-    reasoningFormat: toolResult.reasoningFormat,
+    parser: toolResult.parser,
     isPartial: false,
     generationPrompt: ''
   });
   assert(typeof parsedWithOpts.content === 'string', 'parseChatOutput with options');
   ok('parseChatOutput with options');
+
+  // The parser never leaves the native side: formatChat hands back a key, and
+  // the key is a function of the inputs that shape the parser, not the messages.
+  assert(typeof toolResult.parser === 'string' && toolResult.parser.length > 0, 'formatChat returns a parser key');
+  const otherMessages = [{ role: 'user', content: 'Something else entirely' }];
+  const sameTools = ctx.formatChatSync(JSON.stringify(otherMessages), { tools: JSON.stringify(tools), toolChoice: 'auto' });
+  assert(sameTools.parser === toolResult.parser, 'the same tools and options yield the same parser key for any messages');
+  assert(result.parser !== toolResult.parser, 'a format without tools yields a different parser key');
+  const partial = ctx.parseChatOutput('Hel', toolResult.format, { parser: toolResult.parser, isPartial: true });
+  assert(typeof partial.content === 'string', 'a partial parse through the key returns content');
+  let unknownKeyThrew = false;
+  try {
+    ctx.parseChatOutput('Hello', toolResult.format, { parser: 'parser:deadbeef' });
+  } catch {
+    unknownKeyThrew = true;
+  }
+  assert(unknownKeyThrew, 'a parser key this context never produced is refused');
+  ok('parser key: stable per inputs, resolved natively, unknown refused');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2071,8 +2089,10 @@ async function testRerank(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 8,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
@@ -2158,8 +2178,10 @@ async function testRerankLargeCorpus(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 8,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
@@ -2243,8 +2265,10 @@ async function testRerankConcurrent(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 4,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 4, nCtx: 4096 });
 
