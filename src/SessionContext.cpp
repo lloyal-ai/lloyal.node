@@ -1,4 +1,6 @@
 #include "SessionContext.hpp"
+#include "Addon.hpp"
+#include "ChatParser.hpp"
 #include "BackendManager.hpp"
 #include "FileSystem.h"
 #include <lloyal/sampler.hpp>
@@ -478,20 +480,17 @@ private:
   std::string _result;
 };
 
-// Forward declarations — defined after parseFormatChatArgs
-static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::FormatResult& r,
-                                        const std::string& parserKey);
-static std::string parserCanonicalFor(const lloyal::chat_in::FormatInputs& inputs);
+// Forward declaration — defined after parseFormatChatArgs
+static Napi::Object marshalFormatResult(Napi::Env env, lloyal::chat_in::FormatResult&& r);
 
 /**
  * AsyncWorker for formatChat operation
  */
 class FormatChatWorker : public Napi::AsyncWorker {
 public:
-  FormatChatWorker(Napi::Env env, SessionContext& owner, std::shared_ptr<llama_model> model,
+  FormatChatWorker(Napi::Env env, std::shared_ptr<llama_model> model,
                    const lloyal::chat_in::FormatInputs& inputs)
-    : AsyncWorker(env), _deferred(env), _owner(owner), _model(model), _inputs(inputs),
-      _canonical(parserCanonicalFor(inputs)), _ownerRef(Napi::Persistent(owner.Value())) {}
+    : AsyncWorker(env), _deferred(env), _model(model), _inputs(inputs) {}
 
   void Execute() override {
     try {
@@ -510,22 +509,12 @@ public:
     }
   }
 
-  // The parser is registered here, on the main thread, where the context's
-  // registry lives; Execute() only formatted. A context disposed while the
-  // format ran has no registry to take it: the promise rejects rather than
-  // handing back a key nothing can resolve.
+  // The result is marshalled on the main thread, where its parser handle is made.
   void OnOK() override {
-    _ownerRef.Reset();
-    if (_owner.disposed()) {
-      _deferred.Reject(Napi::Error::New(Env(), "formatChat: context disposed before the format completed").Value());
-      return;
-    }
-    const std::string key = _owner.rememberParser(_canonical, _result.parser);
-    _deferred.Resolve(marshalFormatResult(Env(), _result, key));
+    _deferred.Resolve(marshalFormatResult(Env(), std::move(_result)));
   }
 
   void OnError(const Napi::Error& err) override {
-    _ownerRef.Reset();
     _deferred.Reject(err.Value());
   }
 
@@ -533,13 +522,9 @@ public:
 
 private:
   Napi::Promise::Deferred _deferred;
-  SessionContext& _owner;
   std::shared_ptr<llama_model> _model;
   lloyal::chat_in::FormatInputs _inputs;
   lloyal::chat_in::FormatResult _result;
-  std::string _canonical;
-  /** Keeps the JS context alive until the promise settles; the registry is its. */
-  Napi::ObjectReference _ownerRef;
 };
 
 // ===== BRANCH / STORE / DECODE ASYNC WORKERS =====
@@ -1140,7 +1125,6 @@ SessionContext::SessionContext(const Napi::CallbackInfo& info)
 }
 
 SessionContext::~SessionContext() {
-  _parsers.clear();
   if (!_disposed) {
     // Free mtmd first — it holds a reference to the model
     if (_mtmdContext) {
@@ -1469,44 +1453,9 @@ static lloyal::chat_in::FormatInputs parseFormatChatArgs(const Napi::CallbackInf
   return inputs;
 }
 
-// The parser a template produces depends on the tools, the tool choice, the
-// reasoning and thinking settings, the schema and the grammar, and never on the
-// messages: upstream's generator reads exactly those. The key is the hash of
-// that set, so repeated formats for the same conversation (deltas, the
-// terminal grammar, each spawn) resolve to one cached parser. The hash only
-// has to be stable within this process: the key is valid on the context that
-// produced it, nowhere else.
-static std::string parserCanonicalFor(const lloyal::chat_in::FormatInputs& inputs) {
-  std::string canonical;
-  const auto field = [&canonical](const std::string& value) {
-    canonical += std::to_string(value.size());
-    canonical += ':';
-    canonical += value;
-    canonical += '\x1f';
-  };
-  field(inputs.template_override);
-  field(inputs.tools_json);
-  field(inputs.tool_choice);
-  field(inputs.parallel_tool_calls ? "1" : "0");
-  field(inputs.reasoning_format);
-  field(inputs.enable_thinking ? "1" : "0");
-  field(inputs.json_schema);
-  field(inputs.grammar);
-  field(inputs.add_generation_prompt ? "1" : "0");
-  return canonical;
-}
-
-std::string SessionContext::parserKeyOf(const std::string& canonical) {
-  char hex[2 * sizeof(size_t) + 1];
-  std::snprintf(hex, sizeof(hex), "%0*zx", static_cast<int>(2 * sizeof(size_t)),
-                std::hash<std::string>{}(canonical));
-  return std::string("parser:") + hex;
-}
-
-// Shared helper: marshal FormatResult → Napi::Object. `parserKey` stands in for
-// the parser itself, which stays native.
-static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::FormatResult& r,
-                                        const std::string& parserKey) {
+// Shared helper: marshal FormatResult → Napi::Object. The parser goes out as a
+// handle that owns it; nothing of the arena crosses into JS.
+static Napi::Object marshalFormatResult(Napi::Env env, lloyal::chat_in::FormatResult&& r) {
   Napi::Object result = Napi::Object::New(env);
   result.Set("prompt", Napi::String::New(env, r.prompt));
 
@@ -1521,7 +1470,7 @@ static Napi::Object marshalFormatResult(Napi::Env env, const lloyal::chat_in::Fo
   result.Set("grammarLazy", Napi::Boolean::New(env, r.grammar_lazy));
   result.Set("generationPrompt", Napi::String::New(env, r.generation_prompt));
   result.Set("reasoningFormat", Napi::Number::New(env, static_cast<double>(r.reasoning_format)));
-  result.Set("parser", Napi::String::New(env, parserKey));
+  result.Set("parser", ChatParser::New(env, std::make_shared<const common_peg_arena>(std::move(r.parser))));
 
   // Thinking, as the template declares it — so a caller reading a raw stream never has to guess one model's
   // tags (`</think>` for Qwen, `[/THINK]` for Magistral, a channel marker for gpt-oss).
@@ -1561,7 +1510,7 @@ Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {
   }
 
   auto inputs = parseFormatChatArgs(info);
-  auto* worker = new FormatChatWorker(env, *this, _model, inputs);
+  auto* worker = new FormatChatWorker(env, _model, inputs);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1579,8 +1528,7 @@ Napi::Value SessionContext::formatChatSync(const Napi::CallbackInfo& info) {
   if (result.prompt.empty()) {
     throw Napi::Error::New(env, "Chat template formatting failed");
   }
-  const std::string key = rememberParser(parserCanonicalFor(inputs), result.parser);
-  return marshalFormatResult(env, result, key);
+  return marshalFormatResult(env, std::move(result));
 }
 
 Napi::Value SessionContext::kvCacheSize(const Napi::CallbackInfo& info) {
@@ -1609,8 +1557,6 @@ Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!_disposed) {
-    _parsers.clear();
-
     // Drain branch store while context is still alive
     _branchStore.drain();
 
@@ -1785,9 +1731,11 @@ Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info)
 
 // ===== CHAT OUTPUT PARSING =====
 
+// Parsing is pure: it reads the output and the parser handle, never the model
+// or the context, so it is allowed after dispose — a consumer settling the last
+// turns of a context it has already released still parses them.
 Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  ensureNotDisposed();
 
   // Args: output (string), format (number), options? (object)
   if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
@@ -1801,7 +1749,7 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
   // built, from the reasoning format the template was applied with.
   bool is_partial = false;
   std::string generation_prompt;
-  std::string parser_key;
+  std::shared_ptr<const common_peg_arena> parser;
 
   if (info.Length() >= 3 && info[2].IsObject()) {
     Napi::Object opts = info[2].As<Napi::Object>();
@@ -1812,30 +1760,23 @@ Napi::Value SessionContext::parseChatOutput(const Napi::CallbackInfo& info) {
     if (opts.Has("generationPrompt") && opts.Get("generationPrompt").IsString()) {
       generation_prompt = opts.Get("generationPrompt").As<Napi::String>().Utf8Value();
     }
-    if (opts.Has("parser") && opts.Get("parser").IsString()) {
-      parser_key = opts.Get("parser").As<Napi::String>().Utf8Value();
+    // The parser is the handle formatChat returned, and nothing else: a key, a
+    // plain object or another native object is refused before anything is
+    // read through it. A format with no tools or schema builds a parser all the
+    // same, so the handle is never optional for a formatted prompt; an absent
+    // one parses the output as plain content.
+    Napi::Value given = opts.Get("parser");
+    if (!given.IsUndefined() && !given.IsNull()) {
+      parser = ChatParser::arenaOf(given);
+      if (!parser) {
+        throw Napi::TypeError::New(env, "parseChatOutput: parser must be the handle formatChat returned");
+      }
     }
   }
 
-  // The parser is the one formatChat registered under this key on this context.
-  // A format with no tools or schema builds a parser all the same, so a key is
-  // never optional for a format that came from this context; the default arena
-  // is only for callers who never formatted.
-  const common_peg_arena* parser = nullptr;
   static const common_peg_arena kNoParser{};
-  if (parser_key.empty()) {
-    parser = &kNoParser;
-  } else {
-    auto it = _parsers.find(parser_key);
-    if (it == _parsers.end()) {
-      throw Napi::Error::New(env,
-        "parseChatOutput: unknown parser key; pass the parser from formatChat on this context");
-    }
-    parser = &it->second.parser;
-  }
-
   // Synchronous — parsing is fast, no I/O
-  auto result = lloyal::chat_out::parse(output, format, is_partial, generation_prompt, *parser);
+  auto result = lloyal::chat_out::parse(output, format, is_partial, generation_prompt, parser ? *parser : kNoParser);
 
   // Build return object
   Napi::Object obj = Napi::Object::New(env);
@@ -2226,7 +2167,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   }
 
   // Create SessionContext instance
-  Napi::Function ctor = env.GetInstanceData<Napi::FunctionReference>()->Value();
+  Napi::Function ctor = env.GetInstanceData<AddonData>()->contextCtor.Value();
   Napi::Object instance = ctor.New({});
   SessionContext* obj = SessionContext::Unwrap(instance);
 

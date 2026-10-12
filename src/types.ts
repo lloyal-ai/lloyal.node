@@ -69,4 +69,10 @@ export interface NativeBinding {
    * module-skip in release builds. Optional: absent on older prebuilts.
    */
   listDevices?(): BackendDevice[];
+  /**
+   * How many chat parser handles are alive in this process — the parsers
+   * `formatChat` returned whose last holder has not yet been collected. A
+   * lifetime check for the harness that holds them; nothing else reads it.
+   */
+  liveChatParsers(): number;
 }

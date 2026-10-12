@@ -344,34 +344,6 @@ private:
   std::vector<llama_token> _turnSeparatorCache;
   bool _turnSeparatorCached = false;
 
-  // ===== CHAT PARSERS =====
-  // The PEG parser a format produced, by the key of the inputs that shape it
-  // (everything but the messages). The arena has no string form, so it never
-  // crosses into JS: formatChat hands back the key, parseChatOutput resolves
-  // it here. One entry per distinct tool set and option set, cleared with the
-  // context. The key is a hash of the canonical inputs; the canonical inputs
-  // are kept beside the arena so a colliding hash can never resolve to the
-  // wrong grammar: a collision takes the next suffix instead.
-  struct ParserEntry { std::string canonical; common_peg_arena parser; };
-  std::unordered_map<std::string, ParserEntry> _parsers;
-
-public:
-  bool disposed() const { return _disposed; }
-
-  /** Register the parser the canonical inputs produced and return its key. */
-  std::string rememberParser(const std::string& canonical, const common_peg_arena& parser) {
-    const std::string base = parserKeyOf(canonical);
-    for (unsigned suffix = 0;; ++suffix) {
-      const std::string key = suffix == 0 ? base : base + "-" + std::to_string(suffix);
-      auto it = _parsers.find(key);
-      if (it == _parsers.end()) { _parsers.emplace(key, ParserEntry{canonical, parser}); return key; }
-      if (it->second.canonical == canonical) { it->second.parser = parser; return key; }
-    }
-  }
-
-private:
-  static std::string parserKeyOf(const std::string& canonical);
-
   // ===== INLINE HELPERS =====
   // Pattern matches HybridSessionContext.hpp:170-176
 
