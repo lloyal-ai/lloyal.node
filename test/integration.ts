@@ -1074,7 +1074,10 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
     // identity is covered above and the grammar check runs on a tool-aware template (Qwen3.5, Llama 3.x).
     ok('parser key: stable per inputs, resolved natively, unknown refused (this template renders no tools; grammar check skipped)');
   }
-  assert(Number.isInteger(ctx.nBatch) && ctx.nBatch > 0, 'the context reports its batch size');
+  // Read through a cast until the SDK that declares `nBatch` is on the registry: the GPU gate compiles
+  // this file against the published SDK types.
+  const nBatch = (ctx as unknown as { nBatch: number }).nBatch;
+  assert(Number.isInteger(nBatch) && nBatch > 0, 'the context reports its batch size');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
