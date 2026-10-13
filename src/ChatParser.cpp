@@ -6,6 +6,10 @@
 namespace {
 using Arena = std::shared_ptr<const common_peg_arena>;
 std::atomic<size_t> g_live{0};
+// The handle's native identity. A prototype can be reassigned from JS, so
+// instanceof proves nothing about what napi_unwrap will hand back; the tag
+// is set here, on the wrapped object, and nowhere else.
+constexpr napi_type_tag kChatParserTag = { 0x6c6c6f79616c2e6eULL, 0x6368617450617273ULL };
 }
 
 Napi::Function ChatParser::Init(Napi::Env env, Napi::Object exports) {
@@ -24,6 +28,7 @@ ChatParser::ChatParser(const Napi::CallbackInfo& info) : Napi::ObjectWrap<ChatPa
     throw Napi::TypeError::New(info.Env(), "ChatParser: a parser is made by formatChat, never constructed");
   }
   _arena = *info[0].As<Napi::External<Arena>>().Data();
+  info.This().As<Napi::Object>().TypeTag(&kChatParserTag);
   ++g_live;
 }
 
@@ -39,8 +44,7 @@ Napi::Object ChatParser::New(Napi::Env env, Arena arena) {
 Arena ChatParser::arenaOf(Napi::Value value) {
   if (!value.IsObject()) return nullptr;
   Napi::Object object = value.As<Napi::Object>();
-  Napi::Function ctor = value.Env().GetInstanceData<AddonData>()->parserCtor.Value();
-  if (!object.InstanceOf(ctor)) return nullptr;
+  if (!object.CheckTypeTag(&kChatParserTag)) return nullptr;
   return Unwrap(object)->_arena;
 }
 

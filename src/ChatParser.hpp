@@ -23,7 +23,8 @@ public:
   /** Wrap an arena. The only way a handle is made. */
   static Napi::Object New(Napi::Env env, std::shared_ptr<const common_peg_arena> arena);
 
-  /** The arena behind a value, or null when the value is not a handle this addon made. */
+  /** The arena behind a value, or null when the value is not a handle this addon made: the check is the
+   *  native type tag the constructor set, never the prototype, which JS can reassign. */
   static std::shared_ptr<const common_peg_arena> arenaOf(Napi::Value value);
 
   /** Handles alive in this process — what the lifetime tests watch. */

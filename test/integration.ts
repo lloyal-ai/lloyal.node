@@ -1055,6 +1055,18 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(refused('parser:deadbeef'), 'a string key is refused');
   assert(refused({}), 'a plain object is refused');
   assert(refused(ctx), 'an unrelated native object is refused');
+  // The check is the native type tag, not the prototype: a native context wearing the handle's prototype is
+  // still a context, and an object made from the prototype wraps nothing.
+  const ChatParserCtor = (addon as unknown as { ChatParser: { prototype: object } }).ChatParser;
+  const spoofed = await addon.createContext({ modelPath: MODEL_PATH, nCtx: 512, nThreads: 4 });
+  try {
+    Object.setPrototypeOf(spoofed, ChatParserCtor.prototype);
+    assert(refused(spoofed), 'a native context wearing the handle prototype is refused');
+  } finally {
+    Object.setPrototypeOf(spoofed, Object.getPrototypeOf(ctx) as object);
+    spoofed.dispose();
+  }
+  assert(refused(Object.create(ChatParserCtor.prototype)), 'an object made from the handle prototype is refused');
   let constructed = false;
   try {
     new (addon as unknown as { ChatParser: new () => unknown }).ChatParser();
