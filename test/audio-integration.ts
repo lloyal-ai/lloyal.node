@@ -158,7 +158,8 @@ test('invalid limits and unsupported typed arrays are rejected before inference'
     await assert.rejects(async () => measure([audio()], { ...limits, maxSamples }), /limit|budget|integer|positive|sample/i);
   }
   await assert.rejects(async () => measure([audio(new Int32Array(10) as unknown as Uint8Array)], limits), /Uint8Array|Buffer/i);
-  await assert.rejects(async () => measure([{ kind: 'video', bytes: recording } as unknown as MultimodalInput], limits), /kind/i);
+  await assert.rejects(async () => measure([{ kind: 'movie', bytes: recording } as unknown as MultimodalInput], limits), /kind/i);
+  await assert.rejects(async () => measure([{ kind: 'video', bytes: recording } as unknown as MultimodalInput], limits), /frames/i);
   assert.equal(cells(), 0);
 });
 

@@ -2678,16 +2678,19 @@ async function testMultimodal(): Promise<void> {
     assert(/marker count/i.test(mismatchErr),
       `marker/bitmap mismatch reported per entry: "${mismatchErr}"`);
 
-    // Assertion 8 — frames (the video-carrying contract): several marker'd
-    // frames + timestamp text in ONE prefill.
+    // Assertion 8 — several still images and text in ONE prefill. Still images
+    // never fuse, so this is not video: a video is one typed input (8b).
     const frames = Branch.create(ctx, 0, { temperature: 0 });
     const framesPrompt =
-      `Video frames. t=0s: ${MEDIA_MARKER} t=1s: ${MEDIA_MARKER} t=2s: ${MEDIA_MARKER} ` +
-      `What color is the square across the frames? Answer in one word:`;
+      `Three photos. First: ${MEDIA_MARKER} Second: ${MEDIA_MARKER} Third: ${MEDIA_MARKER} ` +
+      `What color is the square in the photos? Answer in one word:`;
     const fRes = await mm._storePrefillMultimodal(
       [frames.handle], [[]], [framesPrompt], [[IMG, IMG, IMG]]);
     assert(fRes[0].tokensDecoded > 0 && fRes[0].positionAdvance > 0,
-      `frames prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+      `three still images prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+    const stillCells = await mm._cellsMultimodal([], `${MEDIA_MARKER}`, [IMG]);
+    const threeCells = await mm._cellsMultimodal([], `${MEDIA_MARKER}${MEDIA_MARKER}${MEDIA_MARKER}`, [IMG, IMG, IMG]);
+    assert(threeCells === 3 * stillCells, `still images never fuse: ${threeCells} == 3 × ${stillCells}`);
     const fgen: number[] = [];
     for (let i = 0; i < 8; i++) {
       const { token, isStop } = await frames.produce();
@@ -2695,12 +2698,76 @@ async function testMultimodal(): Promise<void> {
       await frames.commit(token);
       fgen.push(token);
     }
-    assert(fgen.length > 0, 'answer over multi-frame prefill');
+    assert(fgen.length > 0, 'answer over several still images');
     if (vl.strict) {
       const ftext: string = await ctx.detokenize(fgen);
-      assert(/red/i.test(ftext), `temporal answer grounded: "${ftext.trim()}"`);
+      assert(/red/i.test(ftext), `answer grounded across the photos: "${ftext.trim()}"`);
     }
     await frames.prune();
+
+    // Assertion 8b — a video is ONE typed input: its sampled frames, their
+    // times and the timestamp interval. liblloyal lays them out as llama.cpp's
+    // video helper does, so Qwen-VL fuses adjacent frames in pairs and the cost
+    // matches the helper's own tokenization of the same clip.
+    {
+      const videoDir = path.join(__dirname, '../liblloyal/tests/fixtures/video');
+      const reference = JSON.parse(fs.readFileSync(path.join(videoDir, 'video-reference.json'), 'utf8')) as {
+        prompt: string; n_tokens: number;
+      };
+      const clipFrames = Array.from({ length: 16 }, (_, i) =>
+        fs.readFileSync(path.join(videoDir, `frame-${String(i).padStart(2, '0')}.png`)));
+      const video = (notes?: Array<{ atMs: number; text: string }>) => ({
+        kind: 'video', frames: clipFrames, timestampsMs: clipFrames.map((_, i) => i * 250),
+        timestampIntervalMs: 5000, ...(notes ? { notes } : {}),
+      }) as unknown as Buffer;
+
+      const videoCells = await mm._cellsMultimodal([], reference.prompt, [video()]);
+      assert(videoCells === reference.n_tokens,
+        `video costs what llama.cpp's video helper tokenizes (${videoCells} == ${reference.n_tokens})`);
+      const asStills = await mm._cellsMultimodal([], MEDIA_MARKER.repeat(16), clipFrames);
+      assert(videoCells < asStills, `fused video is cheaper than its frames as stills (${videoCells} < ${asStills})`);
+
+      const { prompt: videoPrompt } = await ctx.formatChat(JSON.stringify([{
+        role: 'user',
+        content: [
+          { type: 'media_marker', text: MEDIA_MARKER },
+          { type: 'text', text: 'Which direction does the red square move? Answer in a few words.' },
+        ],
+      }]), { enableThinking: false } as never);
+      const clip = Branch.create(ctx, 0, { temperature: 0 });
+      const quoted = await mm._cellsMultimodal([], videoPrompt, [video()]);
+      const [vRes] = await mm._storePrefillMultimodal([clip.handle], [[]], [videoPrompt], [[video()]]);
+      assert(vRes.error === undefined && vRes.tokensDecoded === quoted,
+        `video prefill lands its quote (${vRes.tokensDecoded} == ${quoted})`);
+      assert(vRes.positionAdvance < vRes.tokensDecoded, 'M-RoPE video advances fewer positions than cells');
+      const vgen: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        const { token, isStop } = await clip.produce();
+        if (isStop) break;
+        await clip.commit(token);
+        vgen.push(token);
+      }
+      const vtext: string = await ctx.detokenize(vgen);
+      if (vl.strict) assert(/right/i.test(vtext), `video answer grounded on motion: "${vtext.trim()}"`);
+      await clip.prune();
+
+      const noted = await mm._cellsMultimodal([], reference.prompt,
+        [video([{ atMs: 0, text: ' "one, two, three"' }])]);
+      assert(noted > videoCells, `a transcript note adds its text tokens (${noted} > ${videoCells})`);
+
+      const refused = Branch.create(ctx, 0, { temperature: 0 });
+      try {
+        const mixed = { kind: 'video', frames: [clipFrames[0], IMG], timestampsMs: [0, 250] } as unknown as Buffer;
+        const [r] = await mm._storePrefillMultimodal([refused.handle], [[]], [MEDIA_MARKER], [[mixed]]);
+        assert(/share one size/.test(r.error ?? '') && r.tokensDecoded === 0,
+          `mixed frame sizes refused per entry before decode: "${r.error}"`);
+      } finally { await refused.prune(); }
+      let shapeErr = '';
+      try {
+        await mm._cellsMultimodal([], MEDIA_MARKER, [{ kind: 'video', frames: clipFrames } as unknown as Buffer]);
+      } catch (e) { shapeErr = (e as Error).message; }
+      assert(/timestampsMs/.test(shapeErr), `a video without times is a type error: "${shapeErr}"`);
+    }
 
     // Assertion 9 — batched fan-out over the shared image, through the PUBLIC
     // BranchStore surface. The spine-share above proves forks are free and

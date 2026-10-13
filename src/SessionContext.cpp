@@ -710,9 +710,28 @@ private:
 };
 
 struct OwnedMedia {
+  /** A video's frames, times and notes, owned off-thread; `frameViews` and `noteViews` borrow from them. */
+  struct Video {
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<int64_t> timestampsMs;
+    int64_t timestampIntervalMs = 5000;
+    std::vector<std::pair<int64_t, std::string>> notes;
+    std::vector<std::span<const uint8_t>> frameViews;
+    std::vector<lloyal::VideoNote> noteViews;
+
+    void borrow() {
+      frameViews.assign(frames.begin(), frames.end());
+      noteViews.clear();
+      for (const auto& [atMs, text] : notes) noteViews.push_back({atMs, text});
+    }
+    lloyal::VideoFrames view() const {
+      return {frameViews, timestampsMs, timestampIntervalMs, noteViews};
+    }
+  };
   struct Input {
     lloyal::MediaInput::Kind kind;
     std::vector<uint8_t> bytes;
+    Video video;
   };
   std::vector<Input> inputs;
   lloyal::AudioLimits limits;
@@ -721,7 +740,7 @@ struct OwnedMedia {
   std::vector<lloyal::MediaInput> views() const {
     std::vector<lloyal::MediaInput> result;
     result.reserve(inputs.size());
-    for (const auto& input : inputs) result.push_back({input.kind, input.bytes});
+    for (const auto& input : inputs) result.push_back({input.kind, input.bytes, input.video.view()});
     return result;
   }
 };
@@ -748,6 +767,24 @@ static std::span<const uint8_t> mediaBytes(Napi::Value value) {
   return {bytes.Data(), bytes.ElementLength()};
 }
 
+static int64_t videoMs(Napi::Value value, const char* what) {
+  const double number = value.IsNumber() ? value.As<Napi::Number>().DoubleValue() : -1;
+  if (!std::isfinite(number) || number < 0 || std::floor(number) != number ||
+      number > 9007199254740991.0) {
+    throw Napi::TypeError::New(value.Env(), std::string(what) + " must be a non-negative safe integer");
+  }
+  return static_cast<int64_t>(number);
+}
+
+static Napi::Array videoList(Napi::Object input, const char* name, bool required) {
+  const auto value = input.Get(name);
+  if (!required && value.IsUndefined()) return Napi::Array::New(input.Env());
+  if (!value.IsArray()) throw Napi::TypeError::New(input.Env(), std::string("video ") + name + " must be an array");
+  return value.As<Napi::Array>();
+}
+
+static const char* const kMediaKinds = "media kind must be image, audio or video";
+
 // Borrow JS views only during marshalling. Check the aggregate byte budget
 // before allocating worker copies; native admission still validates the WAV
 // and decoded sample budget before the audio decoder can allocate samples.
@@ -763,49 +800,88 @@ static OwnedMedia copyMedia(Napi::Array values, Napi::Value budget) {
   struct BorrowedInput {
     lloyal::MediaInput::Kind kind;
     Napi::Value bytes;
+    std::vector<Napi::Value> frames;
+    OwnedMedia::Video video;
   };
   std::vector<BorrowedInput> borrowed;
   borrowed.reserve(values.Length());
   for (uint32_t i = 0; i < values.Length(); ++i) {
     auto value = values.Get(i);
-    auto kind = lloyal::MediaInput::Kind::Image;
+    BorrowedInput entry{lloyal::MediaInput::Kind::Image, value, {}, {}};
     if (value.IsObject() && !value.IsBuffer() && !value.IsTypedArray()) {
       auto input = value.As<Napi::Object>();
       const auto tag = input.Get("kind");
-      if (!tag.IsString()) throw Napi::TypeError::New(values.Env(), "media kind must be image or audio");
+      if (!tag.IsString()) throw Napi::TypeError::New(values.Env(), kMediaKinds);
       const auto name = tag.As<Napi::String>().Utf8Value();
-      if (name != "image" && name != "audio") {
-        throw Napi::TypeError::New(values.Env(), "media kind must be image or audio");
+      if (name == "video") {
+        entry.kind = lloyal::MediaInput::Kind::Video;
+        const auto frames = videoList(input, "frames", true);
+        for (uint32_t k = 0; k < frames.Length(); ++k) entry.frames.push_back(frames.Get(k));
+        const auto times = videoList(input, "timestampsMs", true);
+        for (uint32_t k = 0; k < times.Length(); ++k) {
+          entry.video.timestampsMs.push_back(videoMs(times.Get(k), "video timestampsMs"));
+        }
+        const auto interval = input.Get("timestampIntervalMs");
+        if (!interval.IsUndefined()) {
+          entry.video.timestampIntervalMs = videoMs(interval, "video timestampIntervalMs");
+        }
+        const auto notes = videoList(input, "notes", false);
+        for (uint32_t k = 0; k < notes.Length(); ++k) {
+          const auto note = notes.Get(k);
+          if (!note.IsObject()) throw Napi::TypeError::New(values.Env(), "video notes must be {atMs, text}");
+          const auto text = note.As<Napi::Object>().Get("text");
+          if (!text.IsString()) throw Napi::TypeError::New(values.Env(), "video note text must be a string");
+          entry.video.notes.push_back({videoMs(note.As<Napi::Object>().Get("atMs"), "video note atMs"),
+                                       text.As<Napi::String>().Utf8Value()});
+        }
+      } else if (name == "image" || name == "audio") {
+        entry.kind = name == "audio" ? lloyal::MediaInput::Kind::Audio : lloyal::MediaInput::Kind::Image;
+        entry.bytes = input.Get("bytes");
+      } else {
+        throw Napi::TypeError::New(values.Env(), kMediaKinds);
       }
-      kind = name == "audio" ? lloyal::MediaInput::Kind::Audio : lloyal::MediaInput::Kind::Image;
-      value = input.Get("bytes");
     }
-    borrowed.push_back({kind, value});
+    borrowed.push_back(std::move(entry));
   }
   // Resolve object getters before borrowing byte pointers: a getter can detach
   // another input's ArrayBuffer. No JS runs while these views are copied.
-  std::vector<lloyal::MediaInput> views;
+  struct View {
+    lloyal::MediaInput::Kind kind;
+    std::span<const uint8_t> bytes;
+    std::vector<std::span<const uint8_t>> frames;
+  };
+  std::vector<View> views;
   views.reserve(borrowed.size());
   size_t bytesLeft = result.limits.max_bytes;
   for (const auto& input : borrowed) {
-    const auto bytes = mediaBytes(input.bytes);
+    View view{input.kind, {}, {}};
+    if (input.kind == lloyal::MediaInput::Kind::Video) {
+      for (const auto& frame : input.frames) view.frames.push_back(mediaBytes(frame));
+      views.push_back(std::move(view));
+      continue;
+    }
+    view.bytes = mediaBytes(input.bytes);
     if (input.kind == lloyal::MediaInput::Kind::Audio) {
       if (!result.limits.max_bytes || !result.limits.max_samples) {
         result.error = "audio limits must be positive";
         return result;
       }
-      if (bytes.size() > bytesLeft) {
+      if (view.bytes.size() > bytesLeft) {
         result.error = "audio byte limit exceeded";
         return result;
       }
-      bytesLeft -= bytes.size();
+      bytesLeft -= view.bytes.size();
     }
-    views.push_back({input.kind, bytes});
+    views.push_back(std::move(view));
   }
   result.inputs.reserve(views.size());
-  for (const auto& input : views) {
-    result.inputs.push_back({input.kind, {input.bytes.begin(), input.bytes.end()}});
+  for (size_t i = 0; i < views.size(); ++i) {
+    OwnedMedia::Input owned{views[i].kind, {views[i].bytes.begin(), views[i].bytes.end()},
+                            std::move(borrowed[i].video)};
+    for (const auto& frame : views[i].frames) owned.video.frames.emplace_back(frame.begin(), frame.end());
+    result.inputs.push_back(std::move(owned));
   }
+  for (auto& input : result.inputs) input.video.borrow();
   return result;
 }
 
