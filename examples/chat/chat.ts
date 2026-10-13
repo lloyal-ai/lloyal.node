@@ -111,7 +111,6 @@ async function main(): Promise<void> {
 
     // Parse output: separates reasoning from content for thinking models
     const parsed = ctx.parseChatOutput(rawOutput, fmt!.format, {
-      reasoningFormat: fmt!.reasoningFormat,
       generationPrompt: fmt!.generationPrompt,
       parser: fmt!.parser,
     });

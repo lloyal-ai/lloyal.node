@@ -17,6 +17,8 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as v8 from 'node:v8';
+import * as vm from 'node:vm';
 import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
@@ -430,7 +432,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
 
     // Turn 1 (COLD): introduce name
     const msgs1: Array<{ role: string; content: string }> = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
-    const { prompt, format, reasoningFormat } = await ctx.formatChat(JSON.stringify(msgs1), {});
+    const { prompt, format, parser } = await ctx.formatChat(JSON.stringify(msgs1), {});
     const promptToks: number[] = await ctx.tokenize(prompt);
     const branch = Branch.create(ctx, 0, { temperature: 0 });
     await branch.prefill(promptToks);
@@ -438,7 +440,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
     // Helper: parse output and check content (not reasoning) for a term
     function checkRecall(rawText: string, term: string): boolean {
       const { content } = ctx.parseChatOutput(rawText, format, {
-        reasoningFormat,
+        parser,
         isPartial: false,
         generationPrompt: ''
       });
@@ -981,11 +983,11 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(Array.isArray(result.preservedTokens), 'formatChat returns preservedTokens array');
   // Thinking as the TEMPLATE declares it, so a caller reading a raw stream never guesses one model's tags.
   // Structurally typed until the installed SDK carries these fields — the same idiom `tokenToBytes` uses above.
-  const thinking = result as unknown as { supportsThinking: boolean; thinkingStartTag: string; thinkingEndTag: string };
+  const thinking = result as unknown as { supportsThinking: boolean; thinkingStartTag: string; thinkingEndTags: string[] };
   assert(typeof thinking.supportsThinking === 'boolean', 'formatChat returns supportsThinking');
   assert(typeof thinking.thinkingStartTag === 'string', 'formatChat returns thinkingStartTag');
-  assert(typeof thinking.thinkingEndTag === 'string', 'formatChat returns thinkingEndTag');
-  assert(thinking.supportsThinking === (thinking.thinkingEndTag.length > 0),
+  assert(Array.isArray(thinking.thinkingEndTags), 'formatChat returns thinkingEndTags');
+  assert(thinking.supportsThinking === (thinking.thinkingEndTags.length > 0),
     'a template that supports thinking names its tags, and one that does not leaves them empty');
   if (thinking.supportsThinking) {
     // The pairing chat_out needs: reasoning is parsed as reasoning by default, never left inline in content.
@@ -1023,14 +1025,164 @@ async function testChatInOut(ctx: SessionContext): Promise<void> {
   assert(Array.isArray(parsed.toolCalls), 'parseChatOutput returns toolCalls array');
   ok('parseChatOutput basic');
 
-  // parseChatOutput with options
+  // parseChatOutput with the parser formatChat built for this tool set
   const parsedWithOpts = ctx.parseChatOutput('Some output', toolResult.format, {
-    reasoningFormat: toolResult.reasoningFormat,
+    parser: toolResult.parser,
     isPartial: false,
     generationPrompt: ''
   });
   assert(typeof parsedWithOpts.content === 'string', 'parseChatOutput with options');
   ok('parseChatOutput with options');
+
+  // The parser never leaves the native side: formatChat hands back a handle that owns it. A parser is rendered
+  // for its whole conversation (the generation prompt is a literal inside it), so every format owns its own.
+  type Parser = FormattedChatResult['parser'];
+  assert(typeof toolResult.parser === 'object' && toolResult.parser !== null, 'formatChat returns a parser handle');
+  const otherMessages = [{ role: 'user', content: 'Something else entirely' }];
+  const sameTools = ctx.formatChatSync(JSON.stringify(otherMessages), { tools: JSON.stringify(tools), toolChoice: 'auto' });
+  assert(sameTools.parser !== toolResult.parser, 'every format owns its own parser handle');
+  const partial = ctx.parseChatOutput('Hel', toolResult.format, { parser: toolResult.parser, isPartial: true });
+  assert(typeof partial.content === 'string', 'a partial parse through the handle returns content');
+  // Only the handle is read through; anything else is refused before it is unwrapped.
+  const refused = (parser: unknown): boolean => {
+    try {
+      ctx.parseChatOutput('Hello', toolResult.format, { parser: parser as Parser });
+      return false;
+    } catch (e) {
+      return e instanceof TypeError;
+    }
+  };
+  assert(refused('parser:deadbeef'), 'a string key is refused');
+  assert(refused({}), 'a plain object is refused');
+  assert(refused(ctx), 'an unrelated native object is refused');
+  // The check is the native type tag, not the prototype: a native context wearing the handle's prototype is
+  // still a context, and an object made from the prototype wraps nothing.
+  const ChatParserCtor = (addon as unknown as { ChatParser: { prototype: object } }).ChatParser;
+  const spoofed = await addon.createContext({ modelPath: MODEL_PATH, nCtx: 512, nThreads: 4 });
+  try {
+    Object.setPrototypeOf(spoofed, ChatParserCtor.prototype);
+    assert(refused(spoofed), 'a native context wearing the handle prototype is refused');
+  } finally {
+    Object.setPrototypeOf(spoofed, Object.getPrototypeOf(ctx) as object);
+    spoofed.dispose();
+  }
+  assert(refused(Object.create(ChatParserCtor.prototype)), 'an object made from the handle prototype is refused');
+  let constructed = false;
+  try {
+    new (addon as unknown as { ChatParser: new () => unknown }).ChatParser();
+    constructed = true;
+  } catch (e) {
+    assert(e instanceof TypeError, 'constructing a handle from JS is a TypeError');
+  }
+  assert(!constructed, 'a handle is made by formatChat, never constructed');
+  // The handle resolves the parser formatChat built for THIS tool set: a get_weather call in the template's own
+  // envelope parses to the call through it, and parses to no call through the handle of a format without tools.
+  const call = { name: 'get_weather', arguments: { location: 'Paris' } };
+  const envelopes = [
+    `<tool_call>\n${JSON.stringify(call)}\n</tool_call>`,
+    JSON.stringify(call),
+    JSON.stringify({ name: 'get_weather', parameters: { location: 'Paris' } }),
+    '<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>',
+    '<tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>',
+  ];
+  const through = (parser: Parser) => envelopes.map((e) =>
+    ctx.parseChatOutput(e, toolResult.format, { parser, isPartial: false, generationPrompt: toolResult.generationPrompt }));
+  // A template that renders the tools changes the prompt; one that ignores them (SmolLM2) has no tool grammar to tell apart.
+  const toolAware = toolResult.prompt !== result.prompt;
+  if (toolAware) {
+    const withTools = through(toolResult.parser);
+    const named = withTools.filter((r) => r.toolCalls.length === 1 && r.toolCalls[0].name === 'get_weather');
+    assert(named.length > 0, 'an envelope parses to the get_weather call through the tool set\'s handle');
+    const without = through(result.parser);
+    assert(without.every((r) => r.toolCalls.length === 0), 'the same envelopes parse to no call through the no-tools handle');
+    ok('parser handle: one per format, read natively, everything else refused, the right grammar behind it');
+  } else {
+    // This model's template renders no tool syntax, so there is no tool grammar to tell apart; the handle's
+    // identity is covered above and the grammar check runs on a tool-aware template (Qwen3.5, Llama 3.x).
+    ok('parser handle: one per format, read natively, everything else refused (this template renders no tools; grammar check skipped)');
+  }
+  // Read through a cast until the SDK that declares `nBatch` is on the registry: the GPU gate compiles
+  // this file against the published SDK types.
+  const nBatch = (ctx as unknown as { nBatch: number }).nBatch;
+  assert(Number.isInteger(nBatch) && nBatch > 0, 'the context reports its batch size');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARSER HANDLE LIFETIME
+// The handle is the ownership of the parser: a copy keeps it, the last copy's
+// collection frees it natively too, and the context it came from may go first.
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function testParserLifetime(): Promise<void> {
+  console.log('\n--- Parser Handle Lifetime ---');
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc') as () => void;
+  const collect = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) {
+      gc();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  type Parser = FormattedChatResult['parser'];
+  const message = (content: string): string => JSON.stringify([{ role: 'user', content }]);
+  // A generation prompt that depends on the last message: two successful formats, identical options, two parsers.
+  const templateOverride = "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% if messages[-1]['content'] == 'SECOND' %}{{ 'SECOND:' }}{% else %}{{ 'FIRST:' }}{% endif %}{% endif %}";
+  const options = {
+    templateOverride,
+    jsonSchema: JSON.stringify({ type: 'object', properties: { result: { type: 'string' } }, required: ['result'] }),
+  };
+  const output = '{"result":"ok"}';
+  const before = addon.liveChatParsers();
+
+  const ctx: SessionContext = await addon.createContext({ modelPath: MODEL_PATH, nCtx: 512, nThreads: 4 });
+  const run = async (): Promise<WeakRef<object>[]> => {
+    const first = ctx.formatChatSync(message('Hello'), options);
+    const parseFirst = () => ctx.parseChatOutput(output, first.format, { parser: first.parser, generationPrompt: first.generationPrompt });
+    assert(parseFirst().content === output, 'the first handle parses the first output');
+    const second = ctx.formatChatSync(message('SECOND'), options);
+    assert(first.generationPrompt !== second.generationPrompt, 'the second format rendered a different generation prompt');
+    assert(parseFirst().content === output, 'the first handle still parses the first output after the second format');
+    const parsedSecond = ctx.parseChatOutput(output, second.format, { parser: second.parser, generationPrompt: second.generationPrompt });
+    assert(parsedSecond.content === output, 'the second handle parses the second output');
+    assert(addon.liveChatParsers() === before + 2, 'each format made one handle');
+    ok('two message-dependent formats keep their own parsers');
+
+    // A copy of the handle outlives the format result it came in.
+    let copy: { parser: Parser; format: FormattedChatResult['format']; generationPrompt: string } | null = null;
+    const result = ((): WeakRef<object> => {
+      const fmt = ctx.formatChatSync(message('Hello'), options);
+      copy = { parser: fmt.parser, format: fmt.format, generationPrompt: fmt.generationPrompt };
+      return new WeakRef(fmt as unknown as object);
+    })();
+    await collect();
+    assert(result.deref() === undefined, 'the format result was collected');
+    assert(copy !== null && ctx.parseChatOutput(output, copy.format, { parser: copy.parser, generationPrompt: copy.generationPrompt }).content === output,
+      'the copied handle parses after the result it came in was collected');
+    ok('a copied handle keeps the parser');
+
+    // The last copy's collection frees the arena natively.
+    const handle = new WeakRef(copy!.parser as unknown as object);
+    const withCopy = addon.liveChatParsers();
+    copy = null;
+    await collect();
+    assert(handle.deref() === undefined, 'the last handle was collected');
+    assert(addon.liveChatParsers() === withCopy - 1, 'the native arena was released with it');
+    ok('the last handle releases the arena');
+
+    // The context goes first; the handle still parses, and both collect without a crash.
+    const late = ctx.formatChatSync(message('Hello'), options);
+    ctx.dispose();
+    const afterDispose = ctx.parseChatOutput(output, late.format, { parser: late.parser, generationPrompt: late.generationPrompt });
+    assert(afterDispose.content === output, 'a handle parses after its context is disposed');
+    ok('a handle outlives its context');
+    return [first, second, late].map((fmt) => new WeakRef(fmt.parser as unknown as object));
+  };
+  const handles = await run();
+  await collect();
+  assert(handles.every((h) => h.deref() === undefined), 'every handle of this test was collected');
+  // Earlier suites' handles may be collected in the same sweeps, so the count can only have fallen.
+  assert(addon.liveChatParsers() <= before, 'no handle of this test is still alive natively');
+  ok('all handles reclaimed');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2071,8 +2223,10 @@ async function testRerank(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 8,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
@@ -2158,8 +2312,10 @@ async function testRerankLargeCorpus(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 8,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 8, nCtx: 4096 });
 
@@ -2243,8 +2399,10 @@ async function testRerankConcurrent(): Promise<void> {
     modelPath: RERANK_MODEL_PATH,
     nCtx: 4096,
     nSeqMax: 4,
-    typeK: 'q4_0',
-    typeV: 'q4_0',
+    // The reranker reads yes/no logit gaps; q4_0 KV scrambles them (London outranks
+    // 'machine learning' documents). Rerankers run on q8_0 KV everywhere.
+    typeK: 'q8_0',
+    typeV: 'q8_0',
   });
   const rerank = await Rerank.create(rerankCtx, { nSeqMax: 4, nCtx: 4096 });
 
@@ -2788,6 +2946,7 @@ async function main(): Promise<void> {
 
       // Tests that create their own contexts
       await testMultiSequence();
+      await testParserLifetime();
       await testGrammar();
       await testBranchPrefill();
       await testWarmMultiTurnRecall();
@@ -2822,17 +2981,19 @@ async function main(): Promise<void> {
     console.log(`PASSED: ${passed}`);
     console.log(`FAILED: ${failed}`);
 
+    // The exit code is set, never forced: process.exit() would skip the dispose
+    // below, and Metal refuses to tear down with a live context.
     if (failed === 0) {
       console.log('\nAll tests passed!');
-      process.exit(0);
+      process.exitCode = 0;
     } else {
       console.log(`\n${failed} test(s) failed`);
-      process.exit(1);
+      process.exitCode = 1;
     }
   } catch (err) {
     console.error('\nFatal error:', (err as Error).message);
     console.error((err as Error).stack);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     if (mainCtx) mainCtx.dispose();
   }

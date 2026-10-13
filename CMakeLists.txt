@@ -109,6 +109,11 @@ if(GGML_CUDA AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     message(STATUS "lloyal.node: CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
+# mtmd is a library of this addon; its video support is a compile definition
+# only (video decoding shells out to an ffmpeg binary at runtime): keep it off
+# for a deterministic surface.
+set(LLAMA_BUILD_MTMD ON CACHE BOOL "Build the mtmd library" FORCE)
+set(MTMD_VIDEO OFF CACHE BOOL "mtmd video support (runtime ffmpeg)" FORCE)
 add_subdirectory(${LLAMA_CPP_DIR} llama.cpp)
 
 # MSVC C++20 char8_t workaround: llama.cpp uses u8"" literals which MSVC treats
@@ -133,18 +138,11 @@ endif()
 # =============================================================================
 # mtmd (multimodal: clip/projector encode + media tokenization)
 # =============================================================================
-# tools/mtmd is not built by llama.cpp under add_subdirectory (LLAMA_BUILD_TOOLS
-# is OFF for non-standalone builds), so add the library directly.
-# - EXCLUDE_FROM_ALL: mtmd's CMakeLists also declares CLI targets
-#   (llama-mtmd-cli etc.); only the linked `mtmd` library gets built.
-# - LLAMA_INSTALL_VERSION is a normal variable scoped inside llama.cpp's
-#   directory — empty here, and mtmd's set_target_properties(VERSION ...)
-#   would receive "". Provide it before the add.
-# - MTMD_VIDEO is a compile definition only (video decoding shells out to an
-#   ffmpeg binary at runtime); keep it OFF for a deterministic surface.
-set(LLAMA_INSTALL_VERSION 0.0.0)
-set(MTMD_VIDEO OFF CACHE BOOL "mtmd video support (runtime ffmpeg)" FORCE)
-add_subdirectory(${LLAMA_CPP_DIR}/tools/mtmd mtmd EXCLUDE_FROM_ALL)
+# Built by llama.cpp itself, inside its own directory scope, where the version
+# variables its target properties read are defined. Adding tools/mtmd from here
+# leaves those unset and names the library libmtmd.so.SOVERSION, which the
+# Linux package filter drops. Its CLI targets are gated on LLAMA_BUILD_TOOLS,
+# which stays off, so only the library is built.
 if(MSVC AND TARGET mtmd)
     # Same u8"" literal workaround as the llama.cpp targets above.
     target_compile_options(mtmd PRIVATE /Zc:char8_t-)
@@ -175,6 +173,7 @@ set(MD4C_INCLUDE_DIR "${md4c_SOURCE_DIR}/src")
 
 set(ADDON_SOURCES
     src/binding.cpp
+    src/ChatParser.cpp
     src/BackendManager.cpp
     src/SessionContext.cpp
     src/Util.cpp

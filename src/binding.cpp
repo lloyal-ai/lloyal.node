@@ -1,4 +1,6 @@
 #include <napi.h>
+#include "Addon.hpp"
+#include "ChatParser.hpp"
 #include "SessionContext.hpp"
 #include "Util.hpp"
 #include <llama/llama.h>
@@ -9,18 +11,17 @@
  * Exports:
  *   - createContext(options): Factory function to create SessionContext
  *   - SessionContext: Class for inference operations
+ *   - ChatParser: the parser handle formatChat returns; liveChatParsers(): how many are alive
  */
 
 namespace liblloyal_node {
 
 // Module initialization
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
-  // Initialize SessionContext class and get constructor
-  Napi::Object ctorObj = SessionContext::Init(env, exports);
-  Napi::Function ctorFunc = ctorObj.Get("SessionContext").As<Napi::Function>();
-
-  // Store constructor for CreateContext to use
-  env.SetInstanceData(new Napi::FunctionReference(Napi::Persistent(ctorFunc)));
+  // The classes, and their constructors kept for the factories that call them.
+  Napi::Function contextCtor = SessionContext::Init(env, exports).Get("SessionContext").As<Napi::Function>();
+  Napi::Function parserCtor = ChatParser::Init(env, exports);
+  env.SetInstanceData(new AddonData{ Napi::Persistent(contextCtor), Napi::Persistent(parserCtor) });
 
   // Export factory function
   exports.Set("createContext", Napi::Function::New(env, CreateContext));

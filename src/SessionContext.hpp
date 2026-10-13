@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Forward declaration at GLOBAL scope — mtmd_context is llama.cpp/tools/mtmd's
@@ -172,6 +173,7 @@ private:
 
   Napi::Value getVocabSize(const Napi::CallbackInfo& info);
   Napi::Value getMemorySize(const Napi::CallbackInfo& info);
+  Napi::Value getNBatch(const Napi::CallbackInfo& info);
 
   // ===== KV CACHE MANAGEMENT =====
 
