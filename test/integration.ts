@@ -2682,8 +2682,8 @@ async function testMultimodal(): Promise<void> {
     // never fuse, so this is not video: a video is one typed input (8b).
     const frames = Branch.create(ctx, 0, { temperature: 0 });
     const framesPrompt =
-      `Three photos. First: ${MEDIA_MARKER} Second: ${MEDIA_MARKER} Third: ${MEDIA_MARKER} ` +
-      `What color is the square in the photos? Answer in one word:`;
+      `Video frames. t=0s: ${MEDIA_MARKER} t=1s: ${MEDIA_MARKER} t=2s: ${MEDIA_MARKER} ` +
+      `What color is the square across the frames? Answer in one word:`;
     const fRes = await mm._storePrefillMultimodal(
       [frames.handle], [[]], [framesPrompt], [[IMG, IMG, IMG]]);
     assert(fRes[0].tokensDecoded > 0 && fRes[0].positionAdvance > 0,
