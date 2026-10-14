@@ -299,10 +299,12 @@ private:
   /**
    * Multimodal prefill: per-branch sep tokens + templated prompt (with
    * media markers) + typed media bytes. The walk itself is liblloyal's:
-   * `MtmdSource` yields TEXT/IMAGE/AUDIO segments in order and
+   * `MtmdSource` yields TEXT/IMAGE/AUDIO/VIDEO segments in order and
    * `BranchStore::decode_segments` places them (token rail / embedding rail).
    * Args: (handles: number[], sepTokens: number[][], prompts: string[],
-   *        inputs: (Buffer | {kind, bytes})[][], audioLimits?: {maxBytes, maxSamples}[])
+   *        inputs: (Buffer | {kind: 'image'|'audio', bytes}
+   *                 | {kind: 'video', frames, timestampsMs, timestampIntervalMs?, notes?})[][],
+   *        audioLimits?: {maxBytes, maxSamples}[])
    * Returns: Promise<{tokensDecoded, positionAdvance, error?, rc?, partial?}[]>
    *   — per-entry outcomes; a failed entry carries `error`, and when the
    *   failure came from llama_decode, its `rc` and `partial` (see DecodeError).

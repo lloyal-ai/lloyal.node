@@ -147,7 +147,7 @@ const [{ tokensDecoded, positionAdvance }] =
   await ctx._storePrefillMultimodal([handle], [[]], [prompt], [[bytes]]);
 ```
 
-`positionAdvance < tokensDecoded` under M-RoPE — an image costs more KV cells than it advances position, and the kernel tracks the gap so pressure accounting stays exact. Several markers with several images in one prefill also works; still images never fuse.
+`positionAdvance < tokensDecoded` under M-RoPE — an image costs more KV cells than it advances position, and the kernel tracks the gap so pressure accounting stays exact. Several markers with several images in one prefill also work; still images never fuse.
 
 A video is one input, `{ kind: "video", frames, timestampsMs, timestampIntervalMs?, notes? }`: the sampled frames of one clip (each an encoded image, all one size) with the time each was sampled, behind one marker. It is laid out as llama.cpp's own video helper lays out a clip, so Qwen-VL projectors fuse adjacent frames in pairs, and it costs what the helper's tokenization of the same clip costs. `notes` (`{ atMs, text }`, such as a transcript) join the timestamp text without separating frames. The addon does not decode video files; pass the frames.
 

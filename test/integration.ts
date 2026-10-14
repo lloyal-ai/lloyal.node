@@ -2751,6 +2751,24 @@ async function testMultimodal(): Promise<void> {
       if (vl.strict) assert(/right/i.test(vtext), `video answer grounded on motion: "${vtext.trim()}"`);
       await clip.prune();
 
+      // The frames are owned natively before the call returns: every frame a byte-offset
+      // view into one backing store, zeroed while the measurement and the prefill run.
+      {
+        const backing = new Uint8Array(clipFrames.reduce((n, f) => n + f.length + 8, 0));
+        let at = 8;
+        const views = clipFrames.map((f) => { const v = backing.subarray(at, at + f.length); v.set(f); at += f.length + 8; return v; });
+        const borrowed = { kind: 'video', frames: views, timestampsMs: clipFrames.map((_, i) => i * 250), timestampIntervalMs: 5000 } as unknown as Buffer;
+        const owned = Branch.create(ctx, 0, { temperature: 0 });
+        try {
+          const measuring = mm._cellsMultimodal([], videoPrompt, [borrowed]);
+          const prefilling = mm._storePrefillMultimodal([owned.handle], [[]], [videoPrompt], [[borrowed]]);
+          backing.fill(0);
+          const [measured, [landed]] = await Promise.all([measuring, prefilling]);
+          assert(measured === quoted && landed.error === undefined && landed.tokensDecoded === quoted,
+            `video frames are owned through worker completion (${measured}, ${landed.tokensDecoded} == ${quoted})`);
+        } finally { await owned.prune(); }
+      }
+
       const noted = await mm._cellsMultimodal([], reference.prompt,
         [video([{ atMs: 0, text: ' "one, two, three"' }])]);
       assert(noted > videoCells, `a transcript note adds its text tokens (${noted} > ${videoCells})`);
