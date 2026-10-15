@@ -1349,6 +1349,29 @@ async function testFastForward(): Promise<void> {
     assert(stale.includes('invalid child handle'), `fast-forward: a stale child is refused by name (${stale})`);
     assert(root.position === before, 'fast-forward: a refusal changes nothing');
 
+    // Reseeding a parent that samples is a change: a fork taken before the reseed cannot be fast-forwarded over it.
+    const sampled = Branch.create(ctx, 0, { temperature: 0.8 });
+    await sampled.prefill(prompt);
+    const early = await sampled.fork();
+    await early.prefill(suffix);
+    sampled.reseedSampler(4242);
+    const [sampledAt, earlyAt] = [sampled.position, early.position];
+    const sampledLogits = Float32Array.from(sampled.getLogits());
+    let reseeded = '';
+    try { native._branchFastForward(sampled.handle, early.handle); } catch (e) { reseeded = (e as Error).message; }
+    assert(reseeded.includes('the parent has changed since the fork'), `fast-forward: refused after a reseed of the parent (${reseeded})`);
+    assert(sampled.position === sampledAt && early.position === earlyAt, 'fast-forward: the reseed refusal moved neither branch');
+    assert(sampled.getLogits().every((v, i) => v === sampledLogits[i]), 'fast-forward: the reseed refusal left the parent\'s logits');
+    const sampledChildren = native._branchChildren(sampled.handle);
+    assert(sampledChildren.length === 1 && sampledChildren[0] === early.handle, 'fast-forward: the reseed refusal left the tree');
+    await sampled.pruneSubtree();
+
+    // A greedy chain has no PRNG: reseeding it changes nothing, so nothing refuses.
+    const greedyFork = await root.fork();
+    root.reseedSampler(4242);
+    native._branchFastForward(root.handle, greedyFork.handle);
+    assert(true, 'fast-forward: a reseed of a greedy parent does not refuse');
+
     await root.pruneSubtree();
   } finally {
     ctx.dispose();
