@@ -562,7 +562,9 @@ private:
 /**
  * AsyncWorker for batched multi-branch commit (accept + decode_each)
  * Accept-first ordering with rollback: accepts tokens for correct PPL measurement,
- * then decodes. On decode failure, restores sampler/grammar/metrics from clones.
+ * then decodes. On decode failure, restores sampler/grammar/metrics from clones,
+ * and the revision of every branch the failure left intact, so a failed commit
+ * is no change to fast_forward. A poisoned branch keeps the bump poisoning gave it.
  */
 class StoreCommitWorker : public Napi::AsyncWorker {
 public:
@@ -578,6 +580,7 @@ public:
       lloyal::branch::SamplerChainHandle sampler = 0;
       lloyal::branch::GrammarHandle grammar = 0;
       lloyal::branch::MetricsHandle metrics = 0;
+      uint64_t revision = 0;
       lloyal::branch::BranchStore* store = nullptr;
 
       ~Snapshot() {
@@ -591,6 +594,7 @@ public:
         std::swap(sampler, st.sampler_chain);
         std::swap(grammar, st.grammar);
         std::swap(metrics, st.metrics);
+        if (!st.poisoned) st.revision = revision;
       }
     };
 
@@ -598,6 +602,12 @@ public:
     std::vector<std::unique_ptr<Snapshot>> snaps(_items.size());
 
     try {
+      // Phase 0: one entry per branch, refused before anything is accepted
+      std::vector<lloyal::branch::BranchHandle> handles;
+      handles.reserve(_items.size());
+      for (const auto& item : _items) handles.push_back(item.handle);
+      lloyal::branch::require_distinct_handles(handles, "StoreCommitWorker");
+
       // Phase 1: snapshot all accept-mutable state (no mutations yet)
       for (size_t i = 0; i < _items.size(); ++i) {
         auto* st = _store.get(_items[i].handle);
@@ -611,6 +621,7 @@ public:
             ? _store.clone_grammar(st->grammar) : 0;
         s->metrics = st->metrics != 0
             ? _store.clone_metrics(st->metrics) : 0;
+        s->revision = st->revision;
         snaps[i] = std::move(s);
       }
 

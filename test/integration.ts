@@ -23,7 +23,7 @@ import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
 const SUITE = process.argv.find(arg => arg.startsWith('--suite='))?.split('=')[1] ?? 'all';
-if (!['all', 'text', 'image'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
+if (!['all', 'text', 'image', 'branch'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
 
 const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
   ? path.resolve(process.env.LLAMA_TEST_MODEL)
@@ -1764,6 +1764,72 @@ async function testCommitRollback(): Promise<void> {
   }
 }
 
+// A commit the decode refused with every branch intact (rc 1) restored the
+// branch, so it is no change: a fork taken before it still fast-forwards. The
+// same holds for a commit refused before any accept.
+type CommitSurface = FastForwardSurface & { _storeCommit(handles: number[], tokens: number[]): Promise<void> };
+
+async function testFailedCommitIsNoChange(): Promise<void> {
+  console.log('\n--- A failed commit is no change ---');
+
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 32,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 8
+  });
+  const native = ctx as unknown as CommitSurface;
+
+  try {
+    const root = Branch.create(ctx, 0, { temperature: 1.0 });
+    await root.prefill(await ctx.tokenize("Hi"));
+    const siblings: InstanceType<typeof Branch>[] = [];
+    for (let i = 1; i < 7; i++) {
+      const b = await root.fork();
+      b.reseedSampler(1000 + i); // divergent tokens, so the pool fills
+      siblings.push(b);
+    }
+    const store = new BranchStore(ctx);
+
+    // Each round samples, then forks a checkpoint (sampling advances the PRNG, a
+    // change of its own), then commits; the round that finds no room keeps it.
+    let failure: (Error & { rc?: number }) | null = null;
+    let checkpoint: InstanceType<typeof Branch> | null = null;
+    for (let round = 0; round < 50 && failure === null; round++) {
+      const produced = await Promise.all([root, ...siblings].map(async (b) => [b, (await b.produce()).token] as [InstanceType<typeof Branch>, number]));
+      checkpoint = await root.fork();
+      try {
+        await store.commit(produced);
+        await checkpoint.prune();
+      } catch (e) {
+        failure = e as Error & { rc?: number };
+      }
+    }
+    assert(failure !== null && failure.rc === 1, `failed commit: the pool filled and the batch was refused intact (rc ${failure?.rc})`);
+
+    const at = root.position;
+    let refused = '';
+    try { native._branchFastForward(root.handle, checkpoint!.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused === '', `failed commit: a fork taken before it still fast-forwards (${refused || 'ok'})`);
+    assert(root.position === at, 'failed commit: the fast-forward kept the parent where it was');
+
+    // Duplicate handles are refused before any accept: no change either.
+    const token = (await root.produce()).token;
+    const again = await root.fork();
+    let duplicate = '';
+    try { await native._storeCommit([root.handle, root.handle], [token, token]); } catch (e) { duplicate = (e as Error).message; }
+    assert(duplicate.includes('StoreCommitWorker - duplicate handle'), `failed commit: duplicate handles are refused before any accept (${duplicate})`);
+    refused = '';
+    try { native._branchFastForward(root.handle, again.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused === '', `failed commit: a refused duplicate commit is no change (${refused || 'ok'})`);
+
+    await root.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ASYNC REJECTION — Worker failures must reject, branch state un-advanced
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3096,6 +3162,13 @@ async function main(): Promise<void> {
     if (SUITE === 'image') {
       await testMultimodal();
       await testImageDecodeFailure();
+    } else if (SUITE === 'branch') {
+      // The branch-state cases on their own, so they also run on a hybrid
+      // recurrent model (LLAMA_TEST_MODEL=Qwen3.5) apart from the rest of the text suite.
+      await testBranchStore();
+      await testFastForward();
+      await testCommitRollback();
+      await testFailedCommitIsNoChange();
     } else {
       // Create main context for reusable tests
       mainCtx = await addon.createContext({
@@ -3128,6 +3201,7 @@ async function main(): Promise<void> {
       await testFastForward();
       await testPplSanity();
       await testCommitRollback();
+      await testFailedCommitIsNoChange();
       await testAsyncRejection();
       await testEmptyInputEdgeCases();
       await testJsonSchemaToGrammar();
