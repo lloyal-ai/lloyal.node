@@ -1142,6 +1142,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_branchSetLogits", &SessionContext::_branchSetLogits),
     InstanceMethod("_branchPrune", &SessionContext::_branchPrune),
     InstanceMethod("_branchPruneSubtree", &SessionContext::_branchPruneSubtree),
+    InstanceMethod("_branchFastForward", &SessionContext::_branchFastForward),
     InstanceMethod("_branchParent", &SessionContext::_branchParent),
     InstanceMethod("_branchForkHead", &SessionContext::_branchForkHead),
     InstanceMethod("_branchChildren", &SessionContext::_branchChildren),
@@ -2533,17 +2534,12 @@ Napi::Value SessionContext::_branchSamplerChainReseed(const Napi::CallbackInfo& 
   auto handle = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
   auto seed = static_cast<uint32_t>(info[1].As<Napi::Number>().Uint32Value());
 
-  // Get branch state to access sampler chain
-  auto* state = _branchStore.get(handle);
-  if (!state) {
-    throw Napi::Error::New(env, "_branchSamplerChainReseed: invalid handle");
-  }
-
-  // Only reseed stochastic chains (has_dist=true)
-  // Reseeding greedy chains would corrupt them
-  if (state->sampler_chain != 0 && _branchStore.sampler_has_dist(state->sampler_chain)) {
-    llama_sampler* chain = _branchStore.get_sampler_chain(state->sampler_chain);
-    if (chain) lloyal::sampler::reseed_chain(chain, seed);
+  // The branch owns its sampler: reseeding through it records the change, so a
+  // fork taken before the reseed can no longer be fast-forwarded over it.
+  try {
+    lloyal::branch::reseed_sampler(handle, seed, _branchStore);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, std::string("_branchSamplerChainReseed: ") + e.what());
   }
 
   return env.Undefined();
@@ -3135,6 +3131,25 @@ Napi::Value SessionContext::_storeMergeLogits(const Napi::CallbackInfo& info) {
         alpha);
   } catch (const std::exception& e) {
     throw Napi::Error::New(env, std::string("_storeMergeLogits: ") + e.what());
+  }
+
+  return env.Undefined();
+}
+
+Napi::Value SessionContext::_branchFastForward(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
+    throw Napi::Error::New(env, "_branchFastForward requires (parent, child)");
+  }
+
+  auto parent = static_cast<lloyal::branch::BranchHandle>(info[0].As<Napi::Number>().Uint32Value());
+  auto child = static_cast<lloyal::branch::BranchHandle>(info[1].As<Napi::Number>().Uint32Value());
+  try {
+    lloyal::branch::fast_forward(parent, child, _branchStore);
+  } catch (const std::exception& e) {
+    throw Napi::Error::New(env, std::string("_branchFastForward: ") + e.what());
   }
 
   return env.Undefined();

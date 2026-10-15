@@ -1294,6 +1294,67 @@ async function testFormatEdgeCases(ctx: SessionContext): Promise<void> {
 // wrapper surface and real-world workflows.
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** The native fast-forward, which the installed SDK version does not declare yet. */
+type FastForwardSurface = { _branchFastForward(parent: number, child: number): void; _branchChildren(handle: number): number[] };
+
+async function testFastForward(): Promise<void> {
+  console.log('\n--- Fast-forward ---');
+
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 8
+  });
+  const native = ctx as unknown as FastForwardSurface;
+
+  try {
+    const prompt: number[] = await ctx.tokenize("The capital of France is");
+    const suffix: number[] = await ctx.tokenize(" Paris. The capital of Germany is", false);
+    const root = Branch.create(ctx, 0, { temperature: 0 });
+    await root.prefill(prompt);
+    const child = await root.fork();
+    const control = await root.fork();
+    await child.prefill(suffix);
+    await control.prefill(suffix);
+
+    const childLogits = Float32Array.from(child.getLogits());
+    const childPosition = child.position;
+
+    native._branchFastForward(root.handle, child.handle);
+
+    assert(root.position === childPosition, `fast-forward: the parent is at the child's position (${root.position})`);
+    const rootLogits = root.getLogits();
+    assert(rootLogits.length === childLogits.length && rootLogits.every((v, i) => v === childLogits[i]),
+      'fast-forward: the parent holds the child\'s logits exactly');
+    const children = native._branchChildren(root.handle);
+    assert(children.length === 1 && children[0] === control.handle,
+      'fast-forward: the child left the tree; its sibling stayed');
+
+    for (let step = 0; step < 4; step++) {
+      const [a, b] = [await root.produce(), await control.produce()];
+      assert(a.token === b.token, `fast-forward: step ${step}, the parent and the control agree (${a.token}, ${b.token})`);
+      if (a.isStop) break;
+      await new BranchStore(ctx).commit([[root, a.token], [control, b.token]]);
+    }
+
+    // A refusal is an ordinary JS error, and nothing moved.
+    const before = root.position;
+    let refused = '';
+    try { native._branchFastForward(control.handle, root.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused.includes('was not forked from this parent'), `fast-forward: refused as a JS error (${refused})`);
+    let stale = '';
+    try { native._branchFastForward(root.handle, child.handle); } catch (e) { stale = (e as Error).message; }
+    assert(stale.includes('invalid child handle'), `fast-forward: a stale child is refused by name (${stale})`);
+    assert(root.position === before, 'fast-forward: a refusal changes nothing');
+
+    await root.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
 async function testBranchStore(): Promise<void> {
   console.log('\n--- BranchStore ---');
 
@@ -3041,6 +3102,7 @@ async function main(): Promise<void> {
       await testDeterminism();
       await testBranchPrefillAndLogits();
       await testBranchStore();
+      await testFastForward();
       await testPplSanity();
       await testCommitRollback();
       await testAsyncRejection();

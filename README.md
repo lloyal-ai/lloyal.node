@@ -109,6 +109,7 @@ const token = ctx._branchSample(handle);
 ctx._branchAccept(handle, token);
 const logits = ctx._branchGetLogits(handle);      // Float32Array(vocabSize)
 const child = ctx._branchFork(handle);
+ctx._branchFastForward(handle, child);            // keep the child's work in the parent's place
 
 // Store primitives — what BranchStore wraps
 await ctx._storeCommit([handle1, handle2], [tok1, tok2]);   // N branches, 1 GPU call

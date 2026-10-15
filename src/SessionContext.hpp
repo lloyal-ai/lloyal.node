@@ -273,6 +273,7 @@ private:
   Napi::Value _branchSetLogits(const Napi::CallbackInfo& info);
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
   Napi::Value _branchPruneSubtree(const Napi::CallbackInfo& info);
+  Napi::Value _branchFastForward(const Napi::CallbackInfo& info);
   Napi::Value _branchParent(const Napi::CallbackInfo& info);
   Napi::Value _branchForkHead(const Napi::CallbackInfo& info);
   Napi::Value _branchChildren(const Napi::CallbackInfo& info);
