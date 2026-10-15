@@ -300,7 +300,8 @@ private:
   /**
    * Multimodal prefill: per-branch sep tokens + templated prompt (with
    * media markers) + typed media bytes. The walk itself is liblloyal's:
-   * `MtmdSource` yields TEXT/IMAGE/AUDIO/VIDEO segments in order and
+   * `MtmdSource` yields text and media segments in order (an image or an
+   * audio window is media; a video expands into image and text chunks) and
    * `BranchStore::decode_segments` places them (token rail / embedding rail).
    * Args: (handles: number[], sepTokens: number[][], prompts: string[],
    *        inputs: (Buffer | {kind: 'image'|'audio', bytes}

@@ -76,7 +76,7 @@ lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C+
 **What it owns:**
 
 - `createContext(options)` — load a GGUF, get a `SessionContext`. `mmprojPath` loads a multimodal projector beside it.
-- `_storePrefillMultimodal(...)` — image + text into a branch's KV, plus `supportsVision()` / `supportsAudio()`
+- `_storePrefillMultimodal(...)` — images, audio and video, with text, into a branch's KV, plus `supportsVision()` / `supportsAudio()`
 - `loadBinary(variant?)` and the [binary resolution order](#which-binary-loads)
 - The prebuilt binaries and the [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu)
 
@@ -154,7 +154,7 @@ A video is one input, `{ kind: "video", frames, timestampsMs, timestampIntervalM
 
 > **Types.** `createContext` is typed as `ContextOptions` from `@lloyal-labs/sdk`, so `mmprojPath` / `imageMinTokens` / `imageMaxTokens` and the `supportsVision()` / `_storePrefillMultimodal()` members only typecheck once an SDK carrying multimodal `ContextOptions` is installed. The runtime accepts them regardless.
 
-A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is rejected explicitly.
+A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is admitted only when the loaded projector has an audio encoder (`supportsAudio()`); otherwise an audio input is refused before anything is decoded.
 
 ## Which binary loads
 
