@@ -22,14 +22,26 @@ const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8
 };
 const peers = pkg.peerDependencies;
 
-/** Each peer: the stable a user has today, the prerelease this arc ships, the stable it becomes. */
+/**
+ * The binding implements one SDK major's native contract, so its peer range
+ * names that major and nothing else: an unbounded range let npm pair this
+ * binding with an SDK major it never implemented.
+ */
 const ADMITS: Record<string, string[]> = {
-  '@lloyal-labs/sdk': ['3.1.0', '4.0.0-alpha.3', '4.0.0'],
+  '@lloyal-labs/sdk': ['5.0.0-alpha.1', '5.0.0', '5.1.0', '5.9.9'],
+};
+const REFUSES: Record<string, string[]> = {
+  '@lloyal-labs/sdk': ['3.1.0', '4.0.0', '6.0.0-alpha.0', '6.0.0', '7.0.0'],
 };
 for (const [name, versions] of Object.entries(ADMITS)) {
   assert.ok(peers[name], `${name} is declared as a peer`);
   for (const v of versions) {
     assert.ok(satisfies(v, peers[name]), `${name} "${peers[name]}" admits ${v}`);
+  }
+}
+for (const [name, versions] of Object.entries(REFUSES)) {
+  for (const v of versions) {
+    assert.ok(!satisfies(v, peers[name]), `${name} "${peers[name]}" refuses ${v}`);
   }
 }
 // The trap, stated: a plain range excludes the prerelease this set is made of.

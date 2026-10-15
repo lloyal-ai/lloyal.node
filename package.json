@@ -54,7 +54,7 @@
     "node-addon-api": "^8.5.0"
   },
   "peerDependencies": {
-    "@lloyal-labs/sdk": ">=3.0.0 || >=4.0.0-0 <5.0.0"
+    "@lloyal-labs/sdk": ">=5.0.0-0 <6.0.0"
   },
   "devDependencies": {
     "@lloyal-labs/sdk": "^3.0.0",
