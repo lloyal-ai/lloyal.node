@@ -23,7 +23,7 @@ import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
 
 const SUITE = process.argv.find(arg => arg.startsWith('--suite='))?.split('=')[1] ?? 'all';
-if (!['all', 'text', 'image'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
+if (!['all', 'text', 'image', 'branch'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
 
 const MODEL_PATH: string = process.env.LLAMA_TEST_MODEL
   ? path.resolve(process.env.LLAMA_TEST_MODEL)
@@ -1294,6 +1294,90 @@ async function testFormatEdgeCases(ctx: SessionContext): Promise<void> {
 // wrapper surface and real-world workflows.
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** The native fast-forward, which the installed SDK version does not declare yet. */
+type FastForwardSurface = { _branchFastForward(parent: number, child: number): void; _branchChildren(handle: number): number[] };
+
+async function testFastForward(): Promise<void> {
+  console.log('\n--- Fast-forward ---');
+
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: CTX_SIZE,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 8
+  });
+  const native = ctx as unknown as FastForwardSurface;
+
+  try {
+    const prompt: number[] = await ctx.tokenize("The capital of France is");
+    const suffix: number[] = await ctx.tokenize(" Paris. The capital of Germany is", false);
+    const root = Branch.create(ctx, 0, { temperature: 0 });
+    await root.prefill(prompt);
+    const child = await root.fork();
+    const control = await root.fork();
+    await child.prefill(suffix);
+    await control.prefill(suffix);
+
+    const childLogits = Float32Array.from(child.getLogits());
+    const childPosition = child.position;
+
+    native._branchFastForward(root.handle, child.handle);
+
+    assert(root.position === childPosition, `fast-forward: the parent is at the child's position (${root.position})`);
+    const rootLogits = root.getLogits();
+    assert(rootLogits.length === childLogits.length && rootLogits.every((v, i) => v === childLogits[i]),
+      'fast-forward: the parent holds the child\'s logits exactly');
+    const children = native._branchChildren(root.handle);
+    assert(children.length === 1 && children[0] === control.handle,
+      'fast-forward: the child left the tree; its sibling stayed');
+
+    for (let step = 0; step < 4; step++) {
+      const [a, b] = [await root.produce(), await control.produce()];
+      assert(a.token === b.token, `fast-forward: step ${step}, the parent and the control agree (${a.token}, ${b.token})`);
+      if (a.isStop) break;
+      await new BranchStore(ctx).commit([[root, a.token], [control, b.token]]);
+    }
+
+    // A refusal is an ordinary JS error, and nothing moved.
+    const before = root.position;
+    let refused = '';
+    try { native._branchFastForward(control.handle, root.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused.includes('was not forked from this parent'), `fast-forward: refused as a JS error (${refused})`);
+    let stale = '';
+    try { native._branchFastForward(root.handle, child.handle); } catch (e) { stale = (e as Error).message; }
+    assert(stale.includes('invalid child handle'), `fast-forward: a stale child is refused by name (${stale})`);
+    assert(root.position === before, 'fast-forward: a refusal changes nothing');
+
+    // Reseeding a parent that samples is a change: a fork taken before the reseed cannot be fast-forwarded over it.
+    const sampled = Branch.create(ctx, 0, { temperature: 0.8 });
+    await sampled.prefill(prompt);
+    const early = await sampled.fork();
+    await early.prefill(suffix);
+    sampled.reseedSampler(4242);
+    const [sampledAt, earlyAt] = [sampled.position, early.position];
+    const sampledLogits = Float32Array.from(sampled.getLogits());
+    let reseeded = '';
+    try { native._branchFastForward(sampled.handle, early.handle); } catch (e) { reseeded = (e as Error).message; }
+    assert(reseeded.includes('the parent has changed since the fork'), `fast-forward: refused after a reseed of the parent (${reseeded})`);
+    assert(sampled.position === sampledAt && early.position === earlyAt, 'fast-forward: the reseed refusal moved neither branch');
+    assert(sampled.getLogits().every((v, i) => v === sampledLogits[i]), 'fast-forward: the reseed refusal left the parent\'s logits');
+    const sampledChildren = native._branchChildren(sampled.handle);
+    assert(sampledChildren.length === 1 && sampledChildren[0] === early.handle, 'fast-forward: the reseed refusal left the tree');
+    await sampled.pruneSubtree();
+
+    // A greedy chain has no PRNG: reseeding it changes nothing, so nothing refuses.
+    const greedyFork = await root.fork();
+    root.reseedSampler(4242);
+    native._branchFastForward(root.handle, greedyFork.handle);
+    assert(true, 'fast-forward: a reseed of a greedy parent does not refuse');
+
+    await root.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
 async function testBranchStore(): Promise<void> {
   console.log('\n--- BranchStore ---');
 
@@ -1673,6 +1757,72 @@ async function testCommitRollback(): Promise<void> {
     console.log(`  ${successfulRounds} successful rounds before KV exhaustion`);
     assert(failedRound,
       `rollback: decode failure triggered (nCtx=32, 8 branches, ${successfulRounds} rounds)`);
+
+    await root.pruneSubtree();
+  } finally {
+    ctx.dispose();
+  }
+}
+
+// A commit the decode refused with every branch intact (rc 1) restored the
+// branch, so it is no change: a fork taken before it still fast-forwards. The
+// same holds for a commit refused before any accept.
+type CommitSurface = FastForwardSurface & { _storeCommit(handles: number[], tokens: number[]): Promise<void> };
+
+async function testFailedCommitIsNoChange(): Promise<void> {
+  console.log('\n--- A failed commit is no change ---');
+
+  const ctx: SessionContext = await addon.createContext({
+    modelPath: MODEL_PATH,
+    nCtx: 32,
+    nBatch: 512,
+    nThreads: 4,
+    nSeqMax: 8
+  });
+  const native = ctx as unknown as CommitSurface;
+
+  try {
+    const root = Branch.create(ctx, 0, { temperature: 1.0 });
+    await root.prefill(await ctx.tokenize("Hi"));
+    const siblings: InstanceType<typeof Branch>[] = [];
+    for (let i = 1; i < 7; i++) {
+      const b = await root.fork();
+      b.reseedSampler(1000 + i); // divergent tokens, so the pool fills
+      siblings.push(b);
+    }
+    const store = new BranchStore(ctx);
+
+    // Each round samples, then forks a checkpoint (sampling advances the PRNG, a
+    // change of its own), then commits; the round that finds no room keeps it.
+    let failure: (Error & { rc?: number }) | null = null;
+    let checkpoint: InstanceType<typeof Branch> | null = null;
+    for (let round = 0; round < 50 && failure === null; round++) {
+      const produced = await Promise.all([root, ...siblings].map(async (b) => [b, (await b.produce()).token] as [InstanceType<typeof Branch>, number]));
+      checkpoint = await root.fork();
+      try {
+        await store.commit(produced);
+        await checkpoint.prune();
+      } catch (e) {
+        failure = e as Error & { rc?: number };
+      }
+    }
+    assert(failure !== null && failure.rc === 1, `failed commit: the pool filled and the batch was refused intact (rc ${failure?.rc})`);
+
+    const at = root.position;
+    let refused = '';
+    try { native._branchFastForward(root.handle, checkpoint!.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused === '', `failed commit: a fork taken before it still fast-forwards (${refused || 'ok'})`);
+    assert(root.position === at, 'failed commit: the fast-forward kept the parent where it was');
+
+    // Duplicate handles are refused before any accept: no change either.
+    const token = (await root.produce()).token;
+    const again = await root.fork();
+    let duplicate = '';
+    try { await native._storeCommit([root.handle, root.handle], [token, token]); } catch (e) { duplicate = (e as Error).message; }
+    assert(duplicate.includes('StoreCommitWorker - duplicate handle'), `failed commit: duplicate handles are refused before any accept (${duplicate})`);
+    refused = '';
+    try { native._branchFastForward(root.handle, again.handle); } catch (e) { refused = (e as Error).message; }
+    assert(refused === '', `failed commit: a refused duplicate commit is no change (${refused || 'ok'})`);
 
     await root.pruneSubtree();
   } finally {
@@ -2678,8 +2828,8 @@ async function testMultimodal(): Promise<void> {
     assert(/marker count/i.test(mismatchErr),
       `marker/bitmap mismatch reported per entry: "${mismatchErr}"`);
 
-    // Assertion 8 — frames (the video-carrying contract): several marker'd
-    // frames + timestamp text in ONE prefill.
+    // Assertion 8 — several still images and text in ONE prefill. Still images
+    // never fuse, so this is not video: a video is one typed input (8b).
     const frames = Branch.create(ctx, 0, { temperature: 0 });
     const framesPrompt =
       `Video frames. t=0s: ${MEDIA_MARKER} t=1s: ${MEDIA_MARKER} t=2s: ${MEDIA_MARKER} ` +
@@ -2687,7 +2837,10 @@ async function testMultimodal(): Promise<void> {
     const fRes = await mm._storePrefillMultimodal(
       [frames.handle], [[]], [framesPrompt], [[IMG, IMG, IMG]]);
     assert(fRes[0].tokensDecoded > 0 && fRes[0].positionAdvance > 0,
-      `frames prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+      `three still images prefill decoded ${fRes[0].tokensDecoded} tokens (${fRes[0].positionAdvance} positions)`);
+    const stillCells = await mm._cellsMultimodal([], `${MEDIA_MARKER}`, [IMG]);
+    const threeCells = await mm._cellsMultimodal([], `${MEDIA_MARKER}${MEDIA_MARKER}${MEDIA_MARKER}`, [IMG, IMG, IMG]);
+    assert(threeCells === 3 * stillCells, `still images never fuse: ${threeCells} == 3 × ${stillCells}`);
     const fgen: number[] = [];
     for (let i = 0; i < 8; i++) {
       const { token, isStop } = await frames.produce();
@@ -2695,12 +2848,94 @@ async function testMultimodal(): Promise<void> {
       await frames.commit(token);
       fgen.push(token);
     }
-    assert(fgen.length > 0, 'answer over multi-frame prefill');
+    assert(fgen.length > 0, 'answer over several still images');
     if (vl.strict) {
       const ftext: string = await ctx.detokenize(fgen);
-      assert(/red/i.test(ftext), `temporal answer grounded: "${ftext.trim()}"`);
+      assert(/red/i.test(ftext), `answer grounded across the photos: "${ftext.trim()}"`);
     }
     await frames.prune();
+
+    // Assertion 8b — a video is ONE typed input: its sampled frames, their
+    // times and the timestamp interval. liblloyal lays them out as llama.cpp's
+    // video helper does, so Qwen-VL fuses adjacent frames in pairs and the cost
+    // matches the helper's own tokenization of the same clip.
+    {
+      const videoDir = path.join(__dirname, '../liblloyal/tests/fixtures/video');
+      const reference = JSON.parse(fs.readFileSync(path.join(videoDir, 'video-reference.json'), 'utf8')) as {
+        prompt: string; n_tokens: number;
+      };
+      const clipFrames = Array.from({ length: 16 }, (_, i) =>
+        fs.readFileSync(path.join(videoDir, `frame-${String(i).padStart(2, '0')}.png`)));
+      const video = (notes?: Array<{ atMs: number; text: string }>) => ({
+        kind: 'video', frames: clipFrames, timestampsMs: clipFrames.map((_, i) => i * 250),
+        timestampIntervalMs: 5000, ...(notes ? { notes } : {}),
+      }) as unknown as Buffer;
+
+      const videoCells = await mm._cellsMultimodal([], reference.prompt, [video()]);
+      assert(videoCells === reference.n_tokens,
+        `video costs what llama.cpp's video helper tokenizes (${videoCells} == ${reference.n_tokens})`);
+      const asStills = await mm._cellsMultimodal([], MEDIA_MARKER.repeat(16), clipFrames);
+      assert(videoCells < asStills, `fused video is cheaper than its frames as stills (${videoCells} < ${asStills})`);
+
+      const { prompt: videoPrompt } = await ctx.formatChat(JSON.stringify([{
+        role: 'user',
+        content: [
+          { type: 'media_marker', text: MEDIA_MARKER },
+          { type: 'text', text: 'Which direction does the red square move? Answer in a few words.' },
+        ],
+      }]), { enableThinking: false } as never);
+      const clip = Branch.create(ctx, 0, { temperature: 0 });
+      const quoted = await mm._cellsMultimodal([], videoPrompt, [video()]);
+      const [vRes] = await mm._storePrefillMultimodal([clip.handle], [[]], [videoPrompt], [[video()]]);
+      assert(vRes.error === undefined && vRes.tokensDecoded === quoted,
+        `video prefill lands its quote (${vRes.tokensDecoded} == ${quoted})`);
+      assert(vRes.positionAdvance < vRes.tokensDecoded, 'M-RoPE video advances fewer positions than cells');
+      const vgen: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        const { token, isStop } = await clip.produce();
+        if (isStop) break;
+        await clip.commit(token);
+        vgen.push(token);
+      }
+      const vtext: string = await ctx.detokenize(vgen);
+      if (vl.strict) assert(/right/i.test(vtext), `video answer grounded on motion: "${vtext.trim()}"`);
+      await clip.prune();
+
+      // The frames are owned natively before the call returns: every frame a byte-offset
+      // view into one backing store, zeroed while the measurement and the prefill run.
+      {
+        const backing = new Uint8Array(clipFrames.reduce((n, f) => n + f.length + 8, 0));
+        let at = 8;
+        const views = clipFrames.map((f) => { const v = backing.subarray(at, at + f.length); v.set(f); at += f.length + 8; return v; });
+        const borrowed = { kind: 'video', frames: views, timestampsMs: clipFrames.map((_, i) => i * 250), timestampIntervalMs: 5000 } as unknown as Buffer;
+        const owned = Branch.create(ctx, 0, { temperature: 0 });
+        try {
+          const measuring = mm._cellsMultimodal([], videoPrompt, [borrowed]);
+          const prefilling = mm._storePrefillMultimodal([owned.handle], [[]], [videoPrompt], [[borrowed]]);
+          backing.fill(0);
+          const [measured, [landed]] = await Promise.all([measuring, prefilling]);
+          assert(measured === quoted && landed.error === undefined && landed.tokensDecoded === quoted,
+            `video frames are owned through worker completion (${measured}, ${landed.tokensDecoded} == ${quoted})`);
+        } finally { await owned.prune(); }
+      }
+
+      const noted = await mm._cellsMultimodal([], reference.prompt,
+        [video([{ atMs: 0, text: ' "one, two, three"' }])]);
+      assert(noted > videoCells, `a transcript note adds its text tokens (${noted} > ${videoCells})`);
+
+      const refused = Branch.create(ctx, 0, { temperature: 0 });
+      try {
+        const mixed = { kind: 'video', frames: [clipFrames[0], IMG], timestampsMs: [0, 250] } as unknown as Buffer;
+        const [r] = await mm._storePrefillMultimodal([refused.handle], [[]], [MEDIA_MARKER], [[mixed]]);
+        assert(/share one size/.test(r.error ?? '') && r.tokensDecoded === 0,
+          `mixed frame sizes refused per entry before decode: "${r.error}"`);
+      } finally { await refused.prune(); }
+      let shapeErr = '';
+      try {
+        await mm._cellsMultimodal([], MEDIA_MARKER, [{ kind: 'video', frames: clipFrames } as unknown as Buffer]);
+      } catch (e) { shapeErr = (e as Error).message; }
+      assert(/timestampsMs/.test(shapeErr), `a video without times is a type error: "${shapeErr}"`);
+    }
 
     // Assertion 9 — batched fan-out over the shared image, through the PUBLIC
     // BranchStore surface. The spine-share above proves forks are free and
@@ -2927,6 +3162,13 @@ async function main(): Promise<void> {
     if (SUITE === 'image') {
       await testMultimodal();
       await testImageDecodeFailure();
+    } else if (SUITE === 'branch') {
+      // The branch-state cases on their own, so they also run on a hybrid
+      // recurrent model (LLAMA_TEST_MODEL=Qwen3.5) apart from the rest of the text suite.
+      await testBranchStore();
+      await testFastForward();
+      await testCommitRollback();
+      await testFailedCommitIsNoChange();
     } else {
       // Create main context for reusable tests
       mainCtx = await addon.createContext({
@@ -2956,8 +3198,10 @@ async function main(): Promise<void> {
       await testDeterminism();
       await testBranchPrefillAndLogits();
       await testBranchStore();
+      await testFastForward();
       await testPplSanity();
       await testCommitRollback();
+      await testFailedCommitIsNoChange();
       await testAsyncRejection();
       await testEmptyInputEdgeCases();
       await testJsonSchemaToGrammar();

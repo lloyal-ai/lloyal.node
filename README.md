@@ -76,7 +76,7 @@ lloyal.node binds [liblloyal](https://github.com/lloyal-ai/liblloyal) — the C+
 **What it owns:**
 
 - `createContext(options)` — load a GGUF, get a `SessionContext`. `mmprojPath` loads a multimodal projector beside it.
-- `_storePrefillMultimodal(...)` — image + text into a branch's KV, plus `supportsVision()` / `supportsAudio()`
+- `_storePrefillMultimodal(...)` — images, audio and video, with text, into a branch's KV, plus `supportsVision()` / `supportsAudio()`
 - `loadBinary(variant?)` and the [binary resolution order](#which-binary-loads)
 - The prebuilt binaries and the [backend pack](#the-backend-pack--frontier-gpus-and-every-cpu)
 
@@ -109,6 +109,7 @@ const token = ctx._branchSample(handle);
 ctx._branchAccept(handle, token);
 const logits = ctx._branchGetLogits(handle);      // Float32Array(vocabSize)
 const child = ctx._branchFork(handle);
+ctx._branchFastForward(handle, child);            // keep the child's work in the parent's place
 
 // Store primitives — what BranchStore wraps
 await ctx._storeCommit([handle1, handle2], [tok1, tok2]);   // N branches, 1 GPU call
@@ -147,11 +148,13 @@ const [{ tokensDecoded, positionAdvance }] =
   await ctx._storePrefillMultimodal([handle], [[]], [prompt], [[bytes]]);
 ```
 
-`positionAdvance < tokensDecoded` under M-RoPE — an image costs more KV cells than it advances position, and the kernel tracks the gap so pressure accounting stays exact. Several markers with several images in one prefill also works; video frames with timestamps are exactly that.
+`positionAdvance < tokensDecoded` under M-RoPE — an image costs more KV cells than it advances position, and the kernel tracks the gap so pressure accounting stays exact. Several markers with several images in one prefill also work; still images never fuse.
+
+A video is one input, `{ kind: "video", frames, timestampsMs, timestampIntervalMs?, notes? }`: the sampled frames of one clip (each an encoded image, all one size) with the time each was sampled, behind one marker. It is laid out as llama.cpp's own video helper lays out a clip, so Qwen-VL projectors fuse adjacent frames in pairs, and it costs what the helper's tokenization of the same clip costs. `notes` (`{ atMs, text }`, such as a transcript) join the timestamp text without separating frames. The addon does not decode video files; pass the frames.
 
 > **Types.** `createContext` is typed as `ContextOptions` from `@lloyal-labs/sdk`, so `mmprojPath` / `imageMinTokens` / `imageMaxTokens` and the `supportsVision()` / `_storePrefillMultimodal()` members only typecheck once an SDK carrying multimodal `ContextOptions` is installed. The runtime accepts them regardless.
 
-A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is rejected explicitly.
+A configured `mmprojPath` that fails to load throws at `createContext` — never a silent fall back to text-only. Audio is admitted only when the loaded projector has an audio encoder (`supportsAudio()`); otherwise an audio input is refused before anything is decoded.
 
 ## Which binary loads
 

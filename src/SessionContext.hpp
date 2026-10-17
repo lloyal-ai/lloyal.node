@@ -273,6 +273,7 @@ private:
   Napi::Value _branchSetLogits(const Napi::CallbackInfo& info);
   Napi::Value _branchPrune(const Napi::CallbackInfo& info);
   Napi::Value _branchPruneSubtree(const Napi::CallbackInfo& info);
+  Napi::Value _branchFastForward(const Napi::CallbackInfo& info);
   Napi::Value _branchParent(const Napi::CallbackInfo& info);
   Napi::Value _branchForkHead(const Napi::CallbackInfo& info);
   Napi::Value _branchChildren(const Napi::CallbackInfo& info);
@@ -299,10 +300,13 @@ private:
   /**
    * Multimodal prefill: per-branch sep tokens + templated prompt (with
    * media markers) + typed media bytes. The walk itself is liblloyal's:
-   * `MtmdSource` yields TEXT/IMAGE/AUDIO segments in order and
+   * `MtmdSource` yields text and media segments in order (an image or an
+   * audio window is media; a video expands into image and text chunks) and
    * `BranchStore::decode_segments` places them (token rail / embedding rail).
    * Args: (handles: number[], sepTokens: number[][], prompts: string[],
-   *        inputs: (Buffer | {kind, bytes})[][], audioLimits?: {maxBytes, maxSamples}[])
+   *        inputs: (Buffer | {kind: 'image'|'audio', bytes}
+   *                 | {kind: 'video', frames, timestampsMs, timestampIntervalMs?, notes?})[][],
+   *        audioLimits?: {maxBytes, maxSamples}[])
    * Returns: Promise<{tokensDecoded, positionAdvance, error?, rc?, partial?}[]>
    *   — per-entry outcomes; a failed entry carries `error`, and when the
    *   failure came from llama_decode, its `rc` and `partial` (see DecodeError).
