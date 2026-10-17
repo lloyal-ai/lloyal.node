@@ -395,10 +395,19 @@ async function testBranchPrefill(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function testWarmMultiTurnRecall(): Promise<void> {
-  console.log('\n--- Warm Multi-Turn Recall ---');
+  // The default model, and the hybrid recurrent model when its file is present: a warm
+  // continuation across turns is where a recurrent memory's bookkeeping would show.
+  const models: string[] = [MODEL_PATH];
+  const gdn = path.join(__dirname, '../models/Qwen3.5-4B-Q4_K_M.gguf');
+  if (path.resolve(gdn) !== path.resolve(MODEL_PATH) && fs.existsSync(gdn)) models.push(gdn);
+  for (const modelPath of models) await warmMultiTurnRecallOn(modelPath);
+}
+
+async function warmMultiTurnRecallOn(modelPath: string): Promise<void> {
+  console.log(`\n--- Warm Multi-Turn Recall (${path.basename(modelPath)}) ---`);
 
   const ctx: SessionContext = await addon.createContext({
-    modelPath: MODEL_PATH,
+    modelPath,
     nCtx: CTX_SIZE,
     nBatch: 512,
     nThreads: 4
@@ -406,8 +415,14 @@ async function testWarmMultiTurnRecall(): Promise<void> {
 
   try {
     const sep: number[] = ctx.getTurnSeparator();
+    // Thinking stays off, as in liblloyal's warm-recall case: a thinking model left to deliberate at length can
+    // fill any context before it answers, and this case is about recall across turns, not deliberation.
+    const fmt = { enableThinking: false };
+    // An answer to a one-line question is short; a generation that runs on past this is a loop, named as such
+    // rather than left to run the cache full and fail on the next commit.
+    const MAX_GENERATED = 512;
 
-    // Helper: generate until EOG (matches C++ test pattern)
+    // Helper: generate until EOG, bounded.
     async function generate(branch: InstanceType<typeof Branch>): Promise<string> {
       const gen: number[] = [];
       for (;;) {
@@ -415,6 +430,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
         if (isStop) break;
         await branch.commit(token);
         gen.push(token);
+        assert(gen.length < MAX_GENERATED, `generation stopped within ${MAX_GENERATED} tokens`);
       }
       return ctx.detokenize(gen);
     }
@@ -424,7 +440,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
       const { prompt } = await ctx.formatChat(JSON.stringify([
         { role: 'system', content: '' },
         { role: 'user', content: userContent }
-      ]), {});
+      ]), fmt);
       const delta: number[] = await ctx.tokenize(prompt, false);
       await branch.prefill([...sep, ...delta]);
       return generate(branch);
@@ -432,7 +448,7 @@ async function testWarmMultiTurnRecall(): Promise<void> {
 
     // Turn 1 (COLD): introduce name
     const msgs1: Array<{ role: string; content: string }> = [{ role: 'user', content: 'Hi, my name is Lloyal' }];
-    const { prompt, format, parser } = await ctx.formatChat(JSON.stringify(msgs1), {});
+    const { prompt, format, parser } = await ctx.formatChat(JSON.stringify(msgs1), fmt);
     const promptToks: number[] = await ctx.tokenize(prompt);
     const branch = Branch.create(ctx, 0, { temperature: 0 });
     await branch.prefill(promptToks);
@@ -3169,6 +3185,7 @@ async function main(): Promise<void> {
       await testFastForward();
       await testCommitRollback();
       await testFailedCommitIsNoChange();
+      await testWarmMultiTurnRecall();
     } else {
       // Create main context for reusable tests
       mainCtx = await addon.createContext({
