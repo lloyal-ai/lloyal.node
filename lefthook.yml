@@ -1,0 +1,15 @@
+# Every commit is judged by hickey, against the principles hickey ships, before it exists; the verdict rides in the
+# commit's trailers. --no-verify skips the judge; the trailer hook still runs and records the override.
+output: [execution_out]
+pre-commit:
+  commands:
+    hickey:
+      run: npx hickey staged
+prepare-commit-msg:
+  commands:
+    hickey:
+      run: npx hickey trailer {1} {2}
+post-commit:
+  commands:
+    hickey:
+      run: npx hickey committed
