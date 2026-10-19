@@ -6,7 +6,7 @@ Thank you for your interest in contributing to lloyal.node! This guide covers de
 
 ### Prerequisites
 
-- Node.js 22 or 24 (LTS)
+- Node.js 24 (LTS)
 - C++20 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.18+
 - Git
