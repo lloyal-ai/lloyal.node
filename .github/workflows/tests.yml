@@ -106,14 +106,16 @@ jobs:
         run: |
           $env:PATH = "${{ github.workspace }}\build\Release;$env:PATH"
           npm run test:integration -- --suite=text
-        timeout-minutes: 10
+        # The text suite includes the warm recall case on Qwen3.5-4B, which on a CPU runner takes minutes on its own.
+        timeout-minutes: 30
         env:
           LLOYAL_LOCAL: '1'
 
       - name: Run integration tests (Unix)
         if: runner.os != 'Windows'
         run: npm run test:integration -- --suite=text
-        timeout-minutes: 10
+        # The text suite includes the warm recall case on Qwen3.5-4B, which on a CPU runner takes minutes on its own.
+        timeout-minutes: 30
         env:
           LLOYAL_LOCAL: '1'
 
