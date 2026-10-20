@@ -6,10 +6,11 @@ Thank you for your interest in contributing to lloyal.node! This guide covers de
 
 ### Prerequisites
 
-- Node.js 22 or 24 (LTS)
+- Node.js 24 (LTS)
 - C++20 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.18+
 - Git
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), signed in: every commit is judged by [hickey](https://github.com/lloyal-ai/hickey), the acceptance gate, before it exists, and the repository requires the judge. `npm install` installs the hooks.
 
 ### Clone with Submodules
 
@@ -214,10 +215,10 @@ This triggers the `.github/workflows/release.yml` workflow which:
 ### Manual Publishing (if needed)
 
 ```bash
-# Bump version
+# Bump version: the commit it makes is judged by hickey like any other
 npm version patch  # or minor/major
 
-# Publish to npm
+# Publish to npm: `prepare` runs `lefthook install` first, which only writes the git hooks
 npm publish --access public
 ```
 
@@ -248,9 +249,9 @@ lloyal.node/
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feat/amazing-feature`)
 3. Make your changes and test thoroughly
-4. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Commit your changes (`git commit -m 'feat: add amazing feature'`). hickey judges the change against the principles before the commit exists and writes its verdict into the commit as `Gate:` trailers; a refusal names what to change. `git commit --no-verify` skips the judge and is recorded on the commit as the override it is.
 5. Push to your fork (`git push origin feat/amazing-feature`)
-6. Open a Pull Request
+6. Open a Pull Request. The `gate` workflow reads every commit's trailer and refuses the pull request when any commit carries none.
 
 ## Questions?
 
