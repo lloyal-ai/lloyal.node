@@ -1,70 +1,62 @@
 import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { loadLocalAddon } from './local-addon';
-import type { AudioLimits, MultimodalInput, SessionContext } from '@lloyal-labs/sdk';
+import { clip, embeddingContext, fixture, MARKER, mmprojPath, modelPath, withContext } from './embedding-fixtures';
+import type { EmbeddingContext } from './embedding-fixtures';
+import type { AudioLimits, MultimodalInput } from '@lloyal-labs/sdk';
 
-/** The addon's embedding surface, ahead of the SDK release that declares it. */
-type EmbeddingContext = SessionContext & {
-  encodeMultimodal(prompt: string, inputs: MultimodalInput[], limits?: AudioLimits): Promise<void>;
-};
+/** One part of an input, in order: text as written, or a fixture of one kind of media. */
+type Part = { text: string } | { image: string } | { video: string } | { audio: string };
 
 interface ReferenceEntry {
   name: string;
-  kind: 'text' | 'image' | 'video' | 'text+image';
+  kind: 'text' | 'image' | 'video' | 'audio' | 'mixed';
   text?: string;
   image?: string;
-  text_before?: string;
-  text_after?: string;
+  video?: string;
+  audio?: string;
+  parts?: Part[];
   finds?: string;
+  image_tokens?: number;
   vector: number[];
 }
 
-const MARKER = '<__media__>';
-const fixtures = resolve(__dirname, '../liblloyal/tests/fixtures');
-const models = resolve(__dirname, '../models/embeddinggemma-2');
-const fixture = (name: string) => readFileSync(resolve(fixtures, name));
 const reference: { dimension: number; entries: ReferenceEntry[] } =
   JSON.parse(fixture('embedding/embeddinggemma2-reference.json').toString('utf8'));
-const queries = reference.entries.filter(entry => entry.kind === 'text');
-const media = reference.entries.filter(entry => entry.kind !== 'text');
-const searchable = media.filter(entry => entry.kind !== 'text+image');
+const named = (name: string) => reference.entries.find(entry => entry.name === name)!;
+const queries = reference.entries.filter(entry => entry.finds !== undefined);
 
-const image = (name: string): MultimodalInput => ({ kind: 'image', bytes: fixture(name) });
-/** The frames llama.cpp's video helper samples from the clip, at their sample times. */
-const clip: MultimodalInput = {
-  kind: 'video',
-  frames: Array.from({ length: 16 }, (_, i) => fixture(`video/frame-${String(i).padStart(2, '0')}.png`)),
-  timestampsMs: Array.from({ length: 16 }, (_, i) => i * 250),
-  timestampIntervalMs: 5000,
+/** Room for every committed recording; the cases below that refuse a recording set their own limits. */
+const ROOM: AudioLimits = { maxBytes: 64 << 20, maxSamples: 16_000 * 600 };
+
+/** Each kind of media part, and the input it becomes. */
+const media: Record<string, (name: string) => MultimodalInput> = {
+  image: name => ({ kind: 'image', bytes: fixture(name) }),
+  audio: name => ({ kind: 'audio', bytes: fixture(name) }),
+  video: name => {
+    assert.equal(name, 'video/red-square-moves.mp4', 'a video part is the committed clip');
+    return clip();
+  },
 };
 
-/** Each media entry of the reference as a prompt and its inputs. */
-const inputs: Record<Exclude<ReferenceEntry['kind'], 'text'>, (entry: ReferenceEntry) => [string, MultimodalInput[]]> = {
-  image: entry => [MARKER, [image(entry.image!)]],
-  'text+image': entry => [entry.text_before! + MARKER + entry.text_after!, [image(entry.image!)]],
-  video: () => [MARKER, [clip]],
-};
+/** Every lone image, clip and recording at the projector's own budget: what a query searches. */
+const searchable = reference.entries.filter(entry => entry.kind in media && entry.image_tokens === undefined);
 
-let ctx: EmbeddingContext;
-const contexts: SessionContext[] = [];
+/** The parts an entry names, in order: a mixed entry's own, or its one image, clip or recording. */
+const partsOf = (entry: ReferenceEntry): Part[] =>
+  entry.parts ?? [{ [entry.kind]: entry[entry.kind as 'image' | 'video' | 'audio'] } as Part];
 
-/** An EmbeddingGemma 2 context whose one dispatch holds `nBatch` entries. */
-async function embeddingContext(nBatch: number): Promise<EmbeddingContext> {
-  const context = await loadLocalAddon().createContext({
-    modelPath: process.env.LLAMA_EMBED_MM_MODEL ?? resolve(models, 'embeddinggemma-2-Q8_0.gguf'),
-    mmprojPath: process.env.LLAMA_EMBED_MM_MMPROJ ?? resolve(models, 'mmproj-BF16.gguf'),
-    nCtx: nBatch, nBatch, nThreads: 4,
-    embeddings: true, poolingType: 1,
-  }) as EmbeddingContext;
-  contexts.push(context);
-  return context;
+/** Ordered parts as the addon takes them: a prompt with a marker per media part, and those inputs in order. */
+function inputOf(parts: Part[]): [string, MultimodalInput[]] {
+  const prompt = parts.map(part => ('text' in part ? part.text : MARKER)).join('');
+  const inputs = parts.flatMap(part => Object.entries(part).filter(([kind]) => kind !== 'text').map(([kind, name]) => media[kind](name)));
+  return [prompt, inputs];
 }
 
-// The reference was read at this size, so every input fits one dispatch.
-before(async () => { ctx = await embeddingContext(8192); });
-after(() => contexts.forEach(context => context.dispose()));
+// The one context shared across cases. The reference was read at this size, so every input fits one dispatch.
+let ctx: EmbeddingContext;
+before(async () => { ctx = await embeddingContext(); });
+after(async () => { await ctx?.dispose(); });
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) =>
   Array.from(a).reduce((sum, value, i) => sum + value * b[i], 0);
@@ -74,14 +66,18 @@ const cosine = (a: ArrayLike<number>, b: ArrayLike<number>) =>
 async function embed(context: EmbeddingContext, entry: ReferenceEntry): Promise<Float32Array> {
   await context.kvCacheClear();
   if (entry.kind === 'text') await context.encode(await context.tokenize(entry.text!, true));
-  else await context.encodeMultimodal(...inputs[entry.kind](entry));
+  else await context.encodeMultimodal(...inputOf(partsOf(entry)), ROOM);
   return context.getEmbeddings(true);
 }
 
-/** Each entry embedded once on the full-size context: on a CPU runner the largest take minutes. */
+/** Each entry embedded once, on its own image budget's context: on a CPU runner the largest take minutes. */
 const embedded = new Map<string, Promise<Float32Array>>();
 const vectorOf = (entry: ReferenceEntry) => {
-  if (!embedded.has(entry.name)) embedded.set(entry.name, embed(ctx, entry));
+  if (!embedded.has(entry.name)) {
+    embedded.set(entry.name, entry.image_tokens === undefined
+      ? embed(ctx, entry)
+      : withContext(embeddingContext(8192, entry.image_tokens), context => embed(context, entry)));
+  }
   return embedded.get(entry.name)!;
 };
 
@@ -89,6 +85,19 @@ function assertMatches(vector: Float32Array, entry: ReferenceEntry): void {
   assert.equal(vector.length, reference.dimension, entry.name);
   const similarity = cosine(vector, entry.vector);
   assert.ok(similarity >= 0.999, `${entry.name}: ${similarity}`);
+}
+
+/** Entries' vectors one after another: an embed clears, encodes and reads one context, so two must not interleave. */
+async function vectorsOf(entries: ReferenceEntry[]): Promise<Float32Array[]> {
+  const vectors: Float32Array[] = [];
+  for (const entry of entries) vectors.push(await vectorOf(entry));
+  return vectors;
+}
+
+/** The searchable input a vector is closest to. */
+async function nearest(vector: Float32Array): Promise<string> {
+  const scores = (await vectorsOf(searchable)).map(candidate => dot(vector, candidate));
+  return searchable[scores.indexOf(Math.max(...scores))].name;
 }
 
 test('the projector carries a vision and an audio encoder', () => {
@@ -100,31 +109,83 @@ test('the vector is as wide as the model outputs', () => {
   assert.equal(ctx.getEmbeddingDimension(), reference.dimension);
 });
 
-test('a query embeds where llama.cpp puts it', async () => {
-  for (const query of queries) assertMatches(await vectorOf(query), query);
+test('every input the reference names embeds where llama.cpp puts it: text in every task framing and language, images at every budget, the clip, the recording and mixed inputs', async () => {
+  for (const entry of reference.entries) assertMatches(await vectorOf(entry), entry);
 });
 
-test('an image, text around an image, and a clip embed where llama.cpp puts them', async () => {
-  for (const entry of media) assertMatches(await vectorOf(entry), entry);
+test('each query finds its own image, clip or recording, in any language', async () => {
+  for (const query of queries) assert.equal(await nearest(await vectorOf(query)), query.finds, query.name);
 });
 
-test('each query finds its own image or clip', async () => {
-  for (const query of queries) {
-    const vector = await vectorOf(query);
-    const scored = await Promise.all(searchable.map(async entry => ({ entry, score: dot(vector, await vectorOf(entry)) })));
-    const best = scored.reduce((a, b) => (b.score > a.score ? b : a));
-    assert.equal(best.entry.name, query.finds, query.name);
-  }
+test('a window from the middle of the clip, at its own times, is what the clip\'s query finds over every still', async () => {
+  await ctx.kvCacheClear();
+  await ctx.encodeMultimodal(MARKER, [clip(8)]);
+  const window = ctx.getEmbeddings(true);
+  const query = await vectorOf(queries.find(entry => entry.finds === 'video/red-square-moves.mp4')!);
+  const stills = await vectorsOf(searchable.filter(entry => entry.kind !== 'video'));
+  assert.ok(stills.every(still => dot(query, still) < dot(query, window)));
+});
+
+test('a mixed input costs its parts and the model\'s framing', async () => {
+  const parts = partsOf(named('text, image, video and audio'));
+  const framing = (await ctx.tokenize('', true)).length;
+  const alone: number[] = [];
+  for (const part of parts) alone.push(await ctx._cellsMultimodal([], ...inputOf([part]), ROOM));
+  const whole = await ctx._cellsMultimodal([], ...inputOf(parts), ROOM);
+  // Each part measured alone carries the model's framing; the whole carries it once.
+  assert.equal(whole, alone.reduce((sum, cells) => sum + cells - framing, 0) + framing);
+});
+
+test('the image budget sets what an image costs', async () => {
+  const pinned = reference.entries.filter(entry => entry.image_tokens !== undefined)
+    .sort((a, b) => a.image_tokens! - b.image_tokens!);
+  assert.ok(pinned.length >= 2);
+  const cost = (entry: ReferenceEntry, context: EmbeddingContext) =>
+    context._cellsMultimodal([], ...inputOf(partsOf(entry)), ROOM);
+  const pinnedCost = (entry: ReferenceEntry) =>
+    withContext(embeddingContext(8192, entry.image_tokens), context => cost(entry, context));
+  const [smallest, largest] = [pinned[0], pinned[pinned.length - 1]];
+  const ownBudget = await cost(smallest, ctx);
+  assert.ok(await pinnedCost(smallest) < ownBudget);
+  assert.ok(ownBudget < await pinnedCost(largest));
 });
 
 test('the measure is exactly what one dispatch admits, and a refusal leaves the context as it was', async () => {
-  const cat = media.find(entry => entry.kind === 'image' && entry.image === 'cat.jpg')!;
-  const [prompt, catInputs] = inputs.image(cat);
+  const cat = named('cat.jpg');
+  const [prompt, catInputs] = inputOf(partsOf(cat));
   const cells = await ctx._cellsMultimodal([], prompt, catInputs);
 
-  const short = await embeddingContext(cells - 1);
-  await assert.rejects(short.encodeMultimodal(prompt, catInputs), /must go in one dispatch/);
-  assertMatches(await embed(short, queries[0]), queries[0]);
+  await withContext(embeddingContext(cells - 1), async short => {
+    await assert.rejects(short.encodeMultimodal(prompt, catInputs), /must go in one dispatch/);
+    assertMatches(await embed(short, queries[0]), queries[0]);
+  });
+  assertMatches(await withContext(embeddingContext(cells), exact => embed(exact, cat)), cat);
+});
 
-  assertMatches(await embed(await embeddingContext(cells), cat), cat);
+test('a recording over its limits is refused, and the context embeds as it did', async () => {
+  const recording = named('asr-counting.wav');
+  const [prompt, inputs] = inputOf(partsOf(recording));
+  await assert.rejects(ctx.encodeMultimodal(prompt, inputs, { maxBytes: 16, maxSamples: ROOM.maxSamples }), /byte/i);
+  await assert.rejects(ctx.encodeMultimodal(prompt, inputs), /limit|budget/i);
+  assertMatches(await embed(ctx, recording), recording);
+});
+
+test('a prompt whose markers do not match its inputs is refused, and the context embeds as it did', async () => {
+  const cat = named('cat.jpg');
+  const [, inputs] = inputOf(partsOf(cat));
+  await assert.rejects(ctx.encodeMultimodal(MARKER + MARKER, inputs), /marker/i);
+  assertMatches(await embed(ctx, cat), cat);
+});
+
+test('encodeMultimodal is refused on a context without a projector, or one not made for embeddings', async () => {
+  const addon = loadLocalAddon();
+  const [prompt, inputs] = inputOf(partsOf(named('cat.jpg')));
+  for (const options of [
+    { modelPath, nCtx: 512, nBatch: 512, nThreads: 4, embeddings: true, poolingType: 1 },
+    { modelPath, mmprojPath, nCtx: 512, nBatch: 512, nThreads: 4 },
+  ]) {
+    await withContext(addon.createContext(options), context => {
+      assert.throws(() => context.encodeMultimodal(prompt, inputs), /embedding context with a projector/);
+    });
+  }
 });
