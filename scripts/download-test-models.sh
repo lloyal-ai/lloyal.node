@@ -4,7 +4,7 @@ set -euo pipefail
 # Download test models from test/matrix.json
 # Usage:
 #   ./scripts/download-test-models.sh              # Default models only (the text suite)
-#   ./scripts/download-test-models.sh --services   # Plus each service's model and projector (image, audio)
+#   ./scripts/download-test-models.sh --services   # Plus each service's model and projector (image, audio, embedding)
 #   ./scripts/download-test-models.sh --all        # Every chat and embedding model in the matrix
 #   The service pairs are never implied: a GPU container that runs the text suite over every chat
 #   model must not also hold four gigabytes of projectors in a filesystem that is memory.

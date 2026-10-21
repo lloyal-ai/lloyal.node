@@ -1,8 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Branch, BranchStore, loadBinary } from '../dist/index.js';
+import { Branch, BranchStore } from '../dist/index.js';
+import { loadLocalAddon } from './local-addon';
 import type { SessionContext, AudioLimits, MultimodalInput } from '@lloyal-labs/sdk';
 
 const fixture = (name: string) => readFileSync(resolve(__dirname, '../liblloyal/tests/fixtures', name));
@@ -13,13 +14,7 @@ let ctx: SessionContext;
 let prompt: string;
 
 before(async () => {
-  assert.equal(process.env.LLOYAL_LOCAL, '1', 'addon tests must exercise the local native build');
-  const addon = loadBinary();
-  const binary = realpathSync(require.resolve('../build/Release/lloyal.node'));
-  assert.equal(addon, require(binary), 'loader resolves this checkout');
-  console.log(`Native addon: ${binary}`);
-  console.log(`SDK: ${realpathSync(require.resolve('@lloyal-labs/sdk'))}`);
-  ctx = await addon.createContext({
+  ctx = await loadLocalAddon().createContext({
     modelPath: process.env.LLAMA_ASR_MODEL ?? resolve(__dirname, '../models/audio/qwen3-asr/Qwen3-ASR-0.6B-Q8_0.gguf'),
     mmprojPath: process.env.LLAMA_ASR_MMPROJ ?? resolve(__dirname, '../models/audio/qwen3-asr/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf'),
     nCtx: 4096, nBatch: 128, nSeqMax: 8, nThreads: 4,

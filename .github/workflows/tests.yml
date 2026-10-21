@@ -125,6 +125,12 @@ jobs:
         env:
           LLOYAL_LOCAL: '1'
 
+      - name: Embedding addon integration (EmbeddingGemma 2)
+        run: npm run test:embedding
+        timeout-minutes: 10
+        env:
+          LLOYAL_LOCAL: '1'
+
       - name: Image addon integration (Qwen3.5-4B)
         run: npm run test:images
         timeout-minutes: 45
