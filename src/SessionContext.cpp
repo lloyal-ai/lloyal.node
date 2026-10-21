@@ -1133,6 +1133,7 @@ Napi::Object SessionContext::Init(Napi::Env env, Napi::Object exports) {
 
     // ===== EMBEDDING EXTRACTION =====
     InstanceMethod("encode", &SessionContext::encode),
+    InstanceMethod("encodeMultimodal", &SessionContext::encodeMultimodal),
     InstanceMethod("getEmbeddings", &SessionContext::getEmbeddings),
     InstanceMethod("getEmbeddingDimension", &SessionContext::getEmbeddingDimension),
     InstanceMethod("hasPooling", &SessionContext::hasPooling),
@@ -1231,11 +1232,13 @@ SessionContext::~SessionContext() {
 void SessionContext::initializeContext(
   std::shared_ptr<llama_model> model,
   llama_context* context,
-  int32_t nBatch
+  int32_t nBatch,
+  bool embeddings
 ) {
   _model = std::move(model);
   _context = context;
   _nBatch = nBatch;
+  _embeddings = embeddings;
   _branchStore.init_tenancy(_context);
 
   std::cerr << "[SessionContext::initializeContext] Initialized:" << std::endl;
@@ -2260,7 +2263,7 @@ Napi::Value CreateContext(const Napi::CallbackInfo& info) {
   SessionContext* obj = SessionContext::Unwrap(instance);
 
   // Initialize
-  obj->initializeContext(std::move(sharedModel), ctx, nBatch);
+  obj->initializeContext(std::move(sharedModel), ctx, nBatch, embeddingsMode);
   owned.ctx = nullptr;   // ownership transferred
   if (mtmdCtx) {
     obj->initializeMultimodal(mtmdCtx);
@@ -2938,6 +2941,10 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
  * Constructing the source is the measurement: `MtmdSource` counts cells after
  * `mtmd_tokenize` and before encoder inference, so this pays media decode and
  * preprocessing. The encoder pass stays in the prefill.
+ *
+ * On an embedding context the input is framed with the model's own special
+ * tokens, as `encodeMultimodal` places it, so the count is what that one
+ * dispatch must hold.
  */
 class CellsMultimodalWorker : public Napi::AsyncWorker {
 public:
@@ -2946,10 +2953,11 @@ public:
                         int32_t nEmbdInp,
                         std::vector<llama_token> sep,
                         std::string prompt,
-                        OwnedMedia media)
+                        OwnedMedia media,
+                        bool addSpecial)
     : AsyncWorker(env), _deferred(env), _mtmd(mtmd), _nEmbdInp(nEmbdInp),
       _sep(std::move(sep)), _prompt(std::move(prompt)),
-      _media(std::move(media)) {}
+      _media(std::move(media)), _addSpecial(addSpecial) {}
 
   void Execute() override {
     try {
@@ -2957,7 +2965,7 @@ public:
       const auto inputs = _media.views();
       lloyal::MtmdSource source(
           _mtmd, _prompt, inputs,
-          std::span<const llama_token>(_sep), _nEmbdInp, _media.limits);
+          std::span<const llama_token>(_sep), _nEmbdInp, _media.limits, _addSpecial);
       _cells = static_cast<int64_t>(source.cells());
     } catch (const std::exception& e) { SetError(e.what()); }
   }
@@ -2975,7 +2983,51 @@ private:
   std::vector<llama_token> _sep;
   std::string _prompt;
   OwnedMedia _media;
+  bool _addSpecial;
   int64_t _cells = 0;
+};
+
+/**
+ * AsyncWorker for embedding a multimodal input: a marshaller, like its
+ * siblings. `lloyal::MtmdSource`, built with the model's own special tokens,
+ * produces the segment stream; `embedding::encode` places it whole and
+ * refuses, before anything runs, a stream larger than one dispatch.
+ */
+class EncodeMultimodalWorker : public Napi::AsyncWorker {
+public:
+  EncodeMultimodalWorker(Napi::Env env,
+                         llama_context* ctx,
+                         mtmd_context* mtmd,
+                         int32_t nEmbdInp,
+                         std::string prompt,
+                         OwnedMedia media,
+                         bool addSpecial)
+    : AsyncWorker(env), _deferred(env), _ctx(ctx), _mtmd(mtmd),
+      _nEmbdInp(nEmbdInp), _prompt(std::move(prompt)), _media(std::move(media)),
+      _addSpecial(addSpecial) {}
+
+  void Execute() override {
+    try {
+      if (!_media.error.empty()) throw std::runtime_error(_media.error);
+      const auto inputs = _media.views();
+      lloyal::MtmdSource source(
+          _mtmd, _prompt, inputs, {}, _nEmbdInp, _media.limits, _addSpecial);
+      lloyal::embedding::encode(_ctx, source);
+    } catch (const std::exception& e) { SetError(e.what()); }
+  }
+
+  void OnOK() override { _deferred.Resolve(Env().Undefined()); }
+  void OnError(const Napi::Error& err) override { _deferred.Reject(err.Value()); }
+  Napi::Promise GetPromise() { return _deferred.Promise(); }
+
+private:
+  Napi::Promise::Deferred _deferred;
+  llama_context* _ctx;
+  mtmd_context* _mtmd;
+  int32_t _nEmbdInp;
+  std::string _prompt;
+  OwnedMedia _media;
+  bool _addSpecial;
 };
 
 Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& info) {
@@ -3087,7 +3139,29 @@ Napi::Value SessionContext::_cellsMultimodal(const Napi::CallbackInfo& info) {
 
   auto* worker = new CellsMultimodalWorker(
       env, _mtmdContext, nEmbdInp,
-      std::move(sep), std::move(prompt), std::move(media));
+      std::move(sep), std::move(prompt), std::move(media), _embeddings);
+  worker->Queue();
+  return worker->GetPromise();
+}
+
+Napi::Value SessionContext::encodeMultimodal(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ensureNotDisposed();
+
+  if (!_embeddings || !_mtmdContext) {
+    throw Napi::Error::New(env,
+      "encodeMultimodal requires an embedding context with a projector; pass embeddings: true and mmprojPath to createContext");
+  }
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsArray()) {
+    throw Napi::TypeError::New(env, "encodeMultimodal requires (prompt, inputs[], audioLimits?)");
+  }
+
+  auto media = copyMedia(info[1].As<Napi::Array>(),
+      info.Length() > 2 ? info[2] : env.Undefined());
+
+  auto* worker = new EncodeMultimodalWorker(
+      env, _context, _mtmdContext, llama_model_n_embd_inp(_model.get()),
+      info[0].As<Napi::String>().Utf8Value(), std::move(media), _embeddings);
   worker->Queue();
   return worker->GetPromise();
 }

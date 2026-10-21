@@ -78,7 +78,8 @@ public:
   void initializeContext(
     std::shared_ptr<llama_model> model,
     llama_context* context,
-    int32_t nBatch = lloyal::defaults::N_BATCH_INIT
+    int32_t nBatch = lloyal::defaults::N_BATCH_INIT,
+    bool embeddings = false
   );
 
   /**
@@ -241,6 +242,20 @@ private:
   Napi::Value encode(const Napi::CallbackInfo& info);
 
   /**
+   * Encode a multimodal input for embedding extraction: a prompt with media
+   * markers and its typed media, read with the model's own special tokens
+   * and placed whole by liblloyal's `embedding::encode`. Requires an
+   * embedding context with an mmproj. Read the vector with getEmbeddings().
+   * Args: (prompt: string,
+   *        inputs: (Buffer | {kind: 'image'|'audio', bytes}
+   *                 | {kind: 'video', frames, timestampsMs, timestampIntervalMs?, notes?})[],
+   *        audioLimits?: {maxBytes, maxSamples})
+   * Returns: Promise<void>; rejects when the input does not fit one dispatch,
+   *   with nothing run.
+   */
+  Napi::Value encodeMultimodal(const Napi::CallbackInfo& info);
+
+  /**
    * Get embeddings from context (after encode)
    * Args: normalize (optional boolean, default true for L2)
    * Returns: Float32Array
@@ -340,6 +355,9 @@ private:
   struct mtmd_context* _mtmdContext = nullptr;
   bool _disposed = false;
   int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
+  /// Created with embeddings on: a multimodal input is then read with the
+  /// model's own special tokens, whether it is measured or encoded.
+  bool _embeddings = false;
 
   // ===== BRANCH STORE =====
   lloyal::branch::BranchStore _branchStore{16};  // capacity 16
