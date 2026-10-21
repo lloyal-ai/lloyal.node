@@ -1,5 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
+import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import { loadLocalAddon } from './local-addon';
 import { clip, embeddingContext, fixture, MARKER, mmprojPath, modelPath, withContext } from './embedding-fixtures';
 import type { EmbeddingContext } from './embedding-fixtures';
@@ -188,4 +190,29 @@ test('encodeMultimodal is refused on a context without a projector, or one not m
       assert.throws(() => context.encodeMultimodal(prompt, inputs), /embedding context with a projector/);
     });
   }
+});
+
+test('a context disposed while an encode runs frees its memory only once the encode settles', async () => {
+  // In a child process: before the fix this can crash outright, which only a separate process survives to report.
+  const child = spawn(process.execPath, ['--expose-gc', '--import', 'tsx', resolve(__dirname, '__dispose-in-flight-child.ts')], {
+    env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+  child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((done, fail) => {
+    child.on('close', (c, s) => done([c, s]));
+    child.on('error', fail);
+  });
+  assert.equal(signal, null, `child killed by ${signal}\n${stderr.slice(-2000)}`);
+  assert.equal(code, 0, `child exited ${code}\n${stdout}\n${stderr.slice(-2000)}`);
+  const report = JSON.parse(stdout.trim().split('\n').pop()!);
+  assert.deepEqual(report.disposed, {
+    returnsPromise: true,
+    samePromise: true,
+    refused: true,
+    order: ['encode resolved', 'freed'],
+  }, stderr.split('\n').filter(line => /fail|error|alloc|memory/i.test(line)).slice(-20).join('\n'));
+  assert.equal(report.collected, 'resolved');
 });

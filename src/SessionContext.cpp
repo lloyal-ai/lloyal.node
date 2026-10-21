@@ -84,13 +84,26 @@ static LloyalSamplingParams adaptSamplingParamsFromJS(Napi::Object paramsObj) {
 // ===== ASYNC WORKER CLASSES =====
 
 /**
+ * Every worker a context queues holds that context until its work completes,
+ * so dispose() and the collector never free native state a pool thread is
+ * still using (see SessionContext::InFlight).
+ */
+class ContextWorker : public Napi::AsyncWorker {
+protected:
+  ContextWorker(Napi::Env env, SessionContext& owner) : AsyncWorker(env), _inFlight(owner) {}
+
+private:
+  SessionContext::InFlight _inFlight;
+};
+
+/**
  * AsyncWorker for kvCacheRemove operation
  * Pattern matches HybridSessionContext.cpp:550-571
  */
-class KVCacheRemoveWorker : public Napi::AsyncWorker {
+class KVCacheRemoveWorker : public ContextWorker {
 public:
-  KVCacheRemoveWorker(Napi::Env env, llama_context* ctx, double sequenceId, double start, double end)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+  KVCacheRemoveWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, double sequenceId, double start, double end)
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx),
       _sequenceId(static_cast<llama_seq_id>(sequenceId)),
       _start(static_cast<llama_pos>(start)),
       _end(static_cast<llama_pos>(end)) {}
@@ -124,10 +137,10 @@ private:
  * AsyncWorker for kvCacheSave operation
  * Pattern matches HybridSessionContext.cpp:585-614
  */
-class KVCacheSaveWorker : public Napi::AsyncWorker {
+class KVCacheSaveWorker : public ContextWorker {
 public:
-  KVCacheSaveWorker(Napi::Env env, llama_context* ctx, double sequenceId)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+  KVCacheSaveWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, double sequenceId)
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx),
       _sequenceId(static_cast<llama_seq_id>(sequenceId)) {}
 
   void Execute() override {
@@ -178,11 +191,11 @@ private:
  * AsyncWorker for kvCacheLoad operation
  * Pattern matches HybridSessionContext.cpp:616-642
  */
-class KVCacheLoadWorker : public Napi::AsyncWorker {
+class KVCacheLoadWorker : public ContextWorker {
 public:
-  KVCacheLoadWorker(Napi::Env env, llama_context* ctx, double sequenceId,
+  KVCacheLoadWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, double sequenceId,
                     const uint8_t* stateData, size_t stateSize)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx),
       _sequenceId(static_cast<llama_seq_id>(sequenceId)),
       _stateData(stateData, stateData + stateSize) {}
 
@@ -220,10 +233,10 @@ private:
  * AsyncWorker for kvCacheClear operation
  * Pattern matches HybridSessionContext.cpp:279-290
  */
-class KVCacheClearWorker : public Napi::AsyncWorker {
+class KVCacheClearWorker : public ContextWorker {
 public:
-  KVCacheClearWorker(Napi::Env env, llama_context* ctx)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx) {}
+  KVCacheClearWorker(Napi::Env env, SessionContext& owner, llama_context* ctx)
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx) {}
 
   void Execute() override {
     // Use convenience overload
@@ -249,13 +262,13 @@ private:
  * AsyncWorker for clearAndReseed operation (StreamingLLM)
  * Uses lloyal::kv::clear_and_reseed() - the validated API
  */
-class ClearAndReseedWorker : public Napi::AsyncWorker {
+class ClearAndReseedWorker : public ContextWorker {
 public:
-  ClearAndReseedWorker(Napi::Env env, llama_context* ctx,
+  ClearAndReseedWorker(Napi::Env env, SessionContext& owner, llama_context* ctx,
                        std::vector<llama_token> sinks,
                        std::vector<llama_token> tail,
                        int32_t n_batch)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx),
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx),
       _sinks(std::move(sinks)), _tail(std::move(tail)), _n_batch(n_batch) {}
 
   void Execute() override {
@@ -285,11 +298,11 @@ private:
  * AsyncWorker for kvCacheWriteFile operation
  * Writes KV cache state + tokens to a file for disk persistence
  */
-class KVCacheWriteFileWorker : public Napi::AsyncWorker {
+class KVCacheWriteFileWorker : public ContextWorker {
 public:
-  KVCacheWriteFileWorker(Napi::Env env, llama_context* ctx, llama_seq_id seq,
+  KVCacheWriteFileWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, llama_seq_id seq,
                          const std::string& filepath, std::vector<llama_token> tokens)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _seq(seq),
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx), _seq(seq),
       _filepath(filepath), _tokens(std::move(tokens)) {}
 
   void Execute() override {
@@ -322,11 +335,11 @@ private:
  * AsyncWorker for kvCacheReadFile operation
  * Reads KV cache state + tokens from a file
  */
-class KVCacheReadFileWorker : public Napi::AsyncWorker {
+class KVCacheReadFileWorker : public ContextWorker {
 public:
-  KVCacheReadFileWorker(Napi::Env env, llama_context* ctx, llama_seq_id seq,
+  KVCacheReadFileWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, llama_seq_id seq,
                         const std::string& filepath)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _seq(seq), _filepath(filepath) {}
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx), _seq(seq), _filepath(filepath) {}
 
   void Execute() override {
     try {
@@ -369,11 +382,11 @@ private:
 /**
  * AsyncWorker for tokenize operation
  */
-class TokenizeWorker : public Napi::AsyncWorker {
+class TokenizeWorker : public ContextWorker {
 public:
-  TokenizeWorker(Napi::Env env, std::shared_ptr<llama_model> model,
+  TokenizeWorker(Napi::Env env, SessionContext& owner, std::shared_ptr<llama_model> model,
                  const std::string& text, bool addSpecial, bool addSpecialOverridden)
-    : AsyncWorker(env), _deferred(env), _model(model), _text(text),
+    : ContextWorker(env, owner), _deferred(env), _model(model), _text(text),
       _addSpecial(addSpecial), _addSpecialOverridden(addSpecialOverridden) {}
 
   void Execute() override {
@@ -420,10 +433,10 @@ private:
  * AsyncWorker for encode operation (embedding extraction)
  * Unlike DecodeWorker, marks ALL tokens with logits=true
  */
-class EncodeWorker : public Napi::AsyncWorker {
+class EncodeWorker : public ContextWorker {
 public:
-  EncodeWorker(Napi::Env env, llama_context* ctx, const std::vector<llama_token>& tokens, int32_t nBatch)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _tokens(tokens), _nBatch(nBatch) {}
+  EncodeWorker(Napi::Env env, SessionContext& owner, llama_context* ctx, const std::vector<llama_token>& tokens, int32_t nBatch)
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx), _tokens(tokens), _nBatch(nBatch) {}
 
   void Execute() override {
     try {
@@ -453,10 +466,10 @@ private:
 /**
  * AsyncWorker for detokenize operation
  */
-class DetokenizeWorker : public Napi::AsyncWorker {
+class DetokenizeWorker : public ContextWorker {
 public:
-  DetokenizeWorker(Napi::Env env, std::shared_ptr<llama_model> model, const std::vector<llama_token>& tokens)
-    : AsyncWorker(env), _deferred(env), _model(model), _tokens(tokens) {}
+  DetokenizeWorker(Napi::Env env, SessionContext& owner, std::shared_ptr<llama_model> model, const std::vector<llama_token>& tokens)
+    : ContextWorker(env, owner), _deferred(env), _model(model), _tokens(tokens) {}
 
   void Execute() override {
     // Use convenience overload that auto-extracts vocab
@@ -486,11 +499,11 @@ static Napi::Object marshalFormatResult(Napi::Env env, lloyal::chat_in::FormatRe
 /**
  * AsyncWorker for formatChat operation
  */
-class FormatChatWorker : public Napi::AsyncWorker {
+class FormatChatWorker : public ContextWorker {
 public:
-  FormatChatWorker(Napi::Env env, std::shared_ptr<llama_model> model,
+  FormatChatWorker(Napi::Env env, SessionContext& owner, std::shared_ptr<llama_model> model,
                    const lloyal::chat_in::FormatInputs& inputs)
-    : AsyncWorker(env), _deferred(env), _model(model), _inputs(inputs) {}
+    : ContextWorker(env, owner), _deferred(env), _model(model), _inputs(inputs) {}
 
   void Execute() override {
     try {
@@ -533,13 +546,13 @@ private:
  * AsyncWorker for bulk branch decode + logits capture (prompt injection)
  * Wraps lloyal::branch::prefill on libuv pool thread
  */
-class BranchPrefillWorker : public Napi::AsyncWorker {
+class BranchPrefillWorker : public ContextWorker {
 public:
-  BranchPrefillWorker(Napi::Env env,
+  BranchPrefillWorker(Napi::Env env, SessionContext& owner,
                       lloyal::branch::BranchStore& store,
                       lloyal::branch::BranchHandle handle,
                       std::vector<llama_token> tokens)
-    : AsyncWorker(env), _deferred(env), _store(store), _handle(handle),
+    : ContextWorker(env, owner), _deferred(env), _store(store), _handle(handle),
       _tokens(std::move(tokens)) {}
 
   void Execute() override {
@@ -566,12 +579,12 @@ private:
  * and the revision of every branch the failure left intact, so a failed commit
  * is no change to fast_forward. A poisoned branch keeps the bump poisoning gave it.
  */
-class StoreCommitWorker : public Napi::AsyncWorker {
+class StoreCommitWorker : public ContextWorker {
 public:
-  StoreCommitWorker(Napi::Env env,
+  StoreCommitWorker(Napi::Env env, SessionContext& owner,
                     lloyal::branch::BranchStore& store,
                     std::vector<lloyal::branch::DecodeEachItem> items)
-    : AsyncWorker(env), _deferred(env), _store(store), _items(std::move(items)) {}
+    : ContextWorker(env, owner), _deferred(env), _store(store), _items(std::move(items)) {}
 
   void Execute() override {
     // RAII snapshot of accept-mutable state. Destructor frees anything still
@@ -675,13 +688,13 @@ private:
  * AsyncWorker for multi-branch prefill (decode_scatter)
  * Owns token storage; rebuilds spans in Execute() from owned vectors
  */
-class StorePrefillWorker : public Napi::AsyncWorker {
+class StorePrefillWorker : public ContextWorker {
 public:
-  StorePrefillWorker(Napi::Env env,
+  StorePrefillWorker(Napi::Env env, SessionContext& owner,
                      lloyal::branch::BranchStore& store,
                      std::vector<lloyal::branch::BranchHandle> handles,
                      std::vector<std::vector<llama_token>> tokenStorage)
-    : AsyncWorker(env), _deferred(env), _store(store),
+    : ContextWorker(env, owner), _deferred(env), _store(store),
       _handles(std::move(handles)), _tokenStorage(std::move(tokenStorage)) {}
 
   void Execute() override {
@@ -911,7 +924,7 @@ static OwnedMedia copyMedia(Napi::Array values, Napi::Value budget) {
  * layers need them.
  */
 
-class StorePrefillMultimodalWorker : public Napi::AsyncWorker {
+class StorePrefillMultimodalWorker : public ContextWorker {
 public:
   struct BranchResult {
     int64_t tokensDecoded = 0;
@@ -932,7 +945,7 @@ public:
     bool partial = false;
   };
 
-  StorePrefillMultimodalWorker(Napi::Env env,
+  StorePrefillMultimodalWorker(Napi::Env env, SessionContext& owner,
                                lloyal::branch::BranchStore& store,
                                mtmd_context* mtmd,
                                int32_t nEmbdInp,
@@ -940,7 +953,7 @@ public:
                                std::vector<std::vector<llama_token>> sepStorage,
                                std::vector<std::string> prompts,
                                std::vector<OwnedMedia> media)
-    : AsyncWorker(env), _deferred(env), _store(store), _mtmd(mtmd),
+    : ContextWorker(env, owner), _deferred(env), _store(store), _mtmd(mtmd),
       _nEmbdInp(nEmbdInp), _handles(std::move(handles)),
       _sepStorage(std::move(sepStorage)), _prompts(std::move(prompts)),
       _media(std::move(media)) {}
@@ -1009,14 +1022,14 @@ private:
  * AsyncWorker for batch logit scoring (process_chunks)
  * Owns token storage and logit output buffers
  */
-class ScoreGroupWorker : public Napi::AsyncWorker {
+class ScoreGroupWorker : public ContextWorker {
 public:
-  ScoreGroupWorker(Napi::Env env,
+  ScoreGroupWorker(Napi::Env env, SessionContext& owner,
                    llama_context* ctx,
                    llama_model* model,
                    int32_t nSeqMax,
                    std::vector<std::vector<llama_token>> tokenStorage)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _model(model),
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx), _model(model),
       _nSeqMax(nSeqMax), _tokenStorage(std::move(tokenStorage)) {}
 
   void Execute() override {
@@ -1071,10 +1084,10 @@ private:
  * AsyncWorker for JSON schema → GBNF grammar conversion
  * Pure CPU, no shared state — cleanest worker
  */
-class JsonSchemaToGrammarWorker : public Napi::AsyncWorker {
+class JsonSchemaToGrammarWorker : public ContextWorker {
 public:
-  JsonSchemaToGrammarWorker(Napi::Env env, std::string schemaJson)
-    : AsyncWorker(env), _deferred(env), _schemaJson(std::move(schemaJson)) {}
+  JsonSchemaToGrammarWorker(Napi::Env env, SessionContext& owner, std::string schemaJson)
+    : ContextWorker(env, owner), _deferred(env), _schemaJson(std::move(schemaJson)) {}
 
   void Execute() override {
     try {
@@ -1213,19 +1226,35 @@ SessionContext::SessionContext(const Napi::CallbackInfo& info)
   // Model and context are set externally
 }
 
+// Collected only once no worker holds this object (InFlight), so nothing is still using the native state.
 SessionContext::~SessionContext() {
-  if (!_disposed) {
-    // Free mtmd first — it holds a reference to the model
-    if (_mtmdContext) {
-      mtmd_free(_mtmdContext);
-      _mtmdContext = nullptr;
-    }
-    // Free context (depends on model)
-    if (_context) {
-      llama_free(_context);
-      _context = nullptr;
-    }
-    // _model freed automatically via shared_ptr
+  freeNative();
+}
+
+SessionContext::InFlight::InFlight(SessionContext& owner)
+  : _owner(owner), _self(Napi::Persistent(owner.Value())) {
+  ++_owner._inFlight;
+}
+
+SessionContext::InFlight::~InFlight() {
+  if (--_owner._inFlight == 0 && _owner._disposed) _owner.freeNative();
+}
+
+void SessionContext::freeNative() {
+  // The branch store drains while the context is still alive; mtmd goes before the model it references.
+  if (_context) _branchStore.drain();
+  if (_mtmdContext) {
+    mtmd_free(_mtmdContext);
+    _mtmdContext = nullptr;
+  }
+  if (_context) {
+    llama_free(_context);
+    _context = nullptr;
+  }
+  _model.reset();
+  if (_freed) {
+    _freed->Resolve(Env().Undefined());
+    _freed.reset();
   }
 }
 
@@ -1273,7 +1302,7 @@ Napi::Value SessionContext::tokenize(const Napi::CallbackInfo& info) {
   }
 
   // Run async
-  auto* worker = new TokenizeWorker(env, _model, text, addSpecial, addSpecialOverridden);
+  auto* worker = new TokenizeWorker(env, *this, _model, text, addSpecial, addSpecialOverridden);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1331,7 +1360,7 @@ Napi::Value SessionContext::detokenize(const Napi::CallbackInfo& info) {
   }
 
   // Run async
-  auto* worker = new DetokenizeWorker(env, _model, tokens);
+  auto* worker = new DetokenizeWorker(env, *this, _model, tokens);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1395,7 +1424,7 @@ Napi::Value SessionContext::encode(const Napi::CallbackInfo& info) {
   }
 
   // Run async
-  auto* worker = new EncodeWorker(env, _context, tokens, _nBatch);
+  auto* worker = new EncodeWorker(env, *this, _context, tokens, _nBatch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1601,7 +1630,7 @@ Napi::Value SessionContext::formatChat(const Napi::CallbackInfo& info) {
   }
 
   auto inputs = parseFormatChatArgs(info);
-  auto* worker = new FormatChatWorker(env, _model, inputs);
+  auto* worker = new FormatChatWorker(env, *this, _model, inputs);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1645,30 +1674,13 @@ Napi::Value SessionContext::kvCacheSize(const Napi::CallbackInfo& info) {
 }
 
 Napi::Value SessionContext::dispose(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
   if (!_disposed) {
-    // Drain branch store while context is still alive
-    _branchStore.drain();
-
-    // Free mtmd first — it holds a reference to the model
-    if (_mtmdContext) {
-      mtmd_free(_mtmdContext);
-      _mtmdContext = nullptr;
-    }
-
-    // Free context
-    if (_context) {
-      llama_free(_context);
-      _context = nullptr;
-    }
-
-    // Reset model
-    _model.reset();
     _disposed = true;
+    _freed.emplace(Napi::Promise::Deferred::New(info.Env()));
+    _freedPromise = Napi::Persistent(_freed->Promise());
+    if (_inFlight == 0) freeNative();
   }
-
-  return env.Undefined();
+  return _freedPromise.Value();
 }
 
 Napi::Value SessionContext::getNBatch(const Napi::CallbackInfo& info) {
@@ -1759,7 +1771,7 @@ Napi::Value SessionContext::jsonSchemaToGrammar(const Napi::CallbackInfo& info) 
 
   std::string schemaJson = info[0].As<Napi::String>().Utf8Value();
 
-  auto* worker = new JsonSchemaToGrammarWorker(env, std::move(schemaJson));
+  auto* worker = new JsonSchemaToGrammarWorker(env, *this, std::move(schemaJson));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1788,10 +1800,10 @@ Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info)
   std::string templateString = info[0].As<Napi::String>().Utf8Value();
 
   // Create AsyncWorker for validation
-  class ValidateChatTemplateWorker : public Napi::AsyncWorker {
+  class ValidateChatTemplateWorker : public ContextWorker {
   public:
-    ValidateChatTemplateWorker(Napi::Env env, const std::string& templateStr)
-      : AsyncWorker(env), _deferred(env), _templateString(templateStr) {}
+    ValidateChatTemplateWorker(Napi::Env env, SessionContext& owner, const std::string& templateStr)
+      : ContextWorker(env, owner), _deferred(env), _templateString(templateStr) {}
 
     void Execute() override {
       // Use lloyal::chat_in from liblloyal (handles error logging)
@@ -1815,7 +1827,7 @@ Napi::Value SessionContext::validateChatTemplate(const Napi::CallbackInfo& info)
     bool _result = false;
   };
 
-  auto* worker = new ValidateChatTemplateWorker(env, templateString);
+  auto* worker = new ValidateChatTemplateWorker(env, *this, templateString);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1902,7 +1914,7 @@ Napi::Value SessionContext::kvCacheRemove(const Napi::CallbackInfo& info) {
   double start = info[1].As<Napi::Number>().DoubleValue();
   double end = info[2].As<Napi::Number>().DoubleValue();
 
-  auto* worker = new KVCacheRemoveWorker(env, _context, sequenceId, start, end);
+  auto* worker = new KVCacheRemoveWorker(env, *this, _context, sequenceId, start, end);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1917,7 +1929,7 @@ Napi::Value SessionContext::kvCacheSave(const Napi::CallbackInfo& info) {
     sequenceId = info[0].As<Napi::Number>().DoubleValue();
   }
 
-  auto* worker = new KVCacheSaveWorker(env, _context, sequenceId);
+  auto* worker = new KVCacheSaveWorker(env, *this, _context, sequenceId);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1933,7 +1945,7 @@ Napi::Value SessionContext::kvCacheLoad(const Napi::CallbackInfo& info) {
   double sequenceId = info[0].As<Napi::Number>().DoubleValue();
   Napi::Buffer<uint8_t> stateBuffer = info[1].As<Napi::Buffer<uint8_t>>();
 
-  auto* worker = new KVCacheLoadWorker(env, _context, sequenceId, stateBuffer.Data(), stateBuffer.Length());
+  auto* worker = new KVCacheLoadWorker(env, *this, _context, sequenceId, stateBuffer.Data(), stateBuffer.Length());
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1942,7 +1954,7 @@ Napi::Value SessionContext::kvCacheClear(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   ensureNotDisposed();
 
-  auto* worker = new KVCacheClearWorker(env, _context);
+  auto* worker = new KVCacheClearWorker(env, *this, _context);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -1980,7 +1992,7 @@ Napi::Value SessionContext::clearAndReseed(const Napi::CallbackInfo& info) {
     tail.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
   }
 
-  auto* worker = new ClearAndReseedWorker(env, _context, std::move(sinks), std::move(tail), _nBatch);
+  auto* worker = new ClearAndReseedWorker(env, *this, _context, std::move(sinks), std::move(tail), _nBatch);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2006,7 +2018,7 @@ Napi::Value SessionContext::kvCacheWriteFile(const Napi::CallbackInfo& info) {
     tokens.push_back(static_cast<llama_token>(val.As<Napi::Number>().Int32Value()));
   }
 
-  auto* worker = new KVCacheWriteFileWorker(env, _context, seq, filepath, std::move(tokens));
+  auto* worker = new KVCacheWriteFileWorker(env, *this, _context, seq, filepath, std::move(tokens));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2023,7 +2035,7 @@ Napi::Value SessionContext::kvCacheReadFile(const Napi::CallbackInfo& info) {
   llama_seq_id seq = static_cast<llama_seq_id>(info[0].As<Napi::Number>().Int32Value());
   std::string filepath = info[1].As<Napi::String>().Utf8Value();
 
-  auto* worker = new KVCacheReadFileWorker(env, _context, seq, filepath);
+  auto* worker = new KVCacheReadFileWorker(env, *this, _context, seq, filepath);
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2059,7 +2071,7 @@ Napi::Value SessionContext::_scoreGroup(const Napi::CallbackInfo& info) {
   }
 
   int32_t nSeqMax = static_cast<int32_t>(llama_n_seq_max(_context));
-  auto* worker = new ScoreGroupWorker(env, _context, _model.get(), nSeqMax, std::move(tokenStorage));
+  auto* worker = new ScoreGroupWorker(env, *this, _context, _model.get(), nSeqMax, std::move(tokenStorage));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2373,7 +2385,7 @@ Napi::Value SessionContext::_branchPrefill(const Napi::CallbackInfo& info) {
     return deferred.Promise();
   }
 
-  auto* worker = new BranchPrefillWorker(env, _branchStore, handle, std::move(tokens));
+  auto* worker = new BranchPrefillWorker(env, *this, _branchStore, handle, std::move(tokens));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2881,7 +2893,7 @@ Napi::Value SessionContext::_storeCommit(const Napi::CallbackInfo& info) {
       jsTokens.Get(i).As<Napi::Number>().Int32Value());
   }
 
-  auto* worker = new StoreCommitWorker(env, _branchStore, std::move(items));
+  auto* worker = new StoreCommitWorker(env, *this, _branchStore, std::move(items));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2924,7 +2936,7 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
     }
   }
 
-  auto* worker = new StorePrefillWorker(env, _branchStore, std::move(handles), std::move(tokenStorage));
+  auto* worker = new StorePrefillWorker(env, *this, _branchStore, std::move(handles), std::move(tokenStorage));
   worker->Queue();
   return worker->GetPromise();
 }
@@ -2946,16 +2958,16 @@ Napi::Value SessionContext::_storePrefill(const Napi::CallbackInfo& info) {
  * tokens, as `encodeMultimodal` places it, so the count is what that one
  * dispatch must hold.
  */
-class CellsMultimodalWorker : public Napi::AsyncWorker {
+class CellsMultimodalWorker : public ContextWorker {
 public:
-  CellsMultimodalWorker(Napi::Env env,
+  CellsMultimodalWorker(Napi::Env env, SessionContext& owner,
                         mtmd_context* mtmd,
                         int32_t nEmbdInp,
                         std::vector<llama_token> sep,
                         std::string prompt,
                         OwnedMedia media,
                         bool addSpecial)
-    : AsyncWorker(env), _deferred(env), _mtmd(mtmd), _nEmbdInp(nEmbdInp),
+    : ContextWorker(env, owner), _deferred(env), _mtmd(mtmd), _nEmbdInp(nEmbdInp),
       _sep(std::move(sep)), _prompt(std::move(prompt)),
       _media(std::move(media)), _addSpecial(addSpecial) {}
 
@@ -2993,16 +3005,16 @@ private:
  * produces the segment stream; `embedding::encode` places it whole and
  * refuses, before anything runs, a stream larger than one dispatch.
  */
-class EncodeMultimodalWorker : public Napi::AsyncWorker {
+class EncodeMultimodalWorker : public ContextWorker {
 public:
-  EncodeMultimodalWorker(Napi::Env env,
+  EncodeMultimodalWorker(Napi::Env env, SessionContext& owner,
                          llama_context* ctx,
                          mtmd_context* mtmd,
                          int32_t nEmbdInp,
                          std::string prompt,
                          OwnedMedia media,
                          bool addSpecial)
-    : AsyncWorker(env), _deferred(env), _ctx(ctx), _mtmd(mtmd),
+    : ContextWorker(env, owner), _deferred(env), _ctx(ctx), _mtmd(mtmd),
       _nEmbdInp(nEmbdInp), _prompt(std::move(prompt)), _media(std::move(media)),
       _addSpecial(addSpecial) {}
 
@@ -3102,7 +3114,7 @@ Napi::Value SessionContext::_storePrefillMultimodal(const Napi::CallbackInfo& in
   const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
 
   auto* worker = new StorePrefillMultimodalWorker(
-      env, _branchStore, _mtmdContext, nEmbdInp,
+      env, *this, _branchStore, _mtmdContext, nEmbdInp,
       std::move(handles), std::move(sepStorage), std::move(prompts),
       std::move(media));
   worker->Queue();
@@ -3138,7 +3150,7 @@ Napi::Value SessionContext::_cellsMultimodal(const Napi::CallbackInfo& info) {
   const int32_t nEmbdInp = llama_model_n_embd_inp(_model.get());
 
   auto* worker = new CellsMultimodalWorker(
-      env, _mtmdContext, nEmbdInp,
+      env, *this, _mtmdContext, nEmbdInp,
       std::move(sep), std::move(prompt), std::move(media), _embeddings);
   worker->Queue();
   return worker->GetPromise();
@@ -3160,7 +3172,7 @@ Napi::Value SessionContext::encodeMultimodal(const Napi::CallbackInfo& info) {
       info.Length() > 2 ? info[2] : env.Undefined());
 
   auto* worker = new EncodeMultimodalWorker(
-      env, _context, _mtmdContext, llama_model_n_embd_inp(_model.get()),
+      env, *this, _context, _mtmdContext, llama_model_n_embd_inp(_model.get()),
       info[0].As<Napi::String>().Utf8Value(), std::move(media), _embeddings);
   worker->Queue();
   return worker->GetPromise();
