@@ -71,8 +71,9 @@ public:
   ~SessionContext();
 
   /**
-   * A call's hold on this context while its work runs on the native pool.
-   * Every worker a context queues owns one for its whole life: it keeps the
+   * A call's hold on this context while the call runs, and while its work runs
+   * on the native pool. Every call but dispose() holds one for its span (held),
+   * and every worker a context queues owns one for its whole life: it keeps the
    * JS object from being collected, and the native state is freed only once
    * the last hold is released. Taken and released on the JS thread.
    */
@@ -87,6 +88,18 @@ public:
     SessionContext& _owner;
     Napi::ObjectReference _self;
   };
+
+  /**
+   * `Method`, called under an InFlight hold. Reading a caller's object can run
+   * a getter that calls dispose(); the call began first, so the free waits for
+   * it and for any work it queues, as it waits for any other work in flight.
+   * Init registers every method but dispose() through this.
+   */
+  template <Napi::Value (SessionContext::*Method)(const Napi::CallbackInfo&)>
+  Napi::Value held(const Napi::CallbackInfo& info) {
+    InFlight hold(*this);
+    return (this->*Method)(info);
+  }
 
   /**
    * Initialize context with model and llama_context
@@ -375,7 +388,8 @@ private:
   /// Set by dispose(): every later call is refused, and the native state is
   /// freed once `_inFlight` reaches zero.
   bool _disposed = false;
-  /// Holds taken by workers whose native work has not completed (InFlight).
+  /// Holds taken by calls still running and by workers whose native work has
+  /// not completed (InFlight).
   size_t _inFlight = 0;
   /// What dispose() returns, resolved by freeNative().
   std::optional<Napi::Promise::Deferred> _freed;

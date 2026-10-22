@@ -180,6 +180,33 @@ test('encodeMultimodal is refused on a context without a projector, or one not m
   }
 });
 
+test('a getter that disposes the context while a call reads its input lets the call finish, then frees the context', async () => {
+  const image = fixture('cat.jpg');
+  /** `target` with `key` read through a getter that disposes `context` before it answers `value`. */
+  const disposingAt = <T extends object>(context: EmbeddingContext, target: T, key: string, value: unknown): T =>
+    Object.defineProperty(target, key, { get() { void context.dispose(); return value; }, enumerable: true });
+  const reads: Record<string, (context: EmbeddingContext) => Promise<unknown>> = {
+    'an input read by encodeMultimodal': context =>
+      context.encodeMultimodal(MARKER, [disposingAt(context, { bytes: image }, 'kind', 'image') as MultimodalInput]),
+    'an input read by _cellsMultimodal': context =>
+      context._cellsMultimodal([], MARKER, [disposingAt(context, { bytes: image }, 'kind', 'image') as MultimodalInput]),
+    'audio limits read by encodeMultimodal': context =>
+      context.encodeMultimodal(MARKER, [{ kind: 'image', bytes: image }],
+        disposingAt(context, { maxSamples: ROOM.maxSamples }, 'maxBytes', ROOM.maxBytes) as AudioLimits),
+  };
+  for (const [read, call] of Object.entries(reads)) {
+    const context = await embeddingContext(512);
+    const order: string[] = [];
+    // The getter's dispose() and this one return the same Promise, resolved once the context is freed.
+    await Promise.all([
+      call(context).then(() => order.push('call resolved')),
+      context.dispose().then(() => order.push('freed')),
+    ]);
+    assert.deepEqual(order, ['call resolved', 'freed'], read);
+    assert.throws(() => context.getEmbeddingDimension(), /disposed/, read);
+  }
+});
+
 test('a context disposed while an encode runs frees its memory only once the encode settles', async () => {
   // In a child process: before the fix this can crash outright, which only a separate process survives to report.
   const child = spawn(process.execPath, ['--expose-gc', '--import', 'tsx', resolve(__dirname, '__dispose-in-flight-child.ts')], {
