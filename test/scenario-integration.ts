@@ -6,6 +6,10 @@
  * root, every blob verified. The ground truth beside each scenario in
  * `test/scenarios/` was confirmed by a person who watched the footage.
  *
+ * EmbeddingGemma 2 finds; where a scenario goes on to read what it found,
+ * Qwen3.5-4B with its vision projector reads it, loaded beside it as a harness
+ * loads them. Each model is named explicitly.
+ *
  * Hundreds of encodes per scenario: run on a GPU with `npm run test:scenarios`.
  */
 import { strict as assert } from 'node:assert';
@@ -13,14 +17,40 @@ import { after, before, describe, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { dot, embed, embeddingContext, MARKER, oneAtATime } from './embedding-fixtures';
+import { loadLocalAddon, withContext } from './local-addon';
+import { visionModel } from './vision-fixtures';
 import type { EmbeddingContext } from './embedding-fixtures';
 import { openPack, overlaps } from './scenario-pack';
 import type { Pack, Span } from './scenario-pack';
-import type { AudioLimits, MultimodalInput } from '@lloyal-labs/sdk';
+import { Branch, buildUserDeltaMultimodal } from '@lloyal-labs/sdk';
+import type { AudioLimits, MultimodalInput, SessionContext } from '@lloyal-labs/sdk';
 
 const truth = (name: string) => JSON.parse(readFileSync(resolve(__dirname, 'scenarios', `${name}.json`), 'utf8'));
 const search = (query: string) => `task: search result | query: ${query}`;
 const passage = (text: string) => `title: none | text: ${text}`;
+
+/** A plate asked for exactly, with a way to say it cannot be read: asked without one, the model invents a plate. */
+const askPlate = (vehicle: string) =>
+  `What is the number plate of ${vehicle}? If you cannot read every character clearly, answer only: unreadable. Otherwise answer with the plate text only.`;
+
+/** What the vision model answers about one image: greedy, without thinking, on a branch pruned afterwards. */
+async function answer(context: SessionContext, image: Buffer, question: string): Promise<string> {
+  const delta = buildUserDeltaMultimodal(context, question, [{ kind: 'image', bytes: image }], { enableThinking: false });
+  const branch = Branch.create(context, 0, { temperature: 0 });
+  try {
+    await branch.prefillMultimodal(delta.prompt, delta.bitmaps, delta.sep);
+    let text = '';
+    for (let produced = 0; produced < 48; produced++) {
+      const next = branch.produceSync();
+      if (next.isStop) break;
+      text += next.text;
+      await branch.commit(next.token);
+    }
+    return text.trim();
+  } finally {
+    branch.pruneSync();
+  }
+}
 
 /** The most a soundtrack window holds: what the transcription service admits, 16 MiB and 60 s, at the encoder's 16 kHz. */
 const WINDOW_LIMITS: AudioLimits = { maxBytes: 16 << 20, maxSamples: 16_000 * 60 + 1 };
@@ -119,9 +149,9 @@ describe('find every cat in a ten-minute pet compilation', () => {
   });
 });
 
-describe('find a car in half an hour of dash-cam footage', () => {
+describe('find a car and read its plate in half an hour of dash-cam footage', () => {
   const scenario = truth('dash-cam-crashes');
-  const target: Span & { query: string } = scenario.target;
+  const target: Span & { query: string; vehicle: string; plateQuery: string; plate: string; legibleMs: number; illegibleMs: number } = scenario.target;
   let pack: Pack;
   let query: Float32Array;
   before(async () => {
@@ -144,6 +174,24 @@ describe('find a car in half an hour of dash-cam footage', () => {
       const first = ranked(query, vectors, width).slice(0, 3);
       assert.ok(first.some(i => overlaps(windows[i], target)), `at ${width}`);
     }
+  });
+
+  test('within the moment, a query for the plate finds the frame it can be read in', async () => {
+    const moment = pack.frames.filter(f => overlaps({ startMs: f.tMs, endMs: f.tMs + 1 }, target));
+    const [first] = ranked(await embedText(search(target.plateQuery)), await embedAll(moment, still), 768);
+    assert.equal(moment[first].tMs, target.legibleMs);
+  });
+
+  test('the plate is read exactly where it is legible, and not guessed where it is too far to read', async () => {
+    const frameAt = (tMs: number) => pack.frames.find(f => f.tMs === tMs)!.bytes;
+    const read = await withContext(
+      loadLocalAddon().createContext({ ...visionModel, nCtx: 4096, nBatch: 512, nSeqMax: 1, nThreads: 4 }) as Promise<SessionContext>,
+      async vision => [
+        await answer(vision, frameAt(target.legibleMs), askPlate(target.vehicle)),
+        await answer(vision, frameAt(target.illegibleMs), askPlate(target.vehicle)),
+      ],
+    );
+    assert.deepEqual(read, [target.plate, 'unreadable']);
   });
 });
 

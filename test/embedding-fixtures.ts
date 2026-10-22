@@ -30,16 +30,6 @@ export const embeddingContext = async (nBatch = 8192, imageTokens?: number) => a
   ...(imageTokens !== undefined ? { imageMinTokens: imageTokens, imageMaxTokens: imageTokens } : {}),
 }) as EmbeddingContext;
 
-/** A context that lives for `use` alone, freed before this resolves: each holds a model and projector in GPU memory. */
-export async function withContext<T>(made: Promise<SessionContext>, use: (context: EmbeddingContext) => Promise<T> | T): Promise<T> {
-  const context = await made as EmbeddingContext;
-  try {
-    return await use(context);
-  } finally {
-    await context.dispose();
-  }
-}
-
 /** The dot product of two vectors; for unit vectors, their cosine. */
 export const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => Array.from(a).reduce((sum, x, i) => sum + x * b[i], 0);
 

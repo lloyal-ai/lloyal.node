@@ -15,3 +15,13 @@ export function loadLocalAddon(): ReturnType<typeof loadBinary> {
   console.log(`SDK: ${realpathSync(require.resolve('@lloyal-labs/sdk'))}`);
   return addon;
 }
+
+/** A context that lives for `use` alone, freed before this resolves: each holds a model, and any projector, in GPU memory. */
+export async function withContext<C extends { dispose(): unknown }, T>(made: Promise<C>, use: (context: C) => Promise<T> | T): Promise<T> {
+  const context = await made;
+  try {
+    return await use(context);
+  } finally {
+    await context.dispose();
+  }
+}

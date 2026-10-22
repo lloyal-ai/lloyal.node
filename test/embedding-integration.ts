@@ -2,8 +2,8 @@ import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { loadLocalAddon } from './local-addon';
-import { clip, dot, embed, embeddingContext, fixture, MARKER, mmprojPath, modelPath, oneAtATime, withContext } from './embedding-fixtures';
+import { loadLocalAddon, withContext } from './local-addon';
+import { clip, dot, embed, embeddingContext, fixture, MARKER, mmprojPath, modelPath, oneAtATime } from './embedding-fixtures';
 import type { EmbeddingContext } from './embedding-fixtures';
 import type { AudioLimits, MultimodalInput } from '@lloyal-labs/sdk';
 
@@ -174,7 +174,7 @@ test('encodeMultimodal is refused on a context without a projector, or one not m
     { modelPath, nCtx: 512, nBatch: 512, nThreads: 4, embeddings: true, poolingType: 1 },
     { modelPath, mmprojPath, nCtx: 512, nBatch: 512, nThreads: 4 },
   ]) {
-    await withContext(addon.createContext(options), context => {
+    await withContext(addon.createContext(options) as Promise<EmbeddingContext>, context => {
       assert.throws(() => context.encodeMultimodal(prompt, inputs), /embedding context with a projector/);
     });
   }

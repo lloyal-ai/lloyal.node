@@ -21,6 +21,7 @@ import * as v8 from 'node:v8';
 import * as vm from 'node:vm';
 import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
+import { visionModel } from './vision-fixtures';
 
 const SUITE = process.argv.find(arg => arg.startsWith('--suite='))?.split('=')[1] ?? 'all';
 if (!['all', 'text', 'image', 'branch'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
@@ -2630,8 +2631,7 @@ async function testRerankConcurrent(): Promise<void> {
 //
 // Image tests use the production Qwen model and matching projector.
 function pickVlPair(): { model: string; mmproj: string; mrope: boolean; strict: boolean } | null {
-  const model = path.resolve(process.env.LLAMA_VL_MODEL ?? HYBRID_MODEL_PATH);
-  const mmproj = path.resolve(process.env.LLAMA_VL_MMPROJ ?? path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'));
+  const { modelPath: model, mmprojPath: mmproj } = visionModel;
   if (!fs.existsSync(model) || !fs.existsSync(mmproj)) {
     if (SUITE === 'image') throw new Error('Image suite requires Qwen3.5-4B and its projector');
     return null;
