@@ -1,4 +1,4 @@
-# Every commit is judged by hickey against PRINCIPLES.md before it exists; the verdict rides in the
+# Every commit is judged by hickey against its own principles before it exists; the verdict rides in the
 # commit's trailers. Runs even under --no-verify, so an accepted refusal is recorded as one.
 output: [execution_out]
 pre-commit:
