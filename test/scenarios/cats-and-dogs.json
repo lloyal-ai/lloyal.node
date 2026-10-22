@@ -1,0 +1,701 @@
+{
+ "root": "sha256:5cd41f0f09023fbdbb84691b51524121ed2d0d7e9a965a98adbec8055fade46a",
+ "source": {
+  "file": "cats-and-dogs.mp4",
+  "sha256": "2bdf55fb6777cd130c875e892893d3d9ab150bf7254a61a7d21bb0966fabe7b9",
+  "bytes": 26957290
+ },
+ "about": "A compilation of short pet clips, mostly without speech. Each clip is labelled by what it shows; unclear clips are not scored. Labels confirmed by the owner, 2026-10-22.",
+ "clips": [
+  {
+   "startMs": 0,
+   "endMs": 2669,
+   "shows": "cat"
+  },
+  {
+   "startMs": 2669,
+   "endMs": 6673,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 6673,
+   "endMs": 9543,
+   "shows": "cat"
+  },
+  {
+   "startMs": 9543,
+   "endMs": 11545,
+   "shows": "dog"
+  },
+  {
+   "startMs": 11545,
+   "endMs": 13514,
+   "shows": "dog"
+  },
+  {
+   "startMs": 13514,
+   "endMs": 16650,
+   "shows": "dog"
+  },
+  {
+   "startMs": 16650,
+   "endMs": 21555,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 21555,
+   "endMs": 27227,
+   "shows": "dog"
+  },
+  {
+   "startMs": 27227,
+   "endMs": 33734,
+   "shows": "cat"
+  },
+  {
+   "startMs": 33734,
+   "endMs": 38305,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 38305,
+   "endMs": 45946,
+   "shows": "cat"
+  },
+  {
+   "startMs": 45946,
+   "endMs": 48315,
+   "shows": "cat"
+  },
+  {
+   "startMs": 48315,
+   "endMs": 52519,
+   "shows": "cat"
+  },
+  {
+   "startMs": 52519,
+   "endMs": 58091,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 58091,
+   "endMs": 60861,
+   "shows": "dog"
+  },
+  {
+   "startMs": 60861,
+   "endMs": 64865,
+   "shows": "dog"
+  },
+  {
+   "startMs": 64865,
+   "endMs": 67301,
+   "shows": "cat"
+  },
+  {
+   "startMs": 67301,
+   "endMs": 69102,
+   "shows": "cat"
+  },
+  {
+   "startMs": 69102,
+   "endMs": 74508,
+   "shows": "dog"
+  },
+  {
+   "startMs": 74508,
+   "endMs": 78845,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 78845,
+   "endMs": 87654,
+   "shows": "cat"
+  },
+  {
+   "startMs": 87654,
+   "endMs": 93126,
+   "shows": "dog"
+  },
+  {
+   "startMs": 93126,
+   "endMs": 96363,
+   "shows": "dog"
+  },
+  {
+   "startMs": 96363,
+   "endMs": 101268,
+   "shows": "cat"
+  },
+  {
+   "startMs": 101268,
+   "endMs": 107341,
+   "shows": "cat"
+  },
+  {
+   "startMs": 107341,
+   "endMs": 113180,
+   "shows": "cat"
+  },
+  {
+   "startMs": 113180,
+   "endMs": 115916,
+   "shows": "dog"
+  },
+  {
+   "startMs": 115916,
+   "endMs": 124658,
+   "shows": "cat"
+  },
+  {
+   "startMs": 124658,
+   "endMs": 128195,
+   "shows": "cat"
+  },
+  {
+   "startMs": 128195,
+   "endMs": 133133,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 133133,
+   "endMs": 137437,
+   "shows": "dog"
+  },
+  {
+   "startMs": 137437,
+   "endMs": 140440,
+   "shows": "cat"
+  },
+  {
+   "startMs": 140440,
+   "endMs": 144678,
+   "shows": "cat"
+  },
+  {
+   "startMs": 144678,
+   "endMs": 146680,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 146680,
+   "endMs": 148649,
+   "shows": "cat"
+  },
+  {
+   "startMs": 148649,
+   "endMs": 152352,
+   "shows": "dog"
+  },
+  {
+   "startMs": 152352,
+   "endMs": 155956,
+   "shows": "cat"
+  },
+  {
+   "startMs": 155956,
+   "endMs": 161428,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 161428,
+   "endMs": 165399,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 165399,
+   "endMs": 169736,
+   "shows": "cat"
+  },
+  {
+   "startMs": 169736,
+   "endMs": 175642,
+   "shows": "dog"
+  },
+  {
+   "startMs": 175642,
+   "endMs": 179646,
+   "shows": "dog"
+  },
+  {
+   "startMs": 179646,
+   "endMs": 183717,
+   "shows": "cat"
+  },
+  {
+   "startMs": 183717,
+   "endMs": 187688,
+   "shows": "cat"
+  },
+  {
+   "startMs": 187688,
+   "endMs": 193060,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 193060,
+   "endMs": 198065,
+   "shows": "cat"
+  },
+  {
+   "startMs": 198065,
+   "endMs": 199099,
+   "shows": "dog"
+  },
+  {
+   "startMs": 199099,
+   "endMs": 201702,
+   "shows": "dog"
+  },
+  {
+   "startMs": 201702,
+   "endMs": 205872,
+   "shows": "dog"
+  },
+  {
+   "startMs": 205872,
+   "endMs": 209676,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 209676,
+   "endMs": 212145,
+   "shows": "dog"
+  },
+  {
+   "startMs": 212145,
+   "endMs": 215015,
+   "shows": "dog"
+  },
+  {
+   "startMs": 215015,
+   "endMs": 219920,
+   "shows": "cat"
+  },
+  {
+   "startMs": 219920,
+   "endMs": 224224,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 224224,
+   "endMs": 227327,
+   "shows": "dog"
+  },
+  {
+   "startMs": 227327,
+   "endMs": 231932,
+   "shows": "cat"
+  },
+  {
+   "startMs": 231932,
+   "endMs": 235936,
+   "shows": "cat"
+  },
+  {
+   "startMs": 235936,
+   "endMs": 239139,
+   "shows": "dog"
+  },
+  {
+   "startMs": 239139,
+   "endMs": 243410,
+   "shows": "cat"
+  },
+  {
+   "startMs": 243410,
+   "endMs": 246780,
+   "shows": "dog"
+  },
+  {
+   "startMs": 246780,
+   "endMs": 250283,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 250283,
+   "endMs": 251751,
+   "shows": "cat"
+  },
+  {
+   "startMs": 251751,
+   "endMs": 254054,
+   "shows": "dog"
+  },
+  {
+   "startMs": 254054,
+   "endMs": 259926,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 259926,
+   "endMs": 265265,
+   "shows": "cat"
+  },
+  {
+   "startMs": 265265,
+   "endMs": 267367,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 267367,
+   "endMs": 270270,
+   "shows": "cat"
+  },
+  {
+   "startMs": 270270,
+   "endMs": 274541,
+   "shows": "cat"
+  },
+  {
+   "startMs": 274541,
+   "endMs": 278445,
+   "shows": "cat"
+  },
+  {
+   "startMs": 278445,
+   "endMs": 282215,
+   "shows": "cat"
+  },
+  {
+   "startMs": 282215,
+   "endMs": 286553,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 286553,
+   "endMs": 292025,
+   "shows": "dog"
+  },
+  {
+   "startMs": 292025,
+   "endMs": 294694,
+   "shows": "dog"
+  },
+  {
+   "startMs": 294694,
+   "endMs": 309276,
+   "shows": "cat"
+  },
+  {
+   "startMs": 309276,
+   "endMs": 314147,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 314147,
+   "endMs": 319052,
+   "shows": "cat"
+  },
+  {
+   "startMs": 319052,
+   "endMs": 321721,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 321721,
+   "endMs": 326560,
+   "shows": "cat"
+  },
+  {
+   "startMs": 326560,
+   "endMs": 329196,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 329196,
+   "endMs": 333667,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 333667,
+   "endMs": 336837,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 336837,
+   "endMs": 341841,
+   "shows": "cat"
+  },
+  {
+   "startMs": 341841,
+   "endMs": 345745,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 345745,
+   "endMs": 350884,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 350884,
+   "endMs": 353987,
+   "shows": "cat"
+  },
+  {
+   "startMs": 353987,
+   "endMs": 356623,
+   "shows": "dog"
+  },
+  {
+   "startMs": 356623,
+   "endMs": 360193,
+   "shows": "cat"
+  },
+  {
+   "startMs": 360193,
+   "endMs": 362929,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 362929,
+   "endMs": 366266,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 366266,
+   "endMs": 369402,
+   "shows": "dog"
+  },
+  {
+   "startMs": 369402,
+   "endMs": 376877,
+   "shows": "dog"
+  },
+  {
+   "startMs": 376877,
+   "endMs": 383083,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 383083,
+   "endMs": 384284,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 384284,
+   "endMs": 388288,
+   "shows": "cat"
+  },
+  {
+   "startMs": 388288,
+   "endMs": 391791,
+   "shows": "cat"
+  },
+  {
+   "startMs": 391791,
+   "endMs": 396496,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 396496,
+   "endMs": 401534,
+   "shows": "dog"
+  },
+  {
+   "startMs": 401534,
+   "endMs": 406573,
+   "shows": "cat"
+  },
+  {
+   "startMs": 406573,
+   "endMs": 410310,
+   "shows": "cat"
+  },
+  {
+   "startMs": 410310,
+   "endMs": 414547,
+   "shows": "cat"
+  },
+  {
+   "startMs": 414547,
+   "endMs": 416816,
+   "shows": "cat"
+  },
+  {
+   "startMs": 416816,
+   "endMs": 422122,
+   "shows": "cat"
+  },
+  {
+   "startMs": 422122,
+   "endMs": 427060,
+   "shows": "cat"
+  },
+  {
+   "startMs": 427060,
+   "endMs": 435502,
+   "shows": "cat"
+  },
+  {
+   "startMs": 435502,
+   "endMs": 438505,
+   "shows": "cat"
+  },
+  {
+   "startMs": 438505,
+   "endMs": 442409,
+   "shows": "cat"
+  },
+  {
+   "startMs": 442409,
+   "endMs": 448615,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 448615,
+   "endMs": 451284,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 451284,
+   "endMs": 456289,
+   "shows": "dog"
+  },
+  {
+   "startMs": 456289,
+   "endMs": 460860,
+   "shows": "cat"
+  },
+  {
+   "startMs": 460860,
+   "endMs": 465665,
+   "shows": "dog"
+  },
+  {
+   "startMs": 465665,
+   "endMs": 467334,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 467334,
+   "endMs": 475241,
+   "shows": "cat"
+  },
+  {
+   "startMs": 475241,
+   "endMs": 478511,
+   "shows": "dog"
+  },
+  {
+   "startMs": 478511,
+   "endMs": 483850,
+   "shows": "cat"
+  },
+  {
+   "startMs": 483850,
+   "endMs": 487053,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 487053,
+   "endMs": 489990,
+   "shows": "cat"
+  },
+  {
+   "startMs": 489990,
+   "endMs": 494928,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 494928,
+   "endMs": 512979,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 512979,
+   "endMs": 516816,
+   "shows": "cat"
+  },
+  {
+   "startMs": 516816,
+   "endMs": 522689,
+   "shows": "cat"
+  },
+  {
+   "startMs": 522689,
+   "endMs": 529462,
+   "shows": "dog"
+  },
+  {
+   "startMs": 529462,
+   "endMs": 537003,
+   "shows": "dog"
+  },
+  {
+   "startMs": 537003,
+   "endMs": 539072,
+   "shows": "dog"
+  },
+  {
+   "startMs": 539072,
+   "endMs": 541541,
+   "shows": "cat"
+  },
+  {
+   "startMs": 541541,
+   "endMs": 545145,
+   "shows": "dog"
+  },
+  {
+   "startMs": 545145,
+   "endMs": 549949,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 549949,
+   "endMs": 554521,
+   "shows": "cat"
+  },
+  {
+   "startMs": 554521,
+   "endMs": 556523,
+   "shows": "cat"
+  },
+  {
+   "startMs": 556523,
+   "endMs": 559159,
+   "shows": "cat"
+  },
+  {
+   "startMs": 559159,
+   "endMs": 563730,
+   "shows": "dog"
+  },
+  {
+   "startMs": 563730,
+   "endMs": 566800,
+   "shows": "dog"
+  },
+  {
+   "startMs": 566800,
+   "endMs": 572772,
+   "shows": "dog"
+  },
+  {
+   "startMs": 572772,
+   "endMs": 577143,
+   "shows": "cat"
+  },
+  {
+   "startMs": 577143,
+   "endMs": 582682,
+   "shows": "cat"
+  },
+  {
+   "startMs": 582682,
+   "endMs": 583983,
+   "shows": "cat"
+  },
+  {
+   "startMs": 583983,
+   "endMs": 594694,
+   "shows": "unclear"
+  },
+  {
+   "startMs": 594694,
+   "endMs": 614795,
+   "shows": "unclear"
+  }
+ ]
+}

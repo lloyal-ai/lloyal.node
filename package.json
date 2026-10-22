@@ -25,6 +25,7 @@
     "test:integration": "npx tsx test/integration.ts",
     "test:audio": "tsx --test test/audio-integration.ts",
     "test:embedding": "tsx --test test/embedding-integration.ts",
+    "test:scenarios": "tsx --test test/scenario-integration.ts",
     "test:images": "tsx test/integration.ts --suite=image",
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",

@@ -3,7 +3,7 @@ import { after, before, test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { loadLocalAddon } from './local-addon';
-import { clip, embeddingContext, fixture, MARKER, mmprojPath, modelPath, withContext } from './embedding-fixtures';
+import { clip, dot, embed, embeddingContext, fixture, MARKER, mmprojPath, modelPath, oneAtATime, withContext } from './embedding-fixtures';
 import type { EmbeddingContext } from './embedding-fixtures';
 import type { AudioLimits, MultimodalInput } from '@lloyal-labs/sdk';
 
@@ -60,25 +60,20 @@ let ctx: EmbeddingContext;
 before(async () => { ctx = await embeddingContext(); });
 after(async () => { await ctx?.dispose(); });
 
-const dot = (a: ArrayLike<number>, b: ArrayLike<number>) =>
-  Array.from(a).reduce((sum, value, i) => sum + value * b[i], 0);
 const cosine = (a: ArrayLike<number>, b: ArrayLike<number>) =>
   dot(a, b) / Math.sqrt(dot(a, a) * dot(b, b));
 
-async function embed(context: EmbeddingContext, entry: ReferenceEntry): Promise<Float32Array> {
-  await context.kvCacheClear();
-  if (entry.kind === 'text') await context.encode(await context.tokenize(entry.text!, true));
-  else await context.encodeMultimodal(...inputOf(partsOf(entry)), ROOM);
-  return context.getEmbeddings(true);
-}
+/** An entry's vector: its text alone, or its parts with room for every committed recording. */
+const embedEntry = (context: EmbeddingContext, entry: ReferenceEntry) =>
+  entry.kind === 'text' ? embed(context, entry.text!) : embed(context, ...inputOf(partsOf(entry)), ROOM);
 
 /** Each entry embedded once, on its own image budget's context: on a CPU runner the largest take minutes. */
 const embedded = new Map<string, Promise<Float32Array>>();
 const vectorOf = (entry: ReferenceEntry) => {
   if (!embedded.has(entry.name)) {
     embedded.set(entry.name, entry.image_tokens === undefined
-      ? embed(ctx, entry)
-      : withContext(embeddingContext(8192, entry.image_tokens), context => embed(context, entry)));
+      ? embedEntry(ctx, entry)
+      : withContext(embeddingContext(8192, entry.image_tokens), context => embedEntry(context, entry)));
   }
   return embedded.get(entry.name)!;
 };
@@ -89,12 +84,7 @@ function assertMatches(vector: Float32Array, entry: ReferenceEntry): void {
   assert.ok(similarity >= 0.999, `${entry.name}: ${similarity}`);
 }
 
-/** Entries' vectors one after another: an embed clears, encodes and reads one context, so two must not interleave. */
-async function vectorsOf(entries: ReferenceEntry[]): Promise<Float32Array[]> {
-  const vectors: Float32Array[] = [];
-  for (const entry of entries) vectors.push(await vectorOf(entry));
-  return vectors;
-}
+const vectorsOf = (entries: ReferenceEntry[]) => oneAtATime(entries, vectorOf);
 
 /** The searchable input a vector is closest to. */
 async function nearest(vector: Float32Array): Promise<string> {
@@ -120,9 +110,7 @@ test('each query finds its own image, clip or recording, in any language', async
 });
 
 test('a window from the middle of the clip, at its own times, is what the clip\'s query finds over every still', async () => {
-  await ctx.kvCacheClear();
-  await ctx.encodeMultimodal(MARKER, [clip(8)]);
-  const window = ctx.getEmbeddings(true);
+  const window = await embed(ctx, MARKER, [clip(8)]);
   const query = await vectorOf(queries.find(entry => entry.finds === 'video/red-square-moves.mp4')!);
   const stills = await vectorsOf(searchable.filter(entry => entry.kind !== 'video'));
   assert.ok(stills.every(still => dot(query, still) < dot(query, window)));
@@ -159,9 +147,9 @@ test('the measure is exactly what one dispatch admits, and a refusal leaves the 
 
   await withContext(embeddingContext(cells - 1), async short => {
     await assert.rejects(short.encodeMultimodal(prompt, catInputs), /must go in one dispatch/);
-    assertMatches(await embed(short, queries[0]), queries[0]);
+    assertMatches(await embedEntry(short, queries[0]), queries[0]);
   });
-  assertMatches(await withContext(embeddingContext(cells), exact => embed(exact, cat)), cat);
+  assertMatches(await withContext(embeddingContext(cells), exact => embedEntry(exact, cat)), cat);
 });
 
 test('a recording over its limits is refused, and the context embeds as it did', async () => {
@@ -169,14 +157,14 @@ test('a recording over its limits is refused, and the context embeds as it did',
   const [prompt, inputs] = inputOf(partsOf(recording));
   await assert.rejects(ctx.encodeMultimodal(prompt, inputs, { maxBytes: 16, maxSamples: ROOM.maxSamples }), /byte/i);
   await assert.rejects(ctx.encodeMultimodal(prompt, inputs), /limit|budget/i);
-  assertMatches(await embed(ctx, recording), recording);
+  assertMatches(await embedEntry(ctx, recording), recording);
 });
 
 test('a prompt whose markers do not match its inputs is refused, and the context embeds as it did', async () => {
   const cat = named('cat.jpg');
   const [, inputs] = inputOf(partsOf(cat));
   await assert.rejects(ctx.encodeMultimodal(MARKER + MARKER, inputs), /marker/i);
-  assertMatches(await embed(ctx, cat), cat);
+  assertMatches(await embedEntry(ctx, cat), cat);
 });
 
 test('encodeMultimodal is refused on a context without a projector, or one not made for embeddings', async () => {

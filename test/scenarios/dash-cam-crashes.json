@@ -1,0 +1,15 @@
+{
+ "root": "sha256:415ca103b0f72de78f2501c5ad27b21b74fd3a4a86321f988a5cc73a639bc683",
+ "source": {
+  "file": "dash-cam-crashes.mp4",
+  "sha256": "ef453daad8bce40b7dfad746b9f4c06c634efaceb96305065c6df6fdf7feaf15",
+  "bytes": 92667245
+ },
+ "about": "A 31-minute compilation of dash-cam incidents on Australian roads, under a music track. One moment is the target: a red Mazda CX-5 braking ahead on a wet motorway, its plate legible in the closest frames. Moment and plate confirmed by the owner, 2026-10-22.",
+ "target": {
+  "startMs": 85933,
+  "endMs": 94733,
+  "query": "a red SUV braking directly ahead on a wet motorway in heavy rain",
+  "plate": "01-ZAM"
+ }
+}

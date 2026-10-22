@@ -39,3 +39,21 @@ export async function withContext<T>(made: Promise<SessionContext>, use: (contex
     await context.dispose();
   }
 }
+
+/** The dot product of two vectors; for unit vectors, their cosine. */
+export const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => Array.from(a).reduce((sum, x, i) => sum + x * b[i], 0);
+
+/** One input's vector: the context cleared, the prompt and its media encoded, the pooled embedding read. */
+export async function embed(context: EmbeddingContext, prompt: string, inputs: MultimodalInput[] = [], limits?: AudioLimits): Promise<Float32Array> {
+  await context.kvCacheClear();
+  if (inputs.length === 0) await context.encode(await context.tokenize(prompt, true));
+  else await context.encodeMultimodal(prompt, inputs, limits);
+  return context.getEmbeddings(true);
+}
+
+/** `vectorOf` over `items` one after another: an embed clears, encodes and reads its context, so two must not interleave. */
+export async function oneAtATime<T>(items: readonly T[], vectorOf: (item: T) => Promise<Float32Array>): Promise<Float32Array[]> {
+  const vectors: Float32Array[] = [];
+  for (const item of items) vectors.push(await vectorOf(item));
+  return vectors;
+}

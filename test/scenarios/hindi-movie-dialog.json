@@ -1,0 +1,27 @@
+{
+ "root": "sha256:114b7f8b4eef5e0a9d05145c8341245b163bbb24e4444b57721b593f18573a75",
+ "source": {
+  "file": "hindi-movie-dialog.mp4",
+  "sha256": "4b589e66c70219efa25ed0a03f26ad8afc52f6c471c8b86df5c71be07fd48f7b",
+  "bytes": 1491853
+ },
+ "about": "A man speaks in Hindi over 27 seconds of film. Each moment is described here in English, in our own words; the dialogue itself is not reproduced. Moments confirmed by the owner, 2026-10-22.",
+ "language": "Hindi",
+ "moments": [
+  {
+   "startMs": 5460,
+   "endMs": 9740,
+   "query": "a man talks about toys that are sold all over the market"
+  },
+  {
+   "startMs": 9740,
+   "endMs": 15660,
+   "query": "courage is something no market in the world can sell you"
+  },
+  {
+   "startMs": 15660,
+   "endMs": 27340,
+   "query": "a man boasts that anyone his heavy hand strikes never gets up again"
+  }
+ ]
+}
