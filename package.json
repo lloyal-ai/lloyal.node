@@ -20,7 +20,7 @@
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
     "test": "npm run test:integration",
-    "test:unit": "npx tsx test/backend-pack-unit.ts && npx tsx test/peers-unit.ts",
+    "test:unit": "npx tsx test/backend-pack-unit.ts && npx tsx test/peers-unit.ts && npx tsx test/prepare-unit.ts",
     "test:canary": "npx tsx test/stderr-canary.ts",
     "test:integration": "npx tsx test/integration.ts",
     "test:audio": "tsx --test test/audio-integration.ts",
@@ -30,7 +30,7 @@
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "npx tsx examples/chat/chat.ts",
-    "prepare": "lefthook install"
+    "prepare": "node scripts/install-hooks.js"
   },
   "repository": {
     "type": "git",
