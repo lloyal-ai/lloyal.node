@@ -26,6 +26,17 @@ interface ReferenceEntry {
 const reference: { dimension: number; entries: ReferenceEntry[] } =
   JSON.parse(fixture('embedding/embeddinggemma2-reference.json').toString('utf8'));
 const named = (name: string) => reference.entries.find(entry => entry.name === name)!;
+
+/** On a CPU runner the projector takes minutes for each image and each frame: CI's macOS build has Metal off, since
+ *  the paravirtual GPU there computes wrong. `LLOYAL_EMBED_LEAN=1` checks the text, the smallest image budget and the
+ *  recording against the reference, and leaves search, which reads every image and the clip, to the runners that
+ *  check the whole reference. */
+const lean = process.env.LLOYAL_EMBED_LEAN === '1';
+const smallestBudget = Math.min(...reference.entries.map(entry => entry.image_tokens ?? Infinity));
+const checked = lean
+  ? reference.entries.filter(entry => entry.kind === 'text' || entry.kind === 'audio' || entry.image_tokens === smallestBudget)
+  : reference.entries;
+const searchSkipped = lean && 'search reads every image and the clip: checked where the whole reference is';
 const queries = reference.entries.filter(entry => entry.finds !== undefined);
 
 /** Room for every committed recording; the cases below that refuse a recording set their own limits. */
@@ -102,14 +113,14 @@ test('the vector is as wide as the model outputs', () => {
 });
 
 test('every input the reference names embeds where llama.cpp puts it: text in every task framing and language, images at every budget, the clip, the recording and mixed inputs', async () => {
-  for (const entry of reference.entries) assertMatches(await vectorOf(entry), entry);
+  for (const entry of checked) assertMatches(await vectorOf(entry), entry);
 });
 
-test('each query finds its own image, clip or recording, in any language', async () => {
+test('each query finds its own image, clip or recording, in any language', { skip: searchSkipped }, async () => {
   for (const query of queries) assert.equal(await nearest(await vectorOf(query)), query.finds, query.name);
 });
 
-test('a window from the middle of the clip, at its own times, is what the clip\'s query finds over every still', async () => {
+test('a window from the middle of the clip, at its own times, is what the clip\'s query finds over every still', { skip: searchSkipped }, async () => {
   const window = await embed(ctx, MARKER, [clip(8)]);
   const query = await vectorOf(queries.find(entry => entry.finds === 'video/red-square-moves.mp4')!);
   const stills = await vectorsOf(searchable.filter(entry => entry.kind !== 'video'));
