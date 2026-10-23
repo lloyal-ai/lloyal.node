@@ -225,7 +225,10 @@ test('a getter that disposes the context while a call reads its input lets the c
 
 test('a context disposed while an encode runs frees its memory only once the encode settles', async () => {
   // In a child process: before the fix this can crash outright, which only a separate process survives to report.
-  const child = spawn(process.execPath, ['--expose-gc', '--import', 'tsx', resolve(__dirname, '__dispose-in-flight-child.ts')], {
+  // Lean, it encodes the lean reference's image at its budget: the property needs an encode in flight, not the largest one.
+  const image = lean ? checked.find(entry => entry.image_tokens === smallestBudget)! : undefined;
+  const input = image ? [image.image!, String(smallestBudget)] : [];
+  const child = spawn(process.execPath, ['--expose-gc', '--import', 'tsx', resolve(__dirname, '__dispose-in-flight-child.ts'), ...input], {
     env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -239,11 +242,17 @@ test('a context disposed while an encode runs frees its memory only once the enc
   assert.equal(signal, null, `child killed by ${signal}\n${stderr.slice(-2000)}`);
   assert.equal(code, 0, `child exited ${code}\n${stdout}\n${stderr.slice(-2000)}`);
   const report = JSON.parse(stdout.trim().split('\n').pop()!);
-  assert.deepEqual(report.disposed, {
+  const { cells, ...disposed } = report.disposed;
+  assert.deepEqual(disposed, {
     returnsPromise: true,
     samePromise: true,
     refused: true,
     order: ['encode resolved', 'freed'],
   }, stderr.split('\n').filter(line => /fail|error|alloc|memory/i.test(line)).slice(-20).join('\n'));
   assert.equal(report.collected, 'resolved');
+  if (image) {
+    const budget = await withContext(embeddingContext(8192, smallestBudget),
+      context => context._cellsMultimodal([], MARKER, [media.image(image.image!)]));
+    assert.ok(cells <= budget, `the lean dispose child encodes ${cells} cells, over the lean image's ${budget}`);
+  }
 });

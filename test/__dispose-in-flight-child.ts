@@ -11,18 +11,21 @@
 import { clip, embeddingContext, fixture, MARKER } from './embedding-fixtures';
 import type { MultimodalInput } from '@lloyal-labs/sdk';
 
-/** The largest committed input: the infographic and the clip, over three thousand cells of encoder work. */
-const prompt = MARKER + MARKER;
-const inputs = (): MultimodalInput[] => [
-  { kind: 'image', bytes: fixture('embedding/Global-X-Digital-Evolution-Series-Aug-25-Part-2.jpg') },
-  clip(),
-];
+/** The image and its pinned budget the parent names, or else the largest committed input: the infographic and the clip,
+ *  thousands of cells of encoder work. Either way an encode is on the pool when the context goes. */
+const [image, budget] = process.argv.slice(2);
+const prompt = image ? MARKER : MARKER + MARKER;
+const inputs = (): MultimodalInput[] => image
+  ? [{ kind: 'image', bytes: fixture(image) }]
+  : [{ kind: 'image', bytes: fixture('embedding/Global-X-Digital-Evolution-Series-Aug-25-Part-2.jpg') }, clip()];
+const context = () => embeddingContext(8192, budget === undefined ? undefined : Number(budget));
 
 const outcome = (work: Promise<unknown>) => work.then(() => 'resolved', (e: unknown) => `rejected: ${String(e)}`);
 
 /** dispose() while the encode is on the pool: what each call gave, and the order things settled in. */
 async function disposedMidEncode() {
-  const ctx = await embeddingContext();
+  const ctx = await context();
+  const cells = await ctx._cellsMultimodal([], prompt, inputs());
   // Each settlement is recorded at the same depth, so the order is the order they settled in.
   const order: string[] = [];
   const encoding = ctx.encodeMultimodal(prompt, inputs());
@@ -36,12 +39,12 @@ async function disposedMidEncode() {
   })();
   await outcome(encoding);
   if (freed) await disposing;
-  return { returnsPromise: freed, samePromise: disposing === again, refused, order };
+  return { returnsPromise: freed, samePromise: disposing === again, refused, order, cells };
 }
 
 /** The last reference dropped while the encode is on the pool, and the collector run until it settles. */
 async function collectedMidEncode() {
-  const encoding = outcome((await embeddingContext()).encodeMultimodal(prompt, inputs()));
+  const encoding = outcome((await context()).encodeMultimodal(prompt, inputs()));
   let settled: string | undefined;
   void encoding.then((s) => { settled = s; });
   while (settled === undefined) {
