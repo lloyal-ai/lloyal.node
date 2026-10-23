@@ -30,7 +30,7 @@
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
     "example": "npx tsx examples/chat/chat.ts",
-    "prepare": "node scripts/install-hooks.js"
+    "prepare": "node -e \"let bin; try { bin = require.resolve('lefthook') } catch { process.exit(0) } if (require('fs').existsSync('.git')) require('child_process').execFileSync(process.execPath, [bin, 'install'], { stdio: 'inherit' })\""
   },
   "repository": {
     "type": "git",
