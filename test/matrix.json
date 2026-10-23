@@ -84,6 +84,24 @@
       "checksumFile": "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
       "service": "transcription",
       "role": "projector"
+    },
+    {
+      "name": "EmbeddingGemma 2 embeddinggemma-2-Q8_0.gguf",
+      "file": "embeddinggemma-2/embeddinggemma-2-Q8_0.gguf",
+      "url": "https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/embeddinggemma-2-Q8_0.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/embedding-models.sha256",
+      "checksumFile": "embeddinggemma-2-Q8_0.gguf",
+      "service": "embedding",
+      "role": "model"
+    },
+    {
+      "name": "EmbeddingGemma 2 mmproj-BF16.gguf",
+      "file": "embeddinggemma-2/mmproj-BF16.gguf",
+      "url": "https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/mmproj-BF16.gguf",
+      "checksumManifest": "liblloyal/tests/fixtures/embedding-models.sha256",
+      "checksumFile": "mmproj-BF16.gguf",
+      "service": "embedding",
+      "role": "projector"
     }
   ]
 }

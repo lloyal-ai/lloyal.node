@@ -21,6 +21,7 @@ import * as v8 from 'node:v8';
 import * as vm from 'node:vm';
 import { loadBinary, createContext, Branch, BranchStore, Rerank } from '../dist/index.js';
 import type { SessionContext, NativeBinding, FormattedChatResult, Produced } from '../dist/index.js';
+import { visionModel } from './vision-fixtures';
 
 const SUITE = process.argv.find(arg => arg.startsWith('--suite='))?.split('=')[1] ?? 'all';
 if (!['all', 'text', 'image', 'branch'].includes(SUITE)) throw new Error(`Unknown suite: ${SUITE}`);
@@ -2113,6 +2114,52 @@ async function testDisposedDuringAsync(): Promise<void> {
   }
 }
 
+/** `target` with `key` read through a getter that disposes `ctx` before it answers `value`. */
+function disposingAt<T extends object>(ctx: SessionContext, target: T, key: PropertyKey, value: unknown): T {
+  return Object.defineProperty(target, key, { get() { void ctx.dispose(); return value; }, enumerable: true });
+}
+
+// A caller's getter can dispose the context while the binding reads its
+// arguments. The call began first, so it finishes on live native state, the
+// context is freed after it, and every later call is refused.
+async function testDisposedWhileArgumentsRead(): Promise<void> {
+  console.log('\n--- Disposed While Its Arguments Are Read ---');
+
+  const messages = JSON.stringify([{ role: 'user', content: 'Hello' }]);
+  type Native = Record<string, (...args: unknown[]) => unknown>;
+  const reads: Record<string, (ctx: SessionContext, native: Native, handle: number) => unknown> = {
+    'formatChat options': (ctx, native) => native.formatChat(messages, disposingAt(ctx, {}, 'enableThinking', false)),
+    'formatChatSync options': (ctx, native) => native.formatChatSync(messages, disposingAt(ctx, {}, 'enableThinking', false)),
+    '_scoreGroup token arrays': (ctx, native) => native._scoreGroup(disposingAt(ctx, [], 0, [1, 2])),
+    '_branchSetSamplerParams params': (ctx, native, handle) =>
+      native._branchSetSamplerParams(handle, disposingAt(ctx, {}, 'temperature', 0)),
+    '_branchSetLogitBias biases': (ctx, native, handle) =>
+      native._branchSetLogitBias(handle, [disposingAt(ctx, { bias: 1 }, 'token', 1)]),
+    '_branchSteer biases': (ctx, native, handle) =>
+      native._branchSteer(handle, [disposingAt(ctx, { bias: 1 }, 'token', 1)]),
+    '_branchSetGrammarLazy trigger patterns': (ctx, native, handle) =>
+      native._branchSetGrammarLazy(handle, 'root ::= "a"', disposingAt(ctx, [], 0, 'a'), []),
+    '_branchPrefill tokens': (ctx, native, handle) => native._branchPrefill(handle, disposingAt(ctx, [], 0, 1)),
+    '_storePrefill token arrays': (ctx, native, handle) => native._storePrefill([handle], [disposingAt(ctx, [], 0, 1)]),
+    '_storeCommit tokens': (ctx, native, handle) => native._storeCommit([handle], disposingAt(ctx, [], 0, 1)),
+  };
+
+  for (const [read, call] of Object.entries(reads)) {
+    const ctx: SessionContext = await addon.createContext({ modelPath: MODEL_PATH, nCtx: 512, nThreads: 4, nSeqMax: 2 });
+    const native = ctx as unknown as Native;
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    const order: string[] = [];
+    await Promise.all([
+      Promise.resolve(call(ctx, native, branch.handle)).then(() => order.push('call settled')),
+      Promise.resolve(ctx.dispose()).then(() => order.push('freed')),
+    ]);
+    let refusal = '';
+    try { native.formatChatSync(messages); } catch (e) { refusal = (e as Error).message; }
+    assert(order.join(' then ') === 'call settled then freed' && /disposed/.test(refusal),
+      `${read} whose getter disposes: ${order.join(' then ')}, later calls refused ("${refusal}")`);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ASYNC ITERATOR — Branch as async iterable
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2630,8 +2677,7 @@ async function testRerankConcurrent(): Promise<void> {
 //
 // Image tests use the production Qwen model and matching projector.
 function pickVlPair(): { model: string; mmproj: string; mrope: boolean; strict: boolean } | null {
-  const model = path.resolve(process.env.LLAMA_VL_MODEL ?? HYBRID_MODEL_PATH);
-  const mmproj = path.resolve(process.env.LLAMA_VL_MMPROJ ?? path.join(__dirname, '../models/mmproj-Qwen3.5-4B-F16.gguf'));
+  const { modelPath: model, mmprojPath: mmproj } = visionModel;
   if (!fs.existsSync(model) || !fs.existsSync(mmproj)) {
     if (SUITE === 'image') throw new Error('Image suite requires Qwen3.5-4B and its projector');
     return null;
@@ -3172,6 +3218,40 @@ async function testImageDecodeFailure(): Promise<void> {
   }
 }
 
+// A caller's getter can dispose the context while the binding reads a
+// prefill's arguments. The prefill began first, so it lands on live native
+// state and the context is freed after it.
+async function testMultimodalDisposedWhileRead(): Promise<void> {
+  const vl = pickVlPair();
+  if (!vl) {
+    console.log('  [SKIP] media disposed while read: no VL pair');
+    return;
+  }
+  console.log('\n--- Multimodal: disposed while its arguments are read ---');
+  const IMG: Buffer = fs.readFileSync(path.join(__dirname, 'fixtures/red-square-blue-circle.png'));
+  type Landed = Array<{ tokensDecoded: number; error?: string }>;
+  type Prefill = { _storePrefillMultimodal(handles: number[], seps: number[][], prompts: string[], inputs: unknown[][]): Promise<Landed> };
+  const prefill = (ctx: SessionContext) => (ctx as unknown as Prefill)._storePrefillMultimodal.bind(ctx);
+  const reads: Record<string, (ctx: SessionContext, handle: number) => Promise<Landed>> = {
+    'an input': (ctx, handle) =>
+      prefill(ctx)([handle], [[]], [MEDIA_MARKER], [[disposingAt(ctx, { bytes: IMG }, 'kind', 'image')]]),
+    'a prompt': (ctx, handle) => prefill(ctx)([handle], [[]], disposingAt(ctx, [], 0, MEDIA_MARKER), [[IMG]]),
+  };
+  for (const [read, call] of Object.entries(reads)) {
+    const ctx: SessionContext = await addon.createContext({
+      modelPath: vl.model, mmprojPath: vl.mmproj, nCtx: 2048, nBatch: 256, nSeqMax: 2, nThreads: 4,
+    } as never);
+    const branch = Branch.create(ctx, 0, { temperature: 0 });
+    const order: string[] = [];
+    const [[landed]] = await Promise.all([
+      call(ctx, branch.handle).then((result) => { order.push('prefill resolved'); return result; }),
+      Promise.resolve(ctx.dispose()).then(() => order.push('freed')),
+    ]);
+    assert(landed.error === undefined && landed.tokensDecoded > 0 && order.join(' then ') === 'prefill resolved then freed',
+      `_storePrefillMultimodal: ${read} whose getter disposes lands ${landed.tokensDecoded} cells, ${order.join(' then ')}`);
+  }
+}
+
 async function main(): Promise<void> {
   let mainCtx: SessionContext | null = null;
 
@@ -3179,6 +3259,7 @@ async function main(): Promise<void> {
     if (SUITE === 'image') {
       await testMultimodal();
       await testImageDecodeFailure();
+      await testMultimodalDisposedWhileRead();
     } else if (SUITE === 'branch') {
       // The branch-state cases on their own, so they also run on a hybrid
       // recurrent model (LLAMA_TEST_MODEL=Qwen3.5) apart from the rest of the text suite.
@@ -3224,6 +3305,7 @@ async function main(): Promise<void> {
       await testEmptyInputEdgeCases();
       await testJsonSchemaToGrammar();
       await testDisposedDuringAsync();
+      await testDisposedWhileArgumentsRead();
       await testAsyncIterator();
       await testSetSamplerParams();
       await testSetGrammar();
@@ -3231,6 +3313,7 @@ async function main(): Promise<void> {
       if (SUITE === 'all') await testMultimodal();
       await testDecodeFailure();
       if (SUITE === 'all') await testImageDecodeFailure();
+      if (SUITE === 'all') await testMultimodalDisposedWhileRead();
       await testRerank();
       await testRerankLargeCorpus();
       await testRerankConcurrent();

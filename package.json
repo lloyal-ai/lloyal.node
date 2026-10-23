@@ -20,14 +20,17 @@
     "version": "node scripts/sync-versions.js && git add -A",
     "docs": "npx typedoc",
     "test": "npm run test:integration",
-    "test:unit": "npx tsx test/backend-pack-unit.ts && npx tsx test/peers-unit.ts",
+    "test:unit": "npx tsx test/backend-pack-unit.ts && npx tsx test/peers-unit.ts && npx tsx test/prepare-unit.ts",
     "test:canary": "npx tsx test/stderr-canary.ts",
     "test:integration": "npx tsx test/integration.ts",
     "test:audio": "tsx --test test/audio-integration.ts",
+    "test:embedding": "tsx --test test/embedding-integration.ts",
+    "test:scenarios": "tsx --test test/scenario-integration.ts",
     "test:images": "tsx test/integration.ts --suite=image",
     "test:examples": "npx tsx test/examples.ts",
     "sync:llama-cpp": "node scripts/sync-llama-cpp.js",
-    "example": "npx tsx examples/chat/chat.ts"
+    "example": "npx tsx examples/chat/chat.ts",
+    "prepare": "node -e \"let bin; try { bin = require.resolve('lefthook') } catch { process.exit(0) } if (require('fs').existsSync('.git')) require('child_process').execFileSync(process.execPath, [bin, 'install'], { stdio: 'inherit' })\""
   },
   "repository": {
     "type": "git",
@@ -57,11 +60,13 @@
     "@lloyal-labs/sdk": ">=5.0.0-0 <6.0.0"
   },
   "devDependencies": {
+    "@lloyal-labs/hickey": "^0.2.1",
     "@lloyal-labs/sdk": "^5.0.0",
     "@types/node": "^25.3.0",
     "@types/semver": "^7.8.0",
     "cmake-js": "^8.0.0",
     "glob": "^11.0.0",
+    "lefthook": "^2.2.2",
     "semver": "^7.8.5",
     "tsx": "^4.21.0",
     "typedoc": "^0.28.16",

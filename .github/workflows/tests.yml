@@ -125,6 +125,15 @@ jobs:
         env:
           LLOYAL_LOCAL: '1'
 
+      - name: Embedding addon integration (EmbeddingGemma 2)
+        run: npm run test:embedding
+        # The clip and the infographic are each over a thousand cells; on a CPU runner each takes minutes to encode.
+        # macOS's runner is the slowest, so it checks the lean reference and Linux and Windows the whole of it.
+        timeout-minutes: 30
+        env:
+          LLOYAL_LOCAL: '1'
+          LLOYAL_EMBED_LEAN: ${{ runner.os == 'macOS' && '1' || '' }}
+
       - name: Image addon integration (Qwen3.5-4B)
         run: npm run test:images
         timeout-minutes: 45

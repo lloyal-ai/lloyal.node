@@ -251,7 +251,7 @@ Integration tests run real inference across architectures, so a template regress
 | Gemma 3      | gemma      |
 | GLM-Edge     | glm-edge   |
 
-Multimodal tests run Qwen3.5-4B with its projector for images and Qwen3-ASR-0.6B with its projector for audio, locally and on the GPU rig; `test/matrix.json` names the checksummed pairs. See [distribution.md](docs/distribution.md).
+Multimodal tests run Qwen3.5-4B with its projector for images and Qwen3-ASR-0.6B with its projector for audio, locally and on the GPU rig. Embedding tests run EmbeddingGemma 2 with its projector against vectors from llama.cpp. `test/matrix.json` names the checksummed pairs. See [distribution.md](docs/distribution.md).
 
 ## Ecosystem
 

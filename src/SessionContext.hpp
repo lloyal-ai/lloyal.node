@@ -71,6 +71,37 @@ public:
   ~SessionContext();
 
   /**
+   * A call's hold on this context while the call runs, and while its work runs
+   * on the native pool. Every call but dispose() holds one for its span (held),
+   * and every worker a context queues owns one for its whole life: it keeps the
+   * JS object from being collected, and the native state is freed only once
+   * the last hold is released. Taken and released on the JS thread.
+   */
+  class InFlight {
+  public:
+    explicit InFlight(SessionContext& owner);
+    ~InFlight();
+    InFlight(const InFlight&) = delete;
+    InFlight& operator=(const InFlight&) = delete;
+
+  private:
+    SessionContext& _owner;
+    Napi::ObjectReference _self;
+  };
+
+  /**
+   * `Method`, called under an InFlight hold. Reading a caller's object can run
+   * a getter that calls dispose(); the call began first, so the free waits for
+   * it and for any work it queues, as it waits for any other work in flight.
+   * Init registers every method but dispose() through this.
+   */
+  template <Napi::Value (SessionContext::*Method)(const Napi::CallbackInfo&)>
+  Napi::Value held(const Napi::CallbackInfo& info) {
+    InFlight hold(*this);
+    return (this->*Method)(info);
+  }
+
+  /**
    * Initialize context with model and llama_context
    * Called by CreateContext factory function after model loading completes
    * Pattern matches HybridSessionContext::initializeContext()
@@ -78,14 +109,14 @@ public:
   void initializeContext(
     std::shared_ptr<llama_model> model,
     llama_context* context,
-    int32_t nBatch = lloyal::defaults::N_BATCH_INIT
+    int32_t nBatch = lloyal::defaults::N_BATCH_INIT,
+    bool embeddings = false
   );
 
   /**
    * Attach the mtmd (multimodal) context loaded from an mmproj file.
    * Called by CreateContext when options.mmprojPath is set. Ownership
-   * transfers to this SessionContext (freed before the model in both
-   * the destructor and dispose()).
+   * transfers to this SessionContext (freed before the model, by freeNative()).
    */
   void initializeMultimodal(struct mtmd_context* mtmd);
 
@@ -165,7 +196,10 @@ private:
   // ===== LIFECYCLE =====
 
   /**
-   * Free native resources
+   * Refuse every later call, and free the native state (projector, context,
+   * model) once no call's work is still running on the native pool.
+   * Returns: Promise<void>, resolved when the native state is freed; every
+   * call returns the same Promise.
    */
   Napi::Value dispose(const Napi::CallbackInfo& info);
 
@@ -239,6 +273,20 @@ private:
    * Returns: Promise<void>
    */
   Napi::Value encode(const Napi::CallbackInfo& info);
+
+  /**
+   * Encode a multimodal input for embedding extraction: a prompt with media
+   * markers and its typed media, read with the model's own special tokens
+   * and placed whole by liblloyal's `embedding::encode`. Requires an
+   * embedding context with an mmproj. Read the vector with getEmbeddings().
+   * Args: (prompt: string,
+   *        inputs: (Buffer | {kind: 'image'|'audio', bytes}
+   *                 | {kind: 'video', frames, timestampsMs, timestampIntervalMs?, notes?})[],
+   *        audioLimits?: {maxBytes, maxSamples})
+   * Returns: Promise<void>; rejects when the input does not fit one dispatch,
+   *   with nothing run.
+   */
+  Napi::Value encodeMultimodal(const Napi::CallbackInfo& info);
 
   /**
    * Get embeddings from context (after encode)
@@ -335,11 +383,25 @@ private:
   std::shared_ptr<llama_model> _model;
   llama_context* _context = nullptr;
   /// mtmd multimodal context (owned; nullptr when no mmproj was loaded).
-  /// Freed BEFORE _model in ~SessionContext and dispose() — mtmd holds a
-  /// reference to the model.
+  /// Freed BEFORE _model in freeNative() — mtmd holds a reference to the model.
   struct mtmd_context* _mtmdContext = nullptr;
+  /// Set by dispose(): every later call is refused, and the native state is
+  /// freed once `_inFlight` reaches zero.
   bool _disposed = false;
+  /// Holds taken by calls still running and by workers whose native work has
+  /// not completed (InFlight).
+  size_t _inFlight = 0;
+  /// What dispose() returns, resolved by freeNative().
+  std::optional<Napi::Promise::Deferred> _freed;
+  Napi::Reference<Napi::Promise> _freedPromise;
+
+  /// Drain the branch store, then free the projector, the context and the
+  /// model, in that order. Idempotent; resolves dispose()'s Promise if any.
+  void freeNative();
   int32_t _nBatch = lloyal::defaults::N_BATCH_INIT;
+  /// Created with embeddings on: a multimodal input is then read with the
+  /// model's own special tokens, whether it is measured or encoded.
+  bool _embeddings = false;
 
   // ===== BRANCH STORE =====
   lloyal::branch::BranchStore _branchStore{16};  // capacity 16
