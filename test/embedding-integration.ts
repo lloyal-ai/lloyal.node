@@ -112,7 +112,12 @@ test('the vector is as wide as the model outputs', () => {
   assert.equal(ctx.getEmbeddingDimension(), reference.dimension);
 });
 
-test('every input the reference names embeds where llama.cpp puts it: text in every task framing and language, images at every budget, the clip, the recording and mixed inputs', async () => {
+test('every input the reference names embeds where llama.cpp puts it: text in every task framing and language, images at every budget, the clip, the recording and mixed inputs', async (t) => {
+  if (lean) {
+    assert.ok(checked.some(entry => entry.kind === 'image'), 'the lean reference still checks an image');
+    t.diagnostic(`lean: ${checked.length} of ${reference.entries.length} entries checked; left to the whole reference: `
+      + reference.entries.filter(entry => !checked.includes(entry)).map(entry => entry.name).join(', '));
+  }
   for (const entry of checked) assertMatches(await vectorOf(entry), entry);
 });
 
