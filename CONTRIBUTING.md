@@ -248,7 +248,7 @@ lloyal.node/
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feat/amazing-feature`)
 3. Make your changes and test thoroughly
-4. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Commit your changes (`git commit -m 'feat: add amazing feature'`). Each commit is judged by [hickey](https://www.npmjs.com/package/@lloyal-labs/hickey) before it exists, through the hooks `npm install` sets up; a change it refuses comes back with its findings, and the verdict rides in the commit's trailers.
 5. Push to your fork (`git push origin feat/amazing-feature`)
 6. Open a Pull Request
 

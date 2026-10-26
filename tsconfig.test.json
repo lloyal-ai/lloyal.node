@@ -10,7 +10,10 @@
     "noEmitOnError": false
   },
   "include": ["test/**/*.ts"],
-  // audio-integration.ts is typed by the SDK that declares audio, which ships from hdk after this
-  // addon. It runs under tsx (npm run test:audio) and rejoins this gate when that SDK is a devDependency.
-  "exclude": ["node_modules", "dist", "build", "test/audio-integration.ts"]
+  // audio-integration.ts and the embedding suites (their fixtures, the scenarios and the dispose child) are typed by the SDK that declares
+  // audio, video and encodeMultimodal, which ships from hdk after this addon. They run under tsx
+  // (npm run test:audio, npm run test:embedding, npm run test:scenarios) and rejoin this gate when that SDK is a devDependency.
+  "exclude": ["node_modules", "dist", "build", "test/audio-integration.ts", "test/embedding-integration.ts",
+              "test/embedding-fixtures.ts", "test/__dispose-in-flight-child.ts",
+              "test/scenario-integration.ts", "test/scenario-pack.ts"]
 }
