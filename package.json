@@ -1,6 +1,6 @@
 {
   "name": "@lloyal-labs/lloyal.node",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "The Node runtime for the HDK — built on liblloyal and llama.cpp",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -74,19 +74,19 @@
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@lloyal-labs/lloyal.node-darwin-arm64": "4.1.1",
-    "@lloyal-labs/lloyal.node-darwin-x64": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-cuda": "4.1.1",
-    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "4.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64": "4.1.1",
-    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "4.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64": "4.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-cuda": "4.1.1",
-    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "4.1.1"
+    "@lloyal-labs/lloyal.node-darwin-arm64": "4.2.0",
+    "@lloyal-labs/lloyal.node-darwin-x64": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-arm64": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-arm64-cuda": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-arm64-vulkan": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-x64": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-x64-cuda": "4.2.0",
+    "@lloyal-labs/lloyal.node-linux-x64-vulkan": "4.2.0",
+    "@lloyal-labs/lloyal.node-win32-arm64": "4.2.0",
+    "@lloyal-labs/lloyal.node-win32-arm64-vulkan": "4.2.0",
+    "@lloyal-labs/lloyal.node-win32-x64": "4.2.0",
+    "@lloyal-labs/lloyal.node-win32-x64-cuda": "4.2.0",
+    "@lloyal-labs/lloyal.node-win32-x64-vulkan": "4.2.0"
   },
   "engines": {
     "node": ">=24.0.0"
