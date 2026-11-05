@@ -118,7 +118,9 @@ await ctx._storeRetainOnly(winner);
 
 // KV, embeddings, grammar
 await ctx.kvSeqCopy(0, 1);
-const embeddings = await ctx.encode("query text");
+await ctx.encode(await ctx.tokenize("query text"));    // on a context created with embeddings: true
+await ctx.encodeMultimodal("<__media__>", [imageBytes]); // or text with images, audio or a video, given mmprojPath
+const vector = ctx.getEmbeddings();                     // Float32Array, L2-normalized
 const grammar = await ctx.jsonSchemaToGrammar(schema);
 ```
 
